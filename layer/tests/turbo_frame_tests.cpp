@@ -24,7 +24,9 @@
 
 #include "depthxr/openxr_layer.h"
 #include "depthxr/framegen_gpu.h"
+#include "depthxr/runtime_pacing.h"
 #include "depthxr/turbo_metrics.h"
+#include "depthxr/turbo_probe_guard.h"
 #include "depthxr/upstream_turbo.h"
 
 using namespace std::chrono_literals;
@@ -60,6 +62,9 @@ class TurboFrameTestPeer {
         OpenXrLayer& layer = Layer();
         layer.StopTurboAsyncWorker();
         layer.ResetTurboFrameState();
+        layer.turbo_probe_guard_.Configure({});
+        layer.turbo_fallback_early_ = false;
+        layer.turbo_reprobe_of_.reset();
 
         {
             std::scoped_lock lock(layer.mutex_);
@@ -544,7 +549,49 @@ class TurboFrameTestPeer {
         layer.turbo_timeout_window_start_.reset();
         layer.turbo_pacing_verdict_pending_ = false;
         layer.turbo_auto_suspended_.store(false, std::memory_order_relaxed);
+        // These policy tests count every stall: no engagement grace. The
+        // probe-grace tests restore the shipping limits.
+        TurboProbeGuard::Limits immediate;
+        immediate.grace = immediate.hitch_grace = immediate.max_grace = 0ms;
+        layer.turbo_probe_guard_.Configure(immediate);
     }
+
+    static void ProbeGuardDefaults() { Layer().turbo_probe_guard_.Configure({}); }
+    static void EngageProbe(std::chrono::steady_clock::time_point at) { Layer().turbo_probe_guard_.Engaged(at); }
+    static void ProbeAppFrame(std::chrono::steady_clock::time_point at, double app_frame_ms) {
+        Layer().turbo_probe_guard_.AppFrame(at, app_frame_ms);
+    }
+    static bool FallbackEarly() { return Layer().turbo_fallback_early_; }
+    static bool Reprobing() { return Layer().turbo_reprobe_of_.has_value(); }
+    static bool SourceIsProbing() {
+        return Layer().turbo_pacing_source_ == OpenXrLayer::TurboPacingSource::kProbing;
+    }
+    static bool SourceIsDiscovered() {
+        return Layer().turbo_pacing_source_ == OpenXrLayer::TurboPacingSource::kDiscovered;
+    }
+    static bool VerdictPending() { return Layer().turbo_pacing_verdict_pending_; }
+
+    // Auto resolution against the sidecar at VECTORXR_RUNTIME_PACING_PATH,
+    // keeping the runtime identity so verdicts are written for it.
+    static void ResolveAutoFor(const std::string& runtime, const std::string& system) {
+        auto& layer = Layer();
+        layer.turbo_experiment_.enabled = false;
+        layer.runtime_name_ = runtime;
+        layer.runtime_version_ = "test";
+        layer.system_name_ = system;
+        layer.system_vendor_id_ = 7;
+        layer.graphics_api_ = "D3D11";
+        layer.turbo_test_started_at_ = static_cast<std::uint64_t>(RuntimeRelayUnixMilliseconds());
+        layer.resolved_settings_.turbo.pacing_mode = TurboPacingSetting::kAuto;
+        layer.resolved_settings_.turbo.runtime_pins.clear();
+        layer.turbo_auto_suspended_.store(false, std::memory_order_relaxed);
+        layer.ResolveTurboPacingModeLocked();
+    }
+
+    // A minute of healthy frames in the current mode (the verdict window).
+    static void StableMinute() { Layer().NoteTurboPacingStableFrame(60000.0); }
+    static void FlushPacingWrites() { Layer().DrainRuntimePacingWrites(); }
+    static void ForgetRuntime() { Layer().runtime_name_.clear(); }
 
     static TurboPacingMode PacingMode() {
         return Layer().turbo_pacing_mode_;
@@ -1061,6 +1108,7 @@ class FakeRuntime {
                                  frame_end_info->type == XR_TYPE_FRAME_END_INFO;
         runtime.calls_.push_back(RuntimeCall::kEnd);
         if (frame_end_info) runtime.submitted_predictions_.push_back(frame_end_info->displayTime);
+        runtime.ended_in_predictions_.push_back(runtime.current_begun_);
         runtime.frame_thread_ = std::this_thread::get_id();
         ++runtime.end_entered_;
         runtime.cv_.notify_all();
@@ -1130,6 +1178,12 @@ class FakeRuntime {
     std::vector<XrTime> SubmittedPredictions() const {
         std::scoped_lock lock(mutex_);
         return submitted_predictions_;
+    }
+
+    // The prediction of the runtime frame open at each end (the frame it ends).
+    std::vector<XrTime> EndedInPredictions() const {
+        std::scoped_lock lock(mutex_);
+        return ended_in_predictions_;
     }
 
     std::vector<XrTime> LocatedPredictions() const {
@@ -1321,7 +1375,7 @@ class FakeRuntime {
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::vector<RuntimeCall> calls_;
-    std::vector<XrTime> native_predictions_, submitted_predictions_, located_predictions_;
+    std::vector<XrTime> native_predictions_, submitted_predictions_, located_predictions_, ended_in_predictions_;
     std::vector<std::pair<XrTime, XrDuration>> scripted_predictions_;
     std::thread::id frame_thread_;
     bool interlock_{false};
@@ -2059,6 +2113,136 @@ void TestAsyncTwoThreadFramesNeedNoRaise() {
                                           std::to_string(leads) + " runtime frames");
 }
 
+// Sequenced pacing, the async rule (0.20.1): the frame thread's wait+begin
+// after each app end opens the next runtime frame, so an app frame waited with
+// frames still unended ends that many frames after the cached prediction. DCS
+// on Pimax sequenced (Oct 29 S4 flight) had ~24% of its frames raised by a
+// whole period: the main thread waits ahead of the render thread.
+void TestSequencedAppFramesTargetTheirRuntimeFrame() {
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Sequenced target-frame establishment submit failed");
+    XrFrameState handshake{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&handshake) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Sequenced target-frame handshake failed");
+    end.displayTime = handshake.predictedDisplayTime;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Sequenced target-frame first steady submit failed");
+    std::deque<XrTime> waited;
+    const auto wait = [&] {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        Expect(AppWait(&state) == XR_SUCCESS && state.shouldRender, "Sequenced target-frame app wait failed");
+        waited.push_back(state.predictedDisplayTime);
+    };
+    // Ends the oldest waited frame; returns how far its time is past the
+    // prediction of the runtime frame it ended in.
+    const auto finish = [&] {
+        const XrTime time = waited.front();
+        waited.pop_front();
+        Expect(XR_SUCCEEDED(AppBegin()), "Sequenced target-frame app begin failed");
+        end.displayTime = time;
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+               "Sequenced target-frame submit failed");
+        Expect(runtime.SubmittedPredictions().back() == time && runtime.StaleRejections() == 0,
+               "A sequenced app frame's display time had to be raised to the runtime's floor");
+        return time - runtime.EndedInPredictions().back();
+    };
+
+    wait();
+    Expect(finish() == 0, "A frame waited after the previous one ended must target the next runtime frame");
+    for (int ahead = 1; ahead <= 2; ++ahead) {
+        for (int frame = 0; frame <= ahead; ++frame) wait();
+        for (int frame = 0; frame <= ahead; ++frame) {
+            const XrDuration miss = finish();
+            Expect(miss == 0, "A sequenced frame waited with " + std::to_string(ahead) +
+                                  " ahead missed its runtime frame by " + std::to_string(miss) + " ns");
+        }
+    }
+    // Steady state one ahead, as DCS mostly runs.
+    wait();
+    for (int frame = 0; frame < 4; ++frame) {
+        wait();
+        Expect(finish() == 0, "A sequenced frame waited one ahead must target the runtime frame it ends in");
+    }
+    Expect(finish() == 0, "The last sequenced frame one ahead must target the runtime frame it ends in");
+    Expect(runtime.MaxConcurrentWaits() == 1 && runtime.EndRejections() == 0 && runtime.ValidStructs(),
+           "Sequenced target-frame pacing broke runtime frame order");
+}
+
+// The DCS shape on real threads under sequenced pacing: a main thread waits up
+// to two frames ahead of a render thread that begins and ends them. No frame
+// may need a raise, lead the runtime frame it ends in, or fall short of it.
+void TestSequencedTwoThreadFramesNeedNoRaise() {
+    FakeRuntime runtime;
+    runtime.RejectStaleDisplayTimes();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    auto end = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Sequenced two-thread establishment submit failed");
+    XrFrameState handshake{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&handshake) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Sequenced two-thread handshake failed");
+    end.displayTime = handshake.predictedDisplayTime;
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+           "Sequenced two-thread first steady submit failed");
+    constexpr int kFrames = 150;
+    constexpr int kInFlight = 3; // waited and not yet ended, the newest included
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<XrTime> waited;
+    int in_flight = 0;
+    std::atomic<bool> wait_failed{false};
+    std::thread main_thread([&] {
+        for (int frame = 0; frame < kFrames; ++frame) {
+            {
+                std::unique_lock lock(mutex);
+                cv.wait(lock, [&] { return in_flight < kInFlight; });
+                ++in_flight;
+            }
+            XrFrameState state{XR_TYPE_FRAME_STATE};
+            if (AppWait(&state) != XR_SUCCESS || !state.shouldRender) wait_failed = true;
+            if (frame % 3 == 0) std::this_thread::sleep_for(1ms);
+            {
+                std::scoped_lock lock(mutex);
+                waited.push_back(state.predictedDisplayTime);
+            }
+            cv.notify_all();
+        }
+    });
+    int raises = 0, leads = 0, early = 0;
+    for (int frame = 0; frame < kFrames && !wait_failed; ++frame) {
+        XrTime time = 0;
+        {
+            std::unique_lock lock(mutex);
+            cv.wait(lock, [&] { return !waited.empty(); });
+            time = waited.front();
+            waited.pop_front();
+        }
+        Expect(XR_SUCCEEDED(AppBegin()), "Sequenced two-thread app begin failed");
+        if (frame % 2 == 0) std::this_thread::sleep_for(1ms);
+        end.displayTime = time;
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
+               "Sequenced two-thread submit failed");
+        if (runtime.SubmittedPredictions().back() != time) ++raises;
+        const XrTime ended_in = runtime.EndedInPredictions().back();
+        if (time > ended_in) ++leads;
+        if (time < ended_in) ++early;
+        {
+            std::scoped_lock lock(mutex);
+            --in_flight;
+        }
+        cv.notify_all();
+    }
+    main_thread.join();
+    Expect(!wait_failed && runtime.StaleRejections() == 0, "A sequenced two-thread app frame failed or was rejected");
+    Expect(raises == 0 && leads == 0 && early == 0,
+           "Sequenced two-thread frames needed " + std::to_string(raises) + " raises, led " + std::to_string(leads) +
+               " and fell short of " + std::to_string(early) + " runtime frames");
+    Expect(runtime.MaxConcurrentWaits() == 1 && runtime.EndRejections() == 0,
+           "Sequenced two-thread pacing duplicated a runtime wait or broke frame order");
+}
+
 // The detector on scripted times (no OS scheduling): OpenXR Toolkit's Turbo
 // above (a pool thread waits as each end returns, begin right before the
 // next end) with the misses a busy PC gives it, against games that are not
@@ -2163,7 +2347,19 @@ void TestUpstreamTurboDetectorWindow() {
 // letting its engaged pipeline go, through the scheduling delays of a busy
 // PC. A game that waits on a thread of its own and begins before rendering
 // (as DCS does) keeps Turbo.
+//
+// This runs on real threads and steady_clock, through the layer's own hooks;
+// how many frames the window needs is TestUpstreamTurboDetectorWindow's job,
+// on scripted times. Here a loaded machine (other builds) can make a pool
+// thread wake late for whole stretches, so the Toolkit shape gets as many
+// frames as it needs (up to kMaxFrames, several seconds) and must be seen and
+// stood aside from on the frame after; the game shape runs a long session and
+// must never be seen. Load only removes matches (a late wake, a preempted
+// begin), never adds them: the game's 3 ms render between begin and end can
+// never fit the 1 ms begin bound.
 void TestUpstreamToolkitTurboStandsAside() {
+    constexpr int kMaxFrames = 1200;
+    constexpr int kGameFrames = 300;
     for (const bool toolkit : {true, false}) {
         FakeRuntime runtime;
         TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
@@ -2173,17 +2369,44 @@ void TestUpstreamToolkitTurboStandsAside() {
                    depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
                "Upstream Turbo establishment did not publish its runtime wait");
         Expect(depthxr::TurboFrameTestPeer::TurboEffective(), "Turbo must be engaged before the pattern is seen");
-        int seen_at = 0;
-        for (int frame = 1; frame <= 120; ++frame) {
-            // The pool thread's wait, as the last end returned; every 15th
-            // starts late, as on a busy PC.
-            std::future<XrFrameState> waited = std::async(std::launch::async, [frame] {
+
+        // One long-lived pool thread, as the Toolkit's: woken as each end
+        // returns, it waits the next frame (every 15th starts 5 ms late, as on
+        // a busy PC, whatever the machine adds).
+        std::mutex pool_mutex;
+        std::condition_variable pool_cv;
+        int requested = 0, done = 0;
+        bool stop = false;
+        XrFrameState pool_state{XR_TYPE_FRAME_STATE};
+        std::thread pool([&] {
+            std::unique_lock lock(pool_mutex);
+            for (;;) {
+                pool_cv.wait(lock, [&] { return stop || requested > done; });
+                if (stop) return;
+                const int frame = done + 1;
+                lock.unlock();
                 if (frame % 15 == 0) std::this_thread::sleep_for(5ms);
                 XrFrameState state{XR_TYPE_FRAME_STATE};
                 Expect(AppWait(&state) == XR_SUCCESS, "Upstream Turbo app wait failed");
-                return state;
-            });
-            const XrFrameState state = waited.get();
+                lock.lock();
+                pool_state = state;
+                ++done;
+                pool_cv.notify_all();
+            }
+        });
+        const auto pool_wait = [&] {
+            std::unique_lock lock(pool_mutex);
+            ++requested;
+            pool_cv.notify_all();
+            pool_cv.wait(lock, [&] { return done == requested; });
+            return pool_state;
+        };
+
+        int seen_at = 0, frames = 0;
+        bool stood_aside_next = false;
+        const int limit = toolkit ? kMaxFrames : kGameFrames;
+        for (int frame = 1; frame <= limit; ++frame) {
+            const XrFrameState state = pool_wait();
             if (toolkit) {
                 std::this_thread::sleep_for(3ms); // the game renders, then the layer above begins and ends
                 Expect(XR_SUCCEEDED(AppBegin()), "Upstream Turbo app begin failed");
@@ -2194,17 +2417,38 @@ void TestUpstreamToolkitTurboStandsAside() {
             end.displayTime = state.predictedDisplayTime;
             Expect(XR_SUCCEEDED(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end)),
                    "Upstream Turbo submit failed (frame " + std::to_string(frame) + ")");
-            if (!seen_at && depthxr::TurboFrameTestPeer::UpstreamTurboSeen()) {
-                seen_at = frame;
+            frames = frame;
+            if (seen_at) {
+                // The frame after the one that saw it: Turbo has stood aside.
+                stood_aside_next = !depthxr::TurboFrameTestPeer::TurboEffective();
+                break;
             }
+            if (depthxr::TurboFrameTestPeer::UpstreamTurboSeen()) seen_at = frame;
         }
-        Expect(depthxr::TurboFrameTestPeer::TurboEffective() == !toolkit,
-               toolkit ? "Turbo must stand aside for OpenXR Toolkit's Turbo above it"
-                       : "Turbo must stay engaged for a game that begins before it renders");
+        {
+            std::scoped_lock lock(pool_mutex);
+            stop = true;
+            pool_cv.notify_all();
+        }
+        pool.join();
+
         if (toolkit) {
-            Expect(seen_at > 0 && seen_at <= 90, "Toolkit's Turbo was seen at frame " + std::to_string(seen_at));
+            std::cout << "Upstream Turbo: Toolkit's pattern seen at frame " << seen_at << " (window "
+                      << depthxr::UpstreamTurboDetector::kWindow << ")" << std::endl;
+            Expect(seen_at > 0, "Toolkit's Turbo was not seen in " + std::to_string(frames) + " frames");
+            // The establishment end above is the window's first frame.
+            Expect(seen_at + 1 >= static_cast<int>(depthxr::UpstreamTurboDetector::kWindow),
+                   "Toolkit's Turbo was seen at frame " + std::to_string(seen_at) +
+                       ", before a window could hold enough frames");
+            Expect(stood_aside_next && !depthxr::TurboFrameTestPeer::TurboEffective(),
+                   "Turbo must stand aside for OpenXR Toolkit's Turbo above it (seen at frame " +
+                       std::to_string(seen_at) + ")");
             Expect(!depthxr::TurboFrameTestPeer::Handoff().wait_valid,
                    "Standing aside must let the engaged async pipeline's worker wait go");
+        } else {
+            Expect(!seen_at && frames == kGameFrames && depthxr::TurboFrameTestPeer::TurboEffective(),
+                   "Turbo must stay engaged for a game that begins before it renders (seen at frame " +
+                       std::to_string(seen_at) + ")");
         }
         Expect(runtime.StaleRejections() == 0, "Standing aside must not submit a stale frame");
         depthxr::TurboFrameTestPeer::SetToolkitAbove(false);
@@ -2266,9 +2510,11 @@ void LocatePrediction(XrTime time) {
 // preserve exact wait -> locate -> submit identity across a scripted -30.
 // The script rejects the overlapping frame: it exercises recovery. In the field
 // that frame got the cache + 2 ns (T+2), older than SteamVR's previous frame
-// prediction, so SteamVR rejected it; an app wait overlapping the in-flight
-// runtime wait now gets the cache plus one period, and the completed-before-poll
-// control returns the fresh native timing.
+// prediction, so SteamVR rejected it. Since 0.20.1 each app wait gets the frame
+// it ends in: the queued frame (one unended ahead of it) the cache plus a
+// period, the overlapping one (one unended, the runtime wait in flight) two
+// periods, and against the completed-before-poll control's fresh native timing
+// one period.
 void TestSequencedPredictionOverlapReplay(bool native_completed_before_poll) {
     constexpr XrTime t = 18'956'319'169'600;
     constexpr XrTime next = 18'956'327'499'300;
@@ -2288,7 +2534,8 @@ void TestSequencedPredictionOverlapReplay(bool native_completed_before_poll) {
            "Prediction replay's handshake did not expose its native time");
     LocatePrediction(initial.predictedDisplayTime);
     XrFrameState ahead{XR_TYPE_FRAME_STATE};
-    Expect(AppWait(&ahead) == XR_SUCCESS && ahead.predictedDisplayTime == t + 1 && AppBegin() == XR_SUCCESS,
+    const XrTime queued = t + first_period;
+    Expect(AppWait(&ahead) == XR_SUCCESS && ahead.predictedDisplayTime == queued && AppBegin() == XR_SUCCESS,
            "Prediction replay did not expose the queued app prediction");
     LocatePrediction(ahead.predictedDisplayTime);
 
@@ -2311,7 +2558,7 @@ void TestSequencedPredictionOverlapReplay(bool native_completed_before_poll) {
     Expect(poll.wait_for(2s) == std::future_status::ready,
            "The sequenced interception shield blocked behind the native wait");
     const XrFrameState overlapping = poll.get();
-    const XrTime expected = native_completed_before_poll ? next : t + first_period;
+    const XrTime expected = native_completed_before_poll ? next + next_period : t + 2 * first_period;
     Expect(overlapping.predictedDisplayTime == expected &&
                overlapping.predictedDisplayPeriod == (native_completed_before_poll ? next_period : first_period) &&
                overlapping.shouldRender == XR_TRUE,
@@ -2335,7 +2582,7 @@ void TestSequencedPredictionOverlapReplay(bool native_completed_before_poll) {
     Expect(AppBegin() == XR_SUCCESS, "Queued replay frame did not begin");
     end.displayTime = ahead.predictedDisplayTime;
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end) == XR_SUCCESS,
-           "The accepted T+1 precision control was rejected");
+           "The accepted queued-frame control was rejected");
     Expect(AppBegin() == XR_SUCCESS, "Overlapping replay frame did not begin");
     runtime.SetEndResult(XR_ERROR_TIME_INVALID, true, 1);
     end.displayTime = overlapping.predictedDisplayTime;
@@ -2348,8 +2595,8 @@ void TestSequencedPredictionOverlapReplay(bool native_completed_before_poll) {
                log.find("nativeAtWait=" + std::to_string(native_completed_before_poll ? next : t)) !=
                    std::string::npos,
            "The first timestamp failure did not retain its original prediction provenance");
-    const std::vector<XrTime> located{t, t + 1, expected};
-    const std::vector<XrTime> submitted{20'000'000'000, t, t + 1, expected};
+    const std::vector<XrTime> located{t, queued, expected};
+    const std::vector<XrTime> submitted{20'000'000'000, t, queued, expected};
     Expect(runtime.LocatedPredictions() == located && runtime.SubmittedPredictions() == submitted,
            "The runtime received a substitute timestamp unrelated to the located app views, or a retry");
     Expect(runtime.NativePredictions() == std::vector<XrTime>{t, next, last} &&
@@ -3109,6 +3356,334 @@ void TestSequencedStallPolicySuspends() {
                depthxr::TurboFrameTestPeer::AutoSuspended(),
            "Sequenced pacing did not auto-suspend at its safety threshold");
     Expect(runtime.Calls().empty(), "A policy-only test unexpectedly issued runtime calls");
+}
+
+// The guard on scripted times: a grace after engaging, extended by game hitches
+// up to a cap, and "early" for the first ten seconds.
+void TestProbeGuardScriptedTimes() {
+    using depthxr::TurboProbeGuard;
+    const auto t0 = TurboProbeGuard::Clock::time_point{} + 1000s;
+    TurboProbeGuard guard;
+    Expect(!guard.InGrace(t0) && !guard.Early(t0) && !guard.SinceEngaged(t0),
+           "A guard that never engaged must count every stall");
+    guard.AppFrame(t0, 500.0);
+    Expect(!guard.InGrace(t0), "A hitch before engaging must not open a grace");
+    guard.Engaged(t0);
+    Expect(guard.InGrace(t0 + 250ms) && guard.InGrace(t0 + 1999ms) && !guard.InGrace(t0 + 2000ms),
+           "The engagement grace must last two seconds");
+    guard.AppFrame(t0 + 1500ms, 49.0);
+    Expect(!guard.InGrace(t0 + 2100ms), "A healthy frame must not extend the grace");
+    guard.AppFrame(t0 + 1800ms, 120.0);
+    Expect(guard.InGrace(t0 + 2700ms) && !guard.InGrace(t0 + 2800ms),
+           "A hitch must keep stalls uncounted for a second after it");
+    guard.AppFrame(t0 + 4500ms, 300.0);
+    Expect(guard.InGrace(t0 + 4999ms) && !guard.InGrace(t0 + 5000ms), "The grace must end five seconds in");
+    guard.AppFrame(t0 + 6s, 300.0);
+    Expect(!guard.InGrace(t0 + 6s + 1ms), "A hitch past the cap must not reopen the grace");
+    Expect(guard.Early(t0 + 9999ms) && !guard.Early(t0 + 10s), "A fallback is early for ten seconds");
+    guard.Engaged(t0 + 20s);
+    Expect(guard.InGrace(t0 + 21s) && guard.Early(t0 + 25s), "A re-engagement must start a new grace");
+    guard.Reset();
+    Expect(!guard.InGrace(t0 + 21s) && !guard.Early(t0 + 21s), "A reset guard must count every stall");
+}
+
+// S4 (DCS on Pimax, Oct 29): async engaged as the game left its loading screen
+// and the first two drains timed out within half a second, so Auto fell back
+// the moment it engaged. Those stalls are not counted now; stalls that persist
+// past the grace still fall back, and that fallback is early.
+void TestAutoProbeGraceIgnoresEngagementStalls() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kProbing);
+    Peer::ProbeGuardDefaults();
+    const auto t0 = std::chrono::steady_clock::now();
+    Peer::EngageProbe(t0);
+    Expect(!Peer::HandleTimeout(t0 + 251ms) && !Peer::HandleTimeout(t0 + 503ms) &&
+               Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "Two stalls in the first half second after engaging must not end the async probe");
+    Expect(!Peer::HandleTimeout(t0 + 1900ms) && Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "A third stall inside the grace must not end the async probe");
+    Expect(!Peer::HandleTimeout(t0 + 3s) && Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "The first counted stall must not end the probe on its own");
+    Expect(!Peer::HandleTimeout(t0 + 3250ms) && Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
+               !Peer::AutoSuspended() && Peer::FallbackEarly(),
+           "Two counted stalls after the grace must fall back to sequenced, as an early fallback");
+
+    // A game still hitching: stalls stay uncounted until a second after its
+    // last hitch, never past five seconds.
+    Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kProbing);
+    Peer::ProbeGuardDefaults();
+    const auto t1 = t0 + 60s;
+    Peer::EngageProbe(t1);
+    Peer::ProbeAppFrame(t1 + 1800ms, 140.0);
+    Peer::ProbeAppFrame(t1 + 2600ms, 90.0);
+    Expect(!Peer::HandleTimeout(t1 + 2500ms) && !Peer::HandleTimeout(t1 + 3500ms) &&
+               Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "Stalls while the game hitches must not count");
+    Expect(!Peer::HandleTimeout(t1 + 3700ms) && Peer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "The first stall after the hitch grace must count, not fall back on its own");
+    Expect(!Peer::HandleTimeout(t1 + 3800ms) && Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced,
+           "Two stalls after the hitch grace must fall back");
+
+    // Past the early window, a fallback is ordinary evidence.
+    Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kProbing);
+    Peer::ProbeGuardDefaults();
+    const auto t2 = t0 + 120s;
+    Peer::EngageProbe(t2);
+    Expect(!Peer::HandleTimeout(t2 + 20s) && !Peer::HandleTimeout(t2 + 20100ms) &&
+               Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && !Peer::FallbackEarly(),
+           "A fallback twenty seconds in must not count as early");
+
+    // Forced async keeps its plain safety threshold: no grace.
+    Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kForced);
+    Peer::ProbeGuardDefaults();
+    const auto t3 = t0 + 180s;
+    Peer::EngageProbe(t3);
+    for (int stall = 0; stall < 4; ++stall)
+        Expect(!Peer::HandleTimeout(t3 + std::chrono::milliseconds(100 * (stall + 1))),
+               "Forced async suspended before its five-stall threshold");
+    Expect(Peer::HandleTimeout(t3 + 500ms) && Peer::AutoSuspended(),
+           "Forced async stalls inside the probe grace must still suspend Turbo");
+    Expect(runtime.Calls().empty(), "A policy-only test unexpectedly issued runtime calls");
+}
+
+// The real frame loop on an interlocking runtime (every off-thread wait stalls
+// until the next submit) with the shipping grace: Auto still falls back to
+// sequenced, a few seconds after engaging instead of two frames.
+void TestInterlockedRuntimeAutoFallsBackAfterProbeGrace() {
+    FakeRuntime runtime;
+    runtime.InterlockOffThreadWaits();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    using Peer = depthxr::TurboFrameTestPeer;
+    Peer::SetPolicy(depthxr::TurboPacingMode::kAsync, Peer::Source::kProbing);
+    Peer::ProbeGuardDefaults();
+    const auto start = std::chrono::steady_clock::now();
+    const auto end_info = FrameEndInfo();
+    Expect(Peer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS && runtime.WaitForWaitEntered(1),
+           "Interlock grace test could not establish async pacing");
+    int frames = 0;
+    while (Peer::SequencedState() != Peer::ActiveState() && frames < 24) {
+        Expect(AppFrame(end_info) == XR_SUCCESS, "An interlocked async frame failed during the probe grace");
+        ++frames;
+    }
+    const double elapsed = ElapsedMs(start);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
+               Peer::SequencedState() == Peer::ActiveState() && !Peer::AutoSuspended(),
+           "Auto did not fall back from an interlocked runtime after the probe grace (frames=" +
+               std::to_string(frames) + ")");
+    Expect(elapsed >= 2000.0 && elapsed < 4500.0 && frames >= 6,
+           "The interlocked fallback took " + std::to_string(elapsed) + " ms over " + std::to_string(frames) +
+               " frames; the grace is two seconds");
+    Expect(Peer::FallbackEarly(), "A fallback seconds after engaging must be early");
+    ExpectHealthyFrames(runtime, 32, "Interlocked fallback after the grace");
+}
+
+struct ScopedPacingSidecar {
+    explicit ScopedPacingSidecar(const char* name) {
+        char previous_value[1024]{};
+        std::size_t size = 0;
+        had_previous = getenv_s(&size, previous_value, sizeof(previous_value), "VECTORXR_RUNTIME_PACING_PATH") == 0 &&
+                       size > 1;
+        if (had_previous) previous = previous_value;
+        path = std::filesystem::temp_directory_path() /
+               ("vectorxr-turbo-" + std::string(name) + "-" + std::to_string(GetCurrentProcessId())) /
+               "runtime-pacing.json";
+        std::error_code ec;
+        std::filesystem::remove_all(path.parent_path(), ec);
+        _putenv_s("VECTORXR_RUNTIME_PACING_PATH", path.string().c_str());
+    }
+    ~ScopedPacingSidecar() {
+        depthxr::TurboFrameTestPeer::FlushPacingWrites();
+        depthxr::TurboFrameTestPeer::ForgetRuntime();
+        _putenv_s("VECTORXR_RUNTIME_PACING_PATH", had_previous ? previous.c_str() : "");
+        std::error_code ec;
+        std::filesystem::remove_all(path.parent_path(), ec);
+    }
+    std::optional<depthxr::RuntimePacingObservation> Read() const {
+        depthxr::TurboFrameTestPeer::FlushPacingWrites();
+        const auto observations = depthxr::ReadRuntimePacingObservations(path);
+        if (observations.size() != 1) return std::nullopt;
+        return observations.front();
+    }
+    void Write(const depthxr::RuntimePacingObservation& observation) const {
+        depthxr::TurboFrameTestPeer::FlushPacingWrites();
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        std::string error;
+        Expect(depthxr::RecordRuntimePacingObservation(path, observation, &error), "Sidecar rewrite failed: " + error);
+    }
+    std::filesystem::path path;
+    std::string previous;
+    bool had_previous{false};
+};
+
+// An early fallback leaves a provisional sequenced verdict: the next session
+// probes async again. A second early failure in a row lets the verdict stand,
+// so a runtime that really interlocks is not probed every session.
+void TestEarlyProbeFailureVerdictIsProvisional() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    ScopedPacingSidecar sidecar("early-probe");
+    using Peer = depthxr::TurboFrameTestPeer;
+    const std::string kRuntime = "Probe Test Runtime";
+    const std::string kSystem = "probe-test headset";
+    const auto t0 = std::chrono::steady_clock::now();
+
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kAsync && Peer::SourceIsProbing() && !Peer::Reprobing(),
+           "A runtime without a verdict must probe async");
+    Peer::EngageProbe(t0);
+    Peer::HandleTimeout(t0 + 3s);
+    Peer::HandleTimeout(t0 + 3100ms);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && Peer::FallbackEarly() && Peer::VerdictPending(),
+           "The probe did not fall back early");
+    Expect(!sidecar.Read(), "An early fallback must not record anything before sequenced has run clean");
+    Peer::StableMinute();
+    auto recorded = sidecar.Read();
+    Expect(recorded && recorded->mode == depthxr::TurboPacingMode::kSequenced && recorded->early_probe_failures == 1 &&
+               recorded->source == "discovered" && recorded->stable_seconds >= 60,
+           "An early fallback must record a provisional sequenced verdict (earlyProbeFailures=1)");
+    Expect(depthxr::RuntimePacingReprobeReason(*recorded, VECTORXR_VERSION, "test",
+                                               static_cast<std::int64_t>(recorded->test_started_at)).has_value(),
+           "A provisional verdict must be due a re-probe");
+
+    // Next session: re-probe; it fails early again, which is recorded at once.
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kAsync && Peer::SourceIsProbing() && Peer::Reprobing(),
+           "A provisional sequenced verdict must be re-probed with async");
+    const auto t1 = t0 + 60s;
+    Peer::EngageProbe(t1);
+    Expect(!Peer::HandleTimeout(t1 + 300ms), "A re-probe stall in the grace must not count");
+    Peer::HandleTimeout(t1 + 2500ms);
+    Peer::HandleTimeout(t1 + 2600ms);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && Peer::SourceIsDiscovered() &&
+               !Peer::VerdictPending() && !Peer::Reprobing(),
+           "A failed re-probe must fall back to the recorded sequenced verdict at once");
+    recorded = sidecar.Read();
+    Expect(recorded && recorded->mode == depthxr::TurboPacingMode::kSequenced && recorded->early_probe_failures == 2 &&
+               recorded->stable_seconds >= 60 && recorded->layer_version == VECTORXR_VERSION,
+           "A second early failure must be recorded at once (earlyProbeFailures=2)");
+
+    // The third session uses the verdict: no probing loop.
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && Peer::SourceIsDiscovered() && !Peer::Reprobing(),
+           "Two early failures in a row must let the sequenced verdict stand");
+    Expect(runtime.Calls().empty(), "A policy-only test unexpectedly issued runtime calls");
+}
+
+// A sequenced verdict from another VectorXR version is re-probed once. A late
+// failure confirms it (recorded at once, so the next session does not probe);
+// an async that runs clean replaces it.
+void TestSequencedVerdictReprobe() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    ScopedPacingSidecar sidecar("reprobe");
+    using Peer = depthxr::TurboFrameTestPeer;
+    const std::string kRuntime = "Reprobe Test Runtime";
+    const std::string kSystem = "reprobe-test headset";
+    depthxr::RuntimePacingObservation old;
+    old.test_started_at = static_cast<std::uint64_t>(depthxr::RuntimeRelayUnixMilliseconds()) - 1000;
+    old.runtime_name = kRuntime;
+    old.runtime_version = "test";
+    old.system_name = kSystem;
+    old.vendor_id = 7;
+    old.graphics_api = "D3D11";
+    old.mode = depthxr::TurboPacingMode::kSequenced;
+    old.source = "discovered";
+    old.layer_version = "0.17.0";
+    old.last_used_unix_seconds = 1;
+    old.stable_seconds = 75;
+    sidecar.Write(old);
+
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kAsync && Peer::Reprobing(),
+           "A sequenced verdict from another version must be re-probed");
+    const auto t0 = std::chrono::steady_clock::now();
+    Peer::EngageProbe(t0);
+    Peer::HandleTimeout(t0 + 30s);
+    Peer::HandleTimeout(t0 + 30100ms);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && !Peer::FallbackEarly(),
+           "The late re-probe failure did not fall back");
+    auto recorded = sidecar.Read();
+    Expect(recorded && recorded->mode == depthxr::TurboPacingMode::kSequenced && recorded->early_probe_failures == 0 &&
+               recorded->layer_version == VECTORXR_VERSION && recorded->stable_seconds == 75 &&
+               recorded->test_started_at > old.test_started_at,
+           "A late re-probe failure must re-record the sequenced verdict for this version at once");
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kSequenced && !Peer::Reprobing(),
+           "A confirmed sequenced verdict must not be re-probed again");
+
+    // Old again, and this time async runs clean for its minute.
+    sidecar.Write(old);
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::Reprobing(), "The rewritten old verdict must be re-probed");
+    Peer::StableMinute();
+    recorded = sidecar.Read();
+    Expect(recorded && recorded->mode == depthxr::TurboPacingMode::kAsync && recorded->early_probe_failures == 0,
+           "A clean async re-probe must replace the sequenced verdict");
+    Peer::ResolveAutoFor(kRuntime, kSystem);
+    Expect(Peer::PacingMode() == depthxr::TurboPacingMode::kAsync && Peer::SourceIsDiscovered() && !Peer::Reprobing(),
+           "The async verdict from the re-probe must be used");
+    Expect(runtime.Calls().empty(), "A policy-only test unexpectedly issued runtime calls");
+}
+
+// The re-probe rule itself: only sequenced verdicts, each reason bounded.
+void TestRuntimePacingReprobeReasons() {
+    depthxr::RuntimePacingObservation verdict;
+    verdict.mode = depthxr::TurboPacingMode::kSequenced;
+    verdict.layer_version = "0.20.1";
+    verdict.runtime_version = "1.2";
+    constexpr std::int64_t now = 2'000'000'000'000;
+    verdict.test_started_at = static_cast<std::uint64_t>(now - 1000);
+    const auto reason = [&](const depthxr::RuntimePacingObservation& o, const std::string& layer = "0.20.1",
+                            const std::string& rt = "1.2", std::int64_t at = 2'000'000'000'000) {
+        return depthxr::RuntimePacingReprobeReason(o, layer, rt, at);
+    };
+    Expect(!reason(verdict), "A fresh sequenced verdict for this version and runtime must stand");
+    auto o = verdict;
+    o.early_probe_failures = 1;
+    Expect(reason(o).has_value(), "One early failure must be re-probed");
+    o.early_probe_failures = depthxr::kEarlyProbeFailureLimit;
+    Expect(!reason(o), "Early failures at the limit must let the verdict stand");
+    Expect(reason(verdict, "0.20.2").has_value(), "A verdict from another VectorXR version must be re-probed");
+    Expect(reason(verdict, "0.20.1", "1.3").has_value(), "A runtime update must re-probe");
+    Expect(!reason(verdict, "", "").has_value(), "Unknown versions are no reason to re-probe");
+    o = verdict;
+    o.layer_version.clear();
+    o.runtime_version.clear();
+    Expect(!reason(o), "A record without versions is no reason to re-probe");
+    Expect(reason(verdict, "0.20.1", "1.2", now + depthxr::kReprobeAgeMs).has_value(),
+           "A verdict older than 30 days must be re-probed");
+    Expect(!reason(verdict, "0.20.1", "1.2", now + depthxr::kReprobeAgeMs - 2000),
+           "A verdict younger than 30 days must stand");
+    o = verdict;
+    o.mode = depthxr::TurboPacingMode::kAsync;
+    o.early_probe_failures = 1;
+    Expect(!reason(o, "0.20.2", "1.3", now + 2 * depthxr::kReprobeAgeMs), "Async verdicts are never re-probed");
+
+    // The new field round-trips, and records from before it read as zero.
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("vectorxr-reprobe-reasons-" + std::to_string(GetCurrentProcessId())) / "runtime-pacing.json";
+    std::error_code ec;
+    std::filesystem::remove_all(path.parent_path(), ec);
+    o = verdict;
+    o.runtime_name = "Round Trip";
+    o.source = "discovered";
+    o.stable_seconds = 60;
+    o.early_probe_failures = 1;
+    std::string error;
+    Expect(depthxr::RecordRuntimePacingObservation(path, o, &error), "Round-trip write failed: " + error);
+    auto read = depthxr::ReadRuntimePacingObservations(path);
+    Expect(read.size() == 1 && read.front().early_probe_failures == 1, "earlyProbeFailures did not round-trip");
+    {
+        std::ofstream legacy(path, std::ios::trunc);
+        legacy << R"({"version":2,"observations":[{"testStartedAt":5,"runtimeName":"Legacy","mode":"sequenced",)"
+               << R"("source":"discovered","stableSeconds":60}]})";
+    }
+    read = depthxr::ReadRuntimePacingObservations(path);
+    Expect(read.size() == 1 && read.front().early_probe_failures == 0, "A legacy record must read zero early failures");
+    std::filesystem::remove_all(path.parent_path(), ec);
 }
 
 } // namespace
@@ -4901,6 +5476,8 @@ int main() {
     TestAsyncAppFramesTargetTheirRuntimeFrame();
     TestAsyncUnechoedAbandonedFramesDoNotLead();
     TestAsyncTwoThreadFramesNeedNoRaise();
+    TestSequencedAppFramesTargetTheirRuntimeFrame();
+    TestSequencedTwoThreadFramesNeedNoRaise();
     TestUpstreamTurboDetectorWindow();
     TestUpstreamToolkitTurboStandsAside();
     TestFrameGenOwnsFramePacing();
@@ -4930,6 +5507,12 @@ int main() {
     TestAutoSubmissionErrorsTryBothModes();
     TestAutoHasNoRuntimeMappings();
     TestSequencedStallPolicySuspends();
+    TestProbeGuardScriptedTimes();
+    TestAutoProbeGraceIgnoresEngagementStalls();
+    TestInterlockedRuntimeAutoFallsBackAfterProbeGrace();
+    TestEarlyProbeFailureVerdictIsProvisional();
+    TestSequencedVerdictReprobe();
+    TestRuntimePacingReprobeReasons();
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
     TestVarjoNativeSubmittedFocusCountsEveryFrame();
     TestVarjoDeferredReleasesKeepFrameGenUnblocked();

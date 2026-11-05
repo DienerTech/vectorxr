@@ -47,6 +47,7 @@
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
 #include "depthxr/turbo_prediction_history.h"
+#include "depthxr/turbo_probe_guard.h"
 #include "depthxr/upstream_turbo.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
@@ -630,7 +631,8 @@ class OpenXrLayer {
     // (and again after a config change); the verdict/stall helpers run on the
     // frame thread after the lock is released.
     void ResolveTurboPacingModeLocked();
-    void RecordTurboPacingVerdict(TurboPacingMode mode, const char* source, std::int64_t stable_seconds);
+    void RecordTurboPacingVerdict(TurboPacingMode mode, const char* source, std::int64_t stable_seconds,
+                                  std::int64_t early_probe_failures = 0);
     void QueueRuntimePacingWrite(RuntimePacingObservation observation);
     void DrainRuntimePacingWrites();
     void NoteTurboPacingStableFrame(double app_frame_delta_ms);
@@ -1654,7 +1656,18 @@ class OpenXrLayer {
     // runtime, or the in-session fallback after async tripped.
     enum class TurboPacingSource { kForced, kPinned, kDiscovered, kProbing, kFallback };
     std::uint64_t turbo_test_started_at_{0};
-    bool TryTurboAutoFallbackLocked(const std::string& reason);
+    bool TryTurboAutoFallbackLocked(const std::string& reason,
+                                    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+    // Auto's async probe (frame thread): stalls in its first seconds are not
+    // counted, and a fallback within seconds of engaging is "early"
+    // (TurboProbeGuard, runtime_pacing.h).
+    TurboProbeGuard turbo_probe_guard_;
+    int turbo_probe_grace_log_budget_{0};
+    // This session's sequenced fallback came from a probe that failed early.
+    bool turbo_fallback_early_{false};
+    // The recorded sequenced verdict a re-probe is testing again: its outcome
+    // is recorded at once if async falls back (sequenced is already proven).
+    std::optional<RuntimePacingObservation> turbo_reprobe_of_;
     // Frame-submission-thread only (resolved under the config lock at
     // EndFrame, consumed after it is released); the sequenced state machine
     // below is turbo_mutex_-guarded because WaitFrame/BeginFrame consult it.
@@ -2127,6 +2140,13 @@ class OpenXrLayer {
     XrTime eye_gaze_focused_last_time_{0};
     uint32_t eye_gaze_focused_identical_frames_{0};
     bool eye_gaze_focused_frozen_logged_{false};
+    // Diagnostic: the display time since which the focused gaze has stayed
+    // near (yaw, pitch); logged once per episode, a few times per session.
+    std::optional<XrTime> eye_gaze_still_since_;
+    double eye_gaze_still_yaw_{0.0};
+    double eye_gaze_still_pitch_{0.0};
+    bool eye_gaze_still_logged_{false};
+    int eye_gaze_still_logs_remaining_{8};
     uint32_t eye_gaze_unfocused_logs_remaining_{16};
     // Focused and inactive since (reset by valid gaze or focus loss); the
     // "no data" line is logged once per session.

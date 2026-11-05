@@ -701,6 +701,11 @@ export interface FrameGenSettings {
   // Present only when on; absent means off here and in the layer, so a
   // profile never inherits it from the defaults.
   extendHeadPrediction?: boolean
+  // Edge fill: frames Frame Generation writes reach a few degrees past the
+  // game's field of view, the margin repeating the frame's edge. Present only
+  // when on, like extendHeadPrediction; not in the app's pages until it has
+  // flown (set in settings.json), but kept when the app saves.
+  edgeFill?: boolean
 }
 
 export interface FrameGenProfileConfig {
@@ -772,6 +777,7 @@ export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSett
     // Absent means off, as in the layer: a profile does not inherit it from
     // the defaults (new profiles copy the defaults' value when created).
     ...(source.extendHeadPrediction === true ? { extendHeadPrediction: true } : {}),
+    ...(source.edgeFill === true ? { edgeFill: true } : {}),
   }
 }
 

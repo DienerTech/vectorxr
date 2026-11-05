@@ -141,7 +141,8 @@ std::string SerializeObservations(const std::vector<RuntimePacingObservation>& o
         stream << "      \"firstUsedUnixSeconds\": " << observation.first_used_unix_seconds << ",\n";
         stream << "      \"lastUsedUnixSeconds\": " << observation.last_used_unix_seconds << ",\n";
         stream << "      \"probeTimeouts\": " << observation.probe_timeouts << ",\n";
-        stream << "      \"stableSeconds\": " << observation.stable_seconds << "\n";
+        stream << "      \"stableSeconds\": " << observation.stable_seconds << ",\n";
+        stream << "      \"earlyProbeFailures\": " << observation.early_probe_failures << "\n";
         stream << "    }";
         if (i + 1 < observations.size()) {
             stream << ",";
@@ -240,6 +241,7 @@ std::vector<RuntimePacingObservation> ReadRuntimePacingObservations(const std::f
         observation.last_used_unix_seconds = ExtractInteger(object, "lastUsedUnixSeconds", 0);
         observation.probe_timeouts = ExtractInteger(object, "probeTimeouts", 0);
         observation.stable_seconds = ExtractInteger(object, "stableSeconds", 0);
+        observation.early_probe_failures = ExtractInteger(object, "earlyProbeFailures", 0);
         observations.push_back(std::move(observation));
     }
 
@@ -275,6 +277,28 @@ std::optional<RuntimePacingObservation> FindRuntimePacingObservation(const std::
         if (runtime_matches && (!fingerprint_requested || fingerprint_matches)) {
             return std::move(observation);
         }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> RuntimePacingReprobeReason(const RuntimePacingObservation& observation,
+                                                      const std::string& layer_version,
+                                                      const std::string& runtime_version,
+                                                      std::int64_t now_unix_ms) {
+    if (observation.mode != TurboPacingMode::kSequenced) return std::nullopt;
+    if (observation.early_probe_failures > 0 && observation.early_probe_failures < kEarlyProbeFailureLimit) {
+        return std::string("its async probe fell back within seconds of engaging");
+    }
+    if (!observation.layer_version.empty() && !layer_version.empty() && observation.layer_version != layer_version) {
+        return "it was recorded by VectorXR " + observation.layer_version;
+    }
+    if (!observation.runtime_version.empty() && !runtime_version.empty() &&
+        observation.runtime_version != runtime_version) {
+        return "it was last used with runtime version " + observation.runtime_version;
+    }
+    const auto tested = static_cast<std::int64_t>(observation.test_started_at);
+    if (tested > 0 && now_unix_ms - tested > kReprobeAgeMs) {
+        return std::string("it is more than 30 days old");
     }
     return std::nullopt;
 }

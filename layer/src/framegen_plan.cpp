@@ -4014,4 +4014,76 @@ std::filesystem::path WriteFrameGenEngineRemoved(const std::string& cause) {
     return path;
 }
 
+FrameGenEdgeMargins FrameGenEdgeFillMargins(const FrameGenFov& fov, FrameGenExtent extent, float horizontal_degrees,
+                                            float vertical_degrees) {
+    FrameGenEdgeMargins margins;
+    constexpr double kDegree = 3.14159265358979323846 / 180.0;
+    constexpr double kFarthest = 85.0 * kDegree;
+    if (!extent.width || !extent.height || !(fov.right > fov.left) || !(fov.up > fov.down) ||
+        !(fov.left > -kFarthest) || !(fov.right < kFarthest) || !(fov.down > -kFarthest) || !(fov.up < kFarthest)) {
+        return margins;
+    }
+    // Pixels a margin needs to reach `degrees` past an edge at `angle`
+    // (outward `sign`), at `spacing` tangent per pixel; within half the frame.
+    const auto margin = [&](double angle, double sign, double degrees, double spacing, std::uint32_t frame) {
+        if (!(degrees > 0.0)) return 0u;
+        const double reached = std::clamp(angle + sign * degrees * kDegree, -kFarthest, kFarthest);
+        const double pixels = std::ceil(std::abs(std::tan(reached) - std::tan(angle)) / spacing - 1e-6);
+        return static_cast<std::uint32_t>(std::clamp(pixels, 0.0, static_cast<double>(frame / 2)));
+    };
+    const double h_spacing = (std::tan(double(fov.right)) - std::tan(double(fov.left))) / extent.width;
+    const double v_spacing = (std::tan(double(fov.up)) - std::tan(double(fov.down))) / extent.height;
+    margins.left = margin(fov.left, -1.0, horizontal_degrees, h_spacing, extent.width);
+    margins.right = margin(fov.right, 1.0, horizontal_degrees, h_spacing, extent.width);
+    margins.up = margin(fov.up, 1.0, vertical_degrees, v_spacing, extent.height);
+    margins.down = margin(fov.down, -1.0, vertical_degrees, v_spacing, extent.height);
+    // The image fits the largest texture: both margins shrink alike.
+    const auto fit = [](std::uint32_t frame, std::uint32_t& a, std::uint32_t& b) {
+        if (frame >= kFrameGenEdgeFillMaxExtent) {
+            a = b = 0;
+            return;
+        }
+        const std::uint64_t room = kFrameGenEdgeFillMaxExtent - frame;
+        if (std::uint64_t{a} + b > room) {
+            const double scale = static_cast<double>(room) / (static_cast<double>(a) + b);
+            a = static_cast<std::uint32_t>(std::floor(a * scale));
+            b = static_cast<std::uint32_t>(std::floor(b * scale));
+        }
+    };
+    fit(extent.width, margins.left, margins.right);
+    fit(extent.height, margins.up, margins.down);
+    return margins;
+}
+
+FrameGenFov FrameGenEdgeFillFov(const FrameGenFov& fov, FrameGenExtent extent, const FrameGenEdgeMargins& margins) {
+    if (!margins.Any() || !extent.width || !extent.height) {
+        return fov;
+    }
+    const double left = std::tan(double(fov.left)), right = std::tan(double(fov.right));
+    const double up = std::tan(double(fov.up)), down = std::tan(double(fov.down));
+    const double h_spacing = (right - left) / extent.width;
+    const double v_spacing = (up - down) / extent.height;
+    FrameGenFov widened = fov;
+    if (margins.left) widened.left = static_cast<float>(std::atan(left - margins.left * h_spacing));
+    if (margins.right) widened.right = static_cast<float>(std::atan(right + margins.right * h_spacing));
+    if (margins.up) widened.up = static_cast<float>(std::atan(up + margins.up * v_spacing));
+    if (margins.down) widened.down = static_cast<float>(std::atan(down - margins.down * v_spacing));
+    return widened;
+}
+
+std::optional<std::array<float, 2>> ParseFrameGenEdgeFillDegrees(const std::string& value) {
+    float h = 0.0f, v = 0.0f;
+    char extra = 0;
+    const int read = std::sscanf(value.c_str(), "%f,%f%c", &h, &v, &extra);
+    if (read == 1) {
+        v = h;
+    } else if (read != 2) {
+        return std::nullopt;
+    }
+    if (!(h >= 0.0f && h <= 15.0f) || !(v >= 0.0f && v <= 15.0f)) {
+        return std::nullopt;
+    }
+    return std::array<float, 2>{h, v};
+}
+
 } // namespace depthxr

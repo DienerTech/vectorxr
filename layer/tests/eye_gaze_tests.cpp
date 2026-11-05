@@ -755,6 +755,29 @@ int main() {
         gaze_turn = 0.051f;
         Expect(Peer::GazeAt(3'000'000'000), "a gaze that moves again must be used");
 
+        // Diagnostic only (Oct 29 M3, headset off): before it froze bit for bit
+        // the gaze wobbled by about 0.002 rad for ~26 s, which the count above
+        // never sees. Ten seconds of a valid gaze within 0.003 rad of one point
+        // are logged once; the gaze is still used. A gaze that moves is not.
+        Peer::Prepare(); Peer::Resources(); AttachApp(); FocusEvent(XR_SESSION_STATE_FOCUSED);
+        sync_result = XR_SUCCESS; runtime_gaze_active = true;
+        const std::size_t still_before = Occurrences(Peer::Log(), "the gaze has stayed within");
+        for (XrTime frame = 0; frame <= 920; ++frame) {
+            gaze_turn = 0.2f + 0.001f * static_cast<float>(frame % 3 - 1);
+            Expect(Peer::GazeAt(5'000'000'000 + frame * 11'111'111), "a still but changing gaze must still be used");
+        }
+        Expect(Occurrences(Peer::Log(), "the gaze has stayed within") == still_before + 1,
+               "ten seconds of a near-still valid gaze must be logged once");
+        Peer::Prepare(); Peer::Resources(); AttachApp(); FocusEvent(XR_SESSION_STATE_FOCUSED);
+        sync_result = XR_SUCCESS; runtime_gaze_active = true;
+        for (XrTime frame = 0; frame <= 1800; ++frame) {
+            // Fixations of about a second, 0.01 rad apart, with sub-mrad jitter.
+            gaze_turn = 0.2f + 0.01f * static_cast<float>((frame / 90) % 2) + 0.0005f * static_cast<float>(frame % 2);
+            Expect(Peer::GazeAt(20'000'000'000 + frame * 11'111'111), "a live gaze must be used");
+        }
+        Expect(Occurrences(Peer::Log(), "the gaze has stayed within") == still_before + 1,
+               "a gaze that moves must not be logged as still");
+
         // PimaxXR's native quad views (enable_quad_views): its combined-eye
         // space never locates with flags (ORIENTATION_TRACKED alone is not a
         // valid pose), so it says nothing about gaze. Eye tracking must ask

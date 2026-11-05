@@ -1702,6 +1702,15 @@ constexpr uint32_t kEyeGazeUnfocusedFrozenFrames = 45;
 // ready). Far past any fixation: live gaze never repeats bit for bit. ~2 s
 // at 90 Hz.
 constexpr uint32_t kEyeGazeFocusedFrozenFrames = 180;
+// Diagnostic only: a focused, valid gaze that stays this close to one point
+// (either angle) for this long. The Oct 29 M3 flight (headset taken off) showed
+// ~26 s of such a gaze, wobbling by about 0.002 rad, before it froze bit for
+// bit, and even then it moved by under 0.001 rad now and then, which resets the
+// bit-for-bit count. Whether live gaze ever stays this still is what the line
+// is for: it changes nothing.
+constexpr double kEyeGazeStillRadians = 0.003;
+constexpr XrDuration kEyeGazeStillWindow = 10'000'000'000;
+constexpr int kEyeGazeStillLogBudget = 8;
 // How long a focused session's bound eye-gaze input may stay inactive before
 // the log says the eye tracker is sending no data.
 constexpr std::chrono::seconds kEyeGazeNoDataLogDelay{10};
@@ -1873,6 +1882,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.framegen.artifact_suppression == rhs.framegen.artifact_suppression &&
            lhs.framegen.motion_limit_percent == rhs.framegen.motion_limit_percent &&
            lhs.framegen.extend_head_prediction == rhs.framegen.extend_head_prediction &&
+           lhs.framegen.edge_fill == rhs.framegen.edge_fill &&
            lhs.framegen.diagnostic_view == rhs.framegen.diagnostic_view &&
            SameInputBindings(lhs.framegen.toggle_bindings, rhs.framegen.toggle_bindings);
 }
@@ -7110,14 +7120,19 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
                     const auto steps = static_cast<XrDuration>(unended) + (turbo_async_wait_completed_ ? 0 : 1);
                     predicted += steps * turbo_prediction_history_.FrameStep(turbo_last_predicted_display_period_);
                     extrapolated = steps > 0;
-                } else if (turbo_pacing_mode_ == TurboPacingMode::kSequenced && turbo_seq_wait_in_flight_ &&
+                } else if (turbo_pacing_mode_ == TurboPacingMode::kSequenced &&
                            turbo_last_predicted_display_period_ > 0) {
-                    // This app wait overlaps the post-submit runtime wait, so its
-                    // frame ends a runtime frame after that wait's: hand it the
-                    // prediction that wait is about to return, not the cached
-                    // one a frame older (SteamVR rejects a time older than the
-                    // previous frame's prediction).
-                    predicted += turbo_last_predicted_display_period_;
+                    // The async rule on the frame thread: each app end is
+                    // followed by the wait+begin of the next runtime frame,
+                    // so a frame waited with app frames still unended ends
+                    // that many runtime frames after the cached one, and one
+                    // more while the post-submit wait is still to return (the
+                    // SteamVR fault: a frame older than the previous frame's
+                    // prediction is rejected). DCS waits on its main thread
+                    // up to two frames ahead of the render thread.
+                    const auto unended = std::min<std::uint64_t>(turbo_prediction_history_.Unended(), 2);
+                    const auto steps = static_cast<XrDuration>(unended) + (turbo_seq_wait_in_flight_ ? 1 : 0);
+                    predicted += steps * turbo_prediction_history_.FrameStep(turbo_last_predicted_display_period_);
                 }
                 turbo_last_wait_frame_wall_time_ = now;
 
@@ -7522,6 +7537,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     // ahead while SteamVR is not presenting; when visibility returns, the
     // runtime rejects every submit with XR_ERROR_TIME_INVALID.
     const bool renderable_frame = runtime_should_render && submitting_layers;
+    if (renderable_frame) {
+        turbo_probe_guard_.AppFrame(std::chrono::steady_clock::now(), app_frame_delta_ms);
+    }
     if (renderable_frame && app_frame_delta_ms >= 0.0 && app_frame_delta_ms < kHealthyFrameMs) {
         ++turbo_cadence_healthy_streak_;
     } else {
@@ -7601,6 +7619,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     }
     turbo_effective_async_.store(turbo_pacing_mode_ == TurboPacingMode::kAsync);
     const bool was_effective = turbo_effective_active_.exchange(turbo_engaged);
+    if (turbo_engaged && !was_effective && turbo_pacing_mode_ == TurboPacingMode::kAsync) {
+        turbo_probe_guard_.Engaged(std::chrono::steady_clock::now());
+    }
     if (turbo_engaged && !was_effective) {
         SoundPlayer::Instance().PlayTransition(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings).sound, true,
             dll_directory_, resolved_settings_.core.sound_volume, L"turbo-on.wav", L"turbo-off.wav");
@@ -7936,6 +7957,16 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     if (!app_end_noted) {
         std::scoped_lock lock(turbo_mutex_);
         turbo_prediction_history_.AppEnd(submitted_display_time);
+        // Sequenced: this end is followed by the frame-thread wait for the
+        // next runtime frame. From here an app wait targets the frame that
+        // wait returns, so it counts as in flight from the end on, not only
+        // once the runtime wait starts (an app wait during the submit was
+        // handed the cached prediction, a frame early).
+        if (turbo_pacing_mode_ == TurboPacingMode::kSequenced &&
+            turbo_seq_state_ == TurboSequencedState::kActive && !turbo_async_wait_.valid() &&
+            !turbo_begin_owed_) {
+            turbo_seq_wait_in_flight_ = true;
+        }
     }
     const auto pacing_after_drain = std::chrono::steady_clock::now();
     const bool diag_end = TurboSequencedDebugTick();
@@ -8188,6 +8219,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     } else {
         std::scoped_lock lock(turbo_mutex_);
         CancelTurboAsyncHandoffLocked("runtime xrEndFrame failed");
+        // No frame-thread wait follows a failed submit.
+        turbo_seq_wait_in_flight_ = false;
         if (turbo_auto_suspended_.load()) {
             turbo_valve_open_ = false;
             turbo_valve_cv_.notify_all();
@@ -8494,6 +8527,9 @@ void OpenXrLayer::ResolveTurboPacingModeLocked() {
     turbo_stable_accumulated_ms_ = 0.0;
     turbo_drain_timeout_count_ = 0;
     turbo_timeout_window_start_.reset();
+    turbo_fallback_early_ = false;
+    turbo_reprobe_of_.reset();
+    turbo_probe_grace_log_budget_ = 3;
 
     const TurboPacingSetting setting = turbo_experiment_.enabled ? TurboPacingSetting::kAsync
                                                                : resolved_settings_.turbo.pacing_mode;
@@ -8516,11 +8552,16 @@ void OpenXrLayer::ResolveTurboPacingModeLocked() {
         }
     }
 
-    if (const auto observation = FindRuntimePacingObservation(ResolveRuntimePacingPath(),
-                                                              runtime_name_,
-                                                              system_name_,
-                                                              system_vendor_id_,
-                                                              graphics_api_)) {
+    const auto observation = FindRuntimePacingObservation(ResolveRuntimePacingPath(),
+                                                          runtime_name_,
+                                                          system_name_,
+                                                          system_vendor_id_,
+                                                          graphics_api_);
+    const std::optional<std::string> reprobe_reason =
+        observation ? RuntimePacingReprobeReason(*observation, VECTORXR_VERSION, runtime_version_,
+                                                 static_cast<std::int64_t>(RuntimeRelayUnixMilliseconds()))
+                    : std::nullopt;
+    if (observation && !reprobe_reason) {
         turbo_pacing_mode_ = observation->mode;
         turbo_pacing_source_ = TurboPacingSource::kDiscovered;
         logger_.Info(std::string("Turbo pacing: ") + ToString(turbo_pacing_mode_) +
@@ -8542,13 +8583,22 @@ void OpenXrLayer::ResolveTurboPacingModeLocked() {
     turbo_pacing_mode_ = TurboPacingMode::kAsync;
     turbo_pacing_source_ = TurboPacingSource::kProbing;
     turbo_pacing_verdict_pending_ = true;
+    if (reprobe_reason) {
+        turbo_reprobe_of_ = *observation;
+        logger_.Info("Turbo pacing: re-probing async for runtime \"" + runtime_name_ +
+                     "\": its recorded sequenced verdict is due a retest (" + *reprobe_reason +
+                     "; earlyProbeFailures=" + std::to_string(observation->early_probe_failures) +
+                     "). Falls back to sequenced on stalls or submission errors, and records the outcome.");
+        return;
+    }
     logger_.Info("Turbo pacing: no tested decision for runtime \"" + runtime_name_ +
                  "\"; probing async pacing first (falls back to sequenced on stalls or submission errors).");
 }
 
 void OpenXrLayer::RecordTurboPacingVerdict(TurboPacingMode mode,
                                            const char* source,
-                                           std::int64_t stable_seconds) {
+                                           std::int64_t stable_seconds,
+                                           std::int64_t early_probe_failures) {
     if (runtime_name_.empty() || turbo_experiment_.enabled) {
         return;
     }
@@ -8570,10 +8620,16 @@ void OpenXrLayer::RecordTurboPacingVerdict(TurboPacingMode mode,
             .count();
     observation.probe_timeouts = turbo_probe_timeout_total_;
     observation.stable_seconds = stable_seconds;
+    observation.early_probe_failures = early_probe_failures;
 
     QueueRuntimePacingWrite(std::move(observation));
     logger_.Info(std::string("Turbo pacing: queued ") + ToString(mode) +
-                 " verdict for runtime \"" + runtime_name_ + "\" (" + source + ").");
+                 " verdict for runtime \"" + runtime_name_ + "\" (" + source +
+                 ", earlyProbeFailures=" + std::to_string(early_probe_failures) +
+                 (mode == TurboPacingMode::kSequenced && early_probe_failures > 0 &&
+                          early_probe_failures < kEarlyProbeFailureLimit
+                      ? "; provisional: the next session probes async again)."
+                      : ")."));
 }
 
 void OpenXrLayer::QueueRuntimePacingWrite(RuntimePacingObservation observation) {
@@ -8629,15 +8685,52 @@ void OpenXrLayer::NoteTurboPacingStableFrame(double app_frame_delta_ms) {
         turbo_pacing_source_ == TurboPacingSource::kFallback) {
         turbo_pacing_source_ = TurboPacingSource::kDiscovered;
     }
+    const std::int64_t early_failures =
+        turbo_pacing_mode_ == TurboPacingMode::kSequenced && turbo_fallback_early_
+            ? (turbo_reprobe_of_ ? turbo_reprobe_of_->early_probe_failures : 0) + 1
+            : 0;
     RecordTurboPacingVerdict(turbo_pacing_mode_, source,
-                             static_cast<std::int64_t>(turbo_stable_accumulated_ms_ / 1000.0));
+                             static_cast<std::int64_t>(turbo_stable_accumulated_ms_ / 1000.0), early_failures);
 }
 
-bool OpenXrLayer::TryTurboAutoFallbackLocked(const std::string& reason) {
+bool OpenXrLayer::TryTurboAutoFallbackLocked(const std::string& reason,
+                                             std::chrono::steady_clock::time_point now) {
     if (turbo_pacing_mode_ != TurboPacingMode::kAsync ||
         turbo_pacing_source_ == TurboPacingSource::kForced || turbo_pacing_source_ == TurboPacingSource::kPinned) return false;
     turbo_recovery_.Fail(reason + " Auto is trying sequenced pacing next.");
     if (!turbo_recovery_.Prepare(resolved_settings_.turbo.interrupted_session_recovery, true, "sequenced")) return false;
+    const bool probing = turbo_pacing_source_ == TurboPacingSource::kProbing;
+    turbo_fallback_early_ = probing && turbo_probe_guard_.Early(now);
+    const auto since_engaged = turbo_probe_guard_.SinceEngaged(now);
+    const std::string after = since_engaged
+        ? std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(*since_engaged).count()) + "ms"
+        : std::string("an unknown time");
+    if (probing && turbo_reprobe_of_) {
+        // Sequenced is this runtime's proven verdict already: record the
+        // re-probe's outcome now, so a session cut short cannot re-probe
+        // again next time for the same reason.
+        const std::int64_t early_failures =
+            turbo_fallback_early_ ? turbo_reprobe_of_->early_probe_failures + 1 : 0;
+        logger_.Info("Turbo Auto: the async re-probe fell back " + after +
+                     " after engaging; keeping the recorded sequenced verdict.");
+        turbo_pacing_mode_ = TurboPacingMode::kSequenced;
+        RecordTurboPacingVerdict(TurboPacingMode::kSequenced, "discovered",
+                                 std::max<std::int64_t>(turbo_reprobe_of_->stable_seconds, 60), early_failures);
+        turbo_reprobe_of_.reset();
+        turbo_pacing_source_ = TurboPacingSource::kDiscovered;
+        turbo_pacing_verdict_pending_ = false;
+        turbo_stable_accumulated_ms_ = 0.0;
+        turbo_runtime_error_streak_.store(0);
+        turbo_drain_timeout_count_ = 0;
+        turbo_timeout_window_start_.reset();
+        logger_.Info("Turbo Auto: async failed; trying sequenced. reason=" + reason);
+        return true;
+    }
+    if (turbo_fallback_early_) {
+        logger_.Info("Turbo Auto: the async probe fell back " + after +
+                     " after engaging (early); the sequenced verdict it leads to is provisional, and the next "
+                     "session probes async again.");
+    }
     turbo_pacing_mode_ = TurboPacingMode::kSequenced;
     turbo_pacing_source_ = TurboPacingSource::kFallback;
     turbo_pacing_verdict_pending_ = true;
@@ -8843,6 +8936,24 @@ bool OpenXrLayer::HandleTurboDrainTimeout(std::chrono::steady_clock::time_point 
     turbo_stable_accumulated_ms_ = 0.0;
     ++turbo_probe_timeout_total_;
 
+    // Auto's async pacing right after it engages, or while the game still
+    // hitches: such a stall is not evidence against async (TurboProbeGuard).
+    // Forced and pinned modes keep their plain safety thresholds.
+    if (turbo_pacing_mode_ == TurboPacingMode::kAsync && turbo_pacing_source_ != TurboPacingSource::kForced &&
+        turbo_pacing_source_ != TurboPacingSource::kPinned && turbo_probe_guard_.InGrace(now)) {
+        turbo_trace_.Record("probe.grace", 0, turbo_probe_timeout_total_);
+        if (turbo_probe_grace_log_budget_ > 0) {
+            --turbo_probe_grace_log_budget_;
+            const auto since_engaged = turbo_probe_guard_.SinceEngaged(now);
+            const auto ms = since_engaged
+                ? std::chrono::duration_cast<std::chrono::milliseconds>(*since_engaged).count()
+                : 0;
+            logger_.Info("Turbo Auto: not counting an async xrWaitFrame stall " + std::to_string(ms) +
+                         "ms after async pacing engaged (grace while the game's pacing settles).");
+        }
+        return false;
+    }
+
     // Rolling-window count: stalled frames interleave with clean ones on
     // these runtimes, so a consecutive-streak check never fires.
     constexpr std::chrono::seconds kTimeoutWindow{30};
@@ -8866,7 +8977,7 @@ bool OpenXrLayer::HandleTurboDrainTimeout(std::chrono::steady_clock::time_point 
             return false;
         }
         std::scoped_lock lock(mutex_);
-        if (TryTurboAutoFallbackLocked("Repeated xrWaitFrame stalls in async pacing.")) return false;
+        if (TryTurboAutoFallbackLocked("Repeated xrWaitFrame stalls in async pacing.", now)) return false;
     }
 
     // Level 2 (sequenced pacing still stalling), or a forced/pinned mode the
@@ -9601,6 +9712,7 @@ void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     turbo_fabricated_wait_log_budget_ = 0;
     turbo_drain_timeout_count_ = 0;
     turbo_timeout_window_start_.reset();
+    turbo_probe_guard_.Reset();
     turbo_auto_suspended_.store(false, std::memory_order_relaxed);
     turbo_seq_state_ = TurboSequencedState::kInactive;
     turbo_begin_owed_ = false;
@@ -13137,6 +13249,9 @@ void OpenXrLayer::ResetEyeGazeInputState() {
     eye_gaze_focused_last_time_ = 0;
     eye_gaze_focused_identical_frames_ = 0;
     eye_gaze_focused_frozen_logged_ = false;
+    eye_gaze_still_since_.reset();
+    eye_gaze_still_logged_ = false;
+    eye_gaze_still_logs_remaining_ = kEyeGazeStillLogBudget;
     eye_gaze_inactive_since_.reset();
     eye_gaze_no_data_logged_ = false;
 }
@@ -13653,6 +13768,33 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     const double euler_pitch = ExtractPitchRadians(diagnostic_orientation);
     double target_yaw = gaze_ray_angles.yaw_radians;
     double target_pitch = gaze_ray_angles.pitch_radians;
+    if (!unfocused_visible) {
+        // See kEyeGazeStillRadians: logged, never acted on.
+        const bool moved = !eye_gaze_still_since_ ||
+                           std::abs(target_yaw - eye_gaze_still_yaw_) > kEyeGazeStillRadians ||
+                           std::abs(target_pitch - eye_gaze_still_pitch_) > kEyeGazeStillRadians ||
+                           time < *eye_gaze_still_since_;
+        if (moved) {
+            eye_gaze_still_since_ = time;
+            eye_gaze_still_yaw_ = target_yaw;
+            eye_gaze_still_pitch_ = target_pitch;
+            eye_gaze_still_logged_ = false;
+        } else if (!eye_gaze_still_logged_ && time - *eye_gaze_still_since_ >= kEyeGazeStillWindow) {
+            eye_gaze_still_logged_ = true;
+            if (eye_gaze_still_logs_remaining_ > 0) {
+                --eye_gaze_still_logs_remaining_;
+                logger_.Info("Quadviews eye tracking: the gaze has stayed within " +
+                             FormatDiagnosticDouble(kEyeGazeStillRadians) + " rad of yaw=" +
+                             FormatDiagnosticDouble(eye_gaze_still_yaw_) + ", pitch=" +
+                             FormatDiagnosticDouble(eye_gaze_still_pitch_) + " for " +
+                             std::to_string((time - *eye_gaze_still_since_) / 1'000'000'000) +
+                             " s while the runtime calls it valid (tracker stalled or headset off?). Diagnostic "
+                             "only: focus still follows it." +
+                             (eye_gaze_still_logs_remaining_ == 0 ? " Further such lines suppressed this session."
+                                                                  : ""));
+            }
+        }
+    }
     quadviews_raw_focus_yaw_radians_ = target_yaw;
     quadviews_raw_focus_pitch_radians_ = target_pitch;
     quadviews_raw_focus_valid_ = true;
@@ -15591,6 +15733,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", framegenArtifactSuppression=" << settings.framegen.artifact_suppression
            << ", framegenMotionLimitPercent=" << settings.framegen.motion_limit_percent
            << ", framegenExtendHeadPrediction=" << settings.framegen.extend_head_prediction
+           << ", framegenEdgeFill=" << settings.framegen.edge_fill
            << ", framegenDiagnosticView=" << ToString(settings.framegen.diagnostic_view)
            << ", framegenToggleBindings=" << BindingListLabel(settings.framegen.toggle_bindings);
     logger_.Debug(stream.str());

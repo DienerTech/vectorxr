@@ -788,6 +788,128 @@ int RunScenarios(Harness& harness) {
               harness.name + " 4x frames are not placed at 1/4 and 3/4 of the motion");
         Check(copy_error < 0.002, harness.name + " the frame at fraction 1 is not the newest real frame");
 
+        // 2d'. Edge fill (Direct3D 12): an output wider than the frame by a
+        // margin each side (whole 32-pixel tiles, as the presenter makes
+        // them) holds the frame at its content offset exactly as drawn into
+        // an output the frame's size, and every margin pixel repeats the
+        // frame's nearest edge pixel, none black: written together
+        // (Execute), one at a time (Synthesize), and as an exact copy.
+        if (gpu->SupportsEdgeFill() && harness.readback_sized) {
+            const FrameGenTuning saved = tuning;
+            const FrameGenEdgeMargins margins{32, 64, 32, 32};
+            const std::uint32_t width = kSize + margins.left + margins.right;
+            const std::uint32_t height = kSize + margins.up + margins.down;
+            const XrSwapchain fill_first = reinterpret_cast<XrSwapchain>(0x5c);
+            const XrSwapchain fill_second = reinterpret_cast<XrSwapchain>(0x5d);
+            g_swapchains[fill_first] = {harness.create(width, height)};
+            g_swapchains[fill_second] = {harness.create(width, height)};
+            Check(gpu->Track(fill_first, EnumerateImages, error) && gpu->Track(fill_second, EnumerateImages, error), error);
+            auto filled = [&](XrSwapchain chain) {
+                FrameGenImage image{chain, 0, 0, {{0, 0}, {static_cast<int>(width), static_cast<int>(height)}}, output_format};
+                image.content = {static_cast<int>(margins.left), static_cast<int>(margins.up)};
+                return image;
+            };
+            auto check_fill = [&](XrSwapchain chain, const Pixels& plain, const std::string& what) {
+                const Pixels wide = harness.readback_sized(g_swapchains[chain][0]);
+                Check(wide.size() == std::size_t{width} * height, harness.name + " edge fill: " + what + " read back");
+                // A margin pixel is its nearest edge pixel. Where the
+                // periphery is shaded per 2x2 (a GPU's variable-rate shading
+                // past tangent 1: the corners here), the margin's coarse
+                // pixel is the edge pixel's own centre while the frame's
+                // coarse pixel shows a point between pixels: within a few
+                // levels of the edge pixels around it.
+                std::size_t inside_off = 0, margin_exact = 0, margin_off = 0, black = 0, margin = 0;
+                for (std::uint32_t y = 0; y < height; ++y) {
+                    for (std::uint32_t x = 0; x < width; ++x) {
+                        const int fx = std::clamp(static_cast<int>(x) - static_cast<int>(margins.left), 0, int(kSize) - 1);
+                        const int fy = std::clamp(static_cast<int>(y) - static_cast<int>(margins.up), 0, int(kSize) - 1);
+                        const bool inside = x >= margins.left && x < margins.left + kSize && y >= margins.up &&
+                                            y < margins.up + kSize;
+                        const std::uint32_t got = wide[std::size_t{y} * width + x] & 0xffffffu;
+                        const std::uint32_t want = plain[std::size_t(fy) * kSize + fx] & 0xffffffu;
+                        if (inside) {
+                            inside_off += got != want ? 1 : 0;
+                            continue;
+                        }
+                        ++margin;
+                        black += got == 0 ? 1 : 0;
+                        if (got == want) {
+                            ++margin_exact;
+                            continue;
+                        }
+                        const double tx = -kTan + 2.0 * kTan * (fx + 0.5) / kSize;
+                        const double ty = kTan - 2.0 * kTan * (fy + 0.5) / kSize;
+                        const int slack = std::hypot(tx, ty) >= 0.9 ? 8 : -1000; // exact off the corners
+                        bool within = slack > 0;
+                        for (int c = 0; c < 3 && within; ++c) {
+                            int lo = 255, hi = 0;
+                            for (int dy = -1; dy <= 1; ++dy) {
+                                for (int dx = -1; dx <= 1; ++dx) {
+                                    const int ex = std::clamp(fx + dx, 0, int(kSize) - 1);
+                                    const int ey = std::clamp(fy + dy, 0, int(kSize) - 1);
+                                    const int value = static_cast<int>((plain[std::size_t(ey) * kSize + ex] >> (8 * c)) & 255u);
+                                    lo = std::min(lo, value);
+                                    hi = std::max(hi, value);
+                                }
+                            }
+                            const int value = static_cast<int>((got >> (8 * c)) & 255u);
+                            within = within && value >= lo - slack && value <= hi + slack;
+                        }
+                        if (!within && margin_off < 6) {
+                            std::printf("  margin pixel (%u, %u): %06x, edge pixel (%d, %d) %06x\n", x, y, got, fx, fy, want);
+                        }
+                        margin_off += within ? 0 : 1;
+                    }
+                }
+                std::cout << harness.name << " edge fill " << what << ": " << inside_off << " frame pixels differ; "
+                          << margin_exact << " of " << margin << " margin pixels repeat their edge pixel exactly, "
+                          << margin_off << " are not a blend of the edge beside them, " << black << " black\n";
+                Check(inside_off == 0, harness.name + " edge fill: " + what + " changes the frame's own pixels");
+                Check(margin_off == 0 && black == 0 && margin_exact * 2 > margin,
+                      harness.name + " edge fill: " + what + "'s margin does not repeat the frame's nearest edge");
+            };
+            tuning.generated = 2;
+            tuning.fractions = {1.0f / 3.0f, 2.0f / 3.0f, 0.0f, 0.0f};
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            const Pixels plain_third = run(1, true, 0, 0);
+            const Pixels plain_two_thirds = harness.readback(g_swapchains[kOutputSecond][0]);
+            auto run_filled = [&](std::uint32_t index) {
+                std::vector<FrameGenViewSubmission> views{Submission(index, harness.format, output_format, true, 0, 0)};
+                views[0].outputs = {filled(fill_first), filled(fill_second)};
+                Check(gpu->Execute(views, tuning, result, error), harness.name + " edge fill execute: " + error);
+            };
+            gpu->ResetHistory();
+            run_filled(0);
+            const std::uint64_t fill_draws = gpu->DrawsForTest();
+            run_filled(1);
+            Check(gpu->DrawsForTest() == fill_draws + 1, harness.name + " edge fill: both frames in one draw");
+            check_fill(fill_first, plain_third, "Execute's first frame");
+            check_fill(fill_second, plain_two_thirds, "Execute's second frame");
+            if (gpu->SupportsJustInTime()) {
+                FrameGenTuning analyze = tuning;
+                analyze.analyze_only = true;
+                gpu->ResetHistory();
+                std::uint64_t frame = 0;
+                for (std::uint32_t index = 0; index < 2; ++index) {
+                    const std::vector<FrameGenViewSubmission> views{
+                        Submission(index, harness.format, output_format, true, 0, 0)};
+                    Check(gpu->Execute(views, analyze, result, error), harness.name + " edge fill analyze: " + error);
+                    frame = result.frame;
+                }
+                const FrameGenImage plain_output = Submission(1, harness.format, output_format, true, 0, 0).outputs[0];
+                for (const float fraction : {0.5f, 1.0f}) {
+                    Check(gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, fraction, {plain_output}, error),
+                          harness.name + " edge fill synthesize: " + error);
+                    const Pixels plain = harness.readback(g_swapchains[kOutput][0]);
+                    Check(gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, fraction, {filled(fill_first)}, error),
+                          harness.name + " edge fill synthesize: " + error);
+                    check_fill(fill_first, plain, fraction < 1.0f ? "Synthesize" : "Synthesize's exact copy");
+                }
+            }
+            tuning = saved;
+        }
+
         // 2e. Just-in-time synthesis (Direct3D 12): the motion measured once
         // per real frame and each generated frame written on its own, later,
         // is what writing them together gives; from the same measurement a
@@ -5756,6 +5878,29 @@ int RunProfile(Harness& harness) {
     std::array<XrSwapchain, 2> depths{reinterpret_cast<XrSwapchain>(0x63), reinterpret_cast<XrSwapchain>(0x64)};
     std::array<XrSwapchain, 2> vectors{reinterpret_cast<XrSwapchain>(0x65), reinterpret_cast<XrSwapchain>(0x66)};
     std::array<std::array<XrSwapchain, 4>, 2> outputs{};
+    // FG_PROFILE_EDGE_FILL=1 (or h[,v] degrees): outputs widened by edge
+    // fill's margins (whole 32-pixel tiles, as the presenter makes them), the
+    // frames drawn at their corner: what the margins cost.
+    std::array<FrameGenEdgeMargins, 2> fill_margins{};
+    if (const char* fill = std::getenv("FG_PROFILE_EDGE_FILL"); fill && *fill && std::string(fill) != "0") {
+        std::array<float, 2> degrees{kFrameGenEdgeFillHorizontalDegrees, kFrameGenEdgeFillVerticalDegrees};
+        if (std::string(fill) != "1") {
+            const auto parsed = ParseFrameGenEdgeFillDegrees(fill);
+            Check(parsed.has_value(), "profile: FG_PROFILE_EDGE_FILL is 1 or h[,v] degrees");
+            degrees = *parsed;
+        }
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            FrameGenEdgeMargins& margins = fill_margins[eye];
+            margins = FrameGenEdgeFillMargins({std::atan(eye == 0 ? -outer : -inner), std::atan(eye == 0 ? inner : outer),
+                                               std::atan(vertical), -std::atan(vertical)},
+                                              {width, height}, degrees[0], degrees[1]);
+            for (std::uint32_t* margin : {&margins.left, &margins.right, &margins.up, &margins.down}) {
+                *margin = (*margin + 31) / 32 * 32;
+            }
+            std::printf("Edge fill: eye %zu margins %u/%u/%u/%u px, outputs %ux%u\n", eye, margins.left, margins.right,
+                        margins.up, margins.down, width + margins.left + margins.right, height + margins.up + margins.down);
+        }
+    }
     for (std::size_t eye = 0; eye < 2; ++eye) {
         const float head = eye == 0 ? -half_ipd : half_ipd;
         const float left = eye == 0 ? -outer : -inner, right = eye == 0 ? inner : outer;
@@ -5776,7 +5921,8 @@ int RunProfile(Harness& harness) {
         g_swapchains[depths[eye]] = {harness.create_depth_sized(depth_width, depth_height, panel_depth, panel, 0.0f)};
         for (std::size_t set = 0; set < 4; ++set) {
             outputs[eye][set] = reinterpret_cast<XrSwapchain>(0x70 + eye * 4 + set);
-            g_swapchains[outputs[eye][set]] = {harness.create(width, height)};
+            g_swapchains[outputs[eye][set]] = {harness.create(width + fill_margins[eye].left + fill_margins[eye].right,
+                                                              height + fill_margins[eye].up + fill_margins[eye].down)};
         }
         Check(gpu->Track(sources[eye], EnumerateImages, error) && gpu->Track(depths[eye], EnumerateImages, error), error);
         for (const XrSwapchain output : outputs[eye]) {
@@ -5816,7 +5962,14 @@ int RunProfile(Harness& harness) {
             const XrRect2Di rect{{0, 0}, {static_cast<int>(width), static_cast<int>(height)}};
             view.source = {sources[eye], frame, 0, rect, harness.format};
             for (const XrSwapchain output : outputs[eye]) {
-                view.outputs.push_back({output, 0, 0, rect, output_format});
+                const FrameGenEdgeMargins& margins = fill_margins[eye];
+                FrameGenImage image{output, 0, 0,
+                                    {{0, 0},
+                                     {static_cast<int>(width + margins.left + margins.right),
+                                      static_cast<int>(height + margins.up + margins.down)}},
+                                    output_format};
+                image.content = {static_cast<int>(margins.left), static_cast<int>(margins.up)};
+                view.outputs.push_back(image);
             }
             view.request.extent = {width, height};
             view.request.output = FrameGenOutputKind::kSrgb8;
@@ -6549,6 +6702,101 @@ Pixels TurnTo(const ReplayView& view, const ReplayView& next, std::vector<bool>&
     for (std::uint32_t t = 0; t < threads; ++t) workers.emplace_back(rows, t, threads);
     for (auto& worker : workers) worker.join();
     return out;
+}
+
+// Edge fill (FG_REPLAY_EDGE_FILL, "Edge reveal"): a generated frame turned
+// from its view's pose to `truth`'s, as a runtime turns a frame to where the
+// head is when it shows it (rotation only, bilinear). `wide` is the output
+// image, the frame at `margins`' corner. Of the truth's pixels: those the
+// frame itself does not reach (revealed: the runtime shows black there) and
+// of those the ones the margins do not reach either (beyond), and the mean
+// error against the truth over the revealed ones shown black and shown from
+// the margins. `black` and `filled` (optional) get the truth's view showing
+// the frame without and with its margins.
+struct ReplayReveal {
+    std::size_t pixels{0}, revealed{0}, beyond{0};
+    double black_error{0.0}, fill_error{0.0};
+};
+ReplayReveal RevealTurned(const ReplayView& view, const Pixels& wide, const FrameGenEdgeMargins& margins,
+                          const ReplayView& truth, Pixels* black, Pixels* filled) {
+    const auto a = ReplayRotation(truth.newest.orientation);
+    const auto b = ReplayRotation(view.newest.orientation);
+    const double l = std::tan(truth.newest.angle_left), r = std::tan(truth.newest.angle_right);
+    const double u = std::tan(truth.newest.angle_up), d = std::tan(truth.newest.angle_down);
+    const double nl = std::tan(view.newest.angle_left), nr = std::tan(view.newest.angle_right);
+    const double nu = std::tan(view.newest.angle_up), nd = std::tan(view.newest.angle_down);
+    const std::uint32_t wide_width = view.width + margins.left + margins.right;
+    const std::uint32_t wide_height = view.height + margins.up + margins.down;
+    if (black) black->assign(std::size_t{truth.width} * truth.height, 0xff000000u);
+    if (filled) filled->assign(std::size_t{truth.width} * truth.height, 0xff000000u);
+    const std::uint32_t threads = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<ReplayReveal> parts(threads);
+    auto rows = [&](std::uint32_t first, std::uint32_t step) {
+        ReplayReveal& part = parts[first];
+        for (std::uint32_t y = first; y < truth.height; y += step) {
+            for (std::uint32_t x = 0; x < truth.width; ++x) {
+                const double dir[3] = {l + (r - l) * (x + 0.5) / truth.width, u + (d - u) * (y + 0.5) / truth.height, -1.0};
+                double world[3], local[3];
+                for (int i = 0; i < 3; ++i) world[i] = a[i][0] * dir[0] + a[i][1] * dir[1] + a[i][2] * dir[2];
+                for (int i = 0; i < 3; ++i) local[i] = b[0][i] * world[0] + b[1][i] * world[1] + b[2][i] * world[2];
+                ++part.pixels;
+                // In the frame's texels (centres at whole numbers), then the
+                // output image's.
+                const bool ahead = local[2] < -1e-6;
+                const double sx = ahead ? ((local[0] / -local[2]) - nl) / (nr - nl) * view.width - 0.5 : -1e9;
+                const double sy = ahead ? ((local[1] / -local[2]) - nu) / (nd - nu) * view.height - 0.5 : -1e9;
+                const bool reached = sx >= -0.5 && sy >= -0.5 && sx <= view.width - 0.5 && sy <= view.height - 0.5;
+                const double wx = sx + margins.left, wy = sy + margins.up;
+                const bool margin = wx >= -0.5 && wy >= -0.5 && wx <= wide_width - 0.5 && wy <= wide_height - 0.5;
+                std::uint32_t pixel = 0xff000000u;
+                if (margin) {
+                    const double cx = std::clamp(wx, 0.0, wide_width - 1.0), cy = std::clamp(wy, 0.0, wide_height - 1.0);
+                    const int ix = std::min(static_cast<int>(cx), static_cast<int>(wide_width) - 2);
+                    const int iy = std::min(static_cast<int>(cy), static_cast<int>(wide_height) - 2);
+                    const double fx = cx - ix, fy = cy - iy;
+                    for (int c = 0; c < 3; ++c) {
+                        auto at = [&](int px, int py) {
+                            return static_cast<double>((wide[std::size_t(py) * wide_width + px] >> (8 * c)) & 255u);
+                        };
+                        const double value = (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) +
+                                             (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy;
+                        pixel |= static_cast<std::uint32_t>(std::lround(value)) << (8 * c);
+                    }
+                }
+                const std::size_t index = std::size_t{y} * truth.width + x;
+                if (black && reached) (*black)[index] = pixel;
+                if (filled) (*filled)[index] = pixel;
+                if (reached) continue;
+                ++part.revealed;
+                part.beyond += margin ? 0 : 1;
+                const std::uint32_t want = truth.color[index];
+                double black_sum = 0.0, fill_sum = 0.0;
+                for (int c = 0; c < 3; ++c) {
+                    const double t = static_cast<double>((want >> (8 * c)) & 255u);
+                    black_sum += t;
+                    fill_sum += std::abs(t - static_cast<double>((pixel >> (8 * c)) & 255u));
+                }
+                part.black_error += black_sum / (3.0 * 255.0);
+                part.fill_error += fill_sum / (3.0 * 255.0);
+            }
+        }
+    };
+    std::vector<std::thread> workers;
+    for (std::uint32_t t = 0; t < threads; ++t) workers.emplace_back(rows, t, threads);
+    for (auto& worker : workers) worker.join();
+    ReplayReveal total;
+    for (const ReplayReveal& part : parts) {
+        total.pixels += part.pixels;
+        total.revealed += part.revealed;
+        total.beyond += part.beyond;
+        total.black_error += part.black_error;
+        total.fill_error += part.fill_error;
+    }
+    if (total.revealed) {
+        total.black_error /= static_cast<double>(total.revealed);
+        total.fill_error /= static_cast<double>(total.revealed);
+    }
+    return total;
 }
 
 // Mean error over valid pixels, all and split by the newest frame's depth
@@ -7926,6 +8174,57 @@ int RunReplay(Harness& harness) {
     if (depth_scale != 1.0f) {
         std::printf("Depth given to the backend times %.3f (FG_REPLAY_DEPTH_SCALE)\n", static_cast<double>(depth_scale));
     }
+    // FG_REPLAY_EDGE_FILL=h[,v] (degrees past each edge; 1: the defaults):
+    // edge fill, as a session with it on writes frames: each view's output
+    // wider by the margins (whole 32-pixel tiles, as the presenter makes
+    // them), the frame at their corner. Every measure below reads the
+    // frame's own pixels as without it (the output hash too, so a run
+    // without the fill gives the same hash), and "Edge reveal" turns each
+    // generated frame to its truth's pose as a runtime turns it to the head,
+    // comparing what the revealed edge shows black and shown from the
+    // margins (FG_REPLAY_REVEAL=1 measures it without the fill as well).
+    std::vector<FrameGenEdgeMargins> fill_margins(view_count);
+    const char* fill_text = std::getenv("FG_REPLAY_EDGE_FILL");
+    const bool edge_fill = fill_text && *fill_text && std::string(fill_text) != "0";
+    const bool reveal = edge_fill || (std::getenv("FG_REPLAY_REVEAL") && std::string(std::getenv("FG_REPLAY_REVEAL")) == "1");
+    if (edge_fill) {
+        std::array<float, 2> degrees{kFrameGenEdgeFillHorizontalDegrees, kFrameGenEdgeFillVerticalDegrees};
+        if (std::string(fill_text) != "1") {
+            const auto parsed = ParseFrameGenEdgeFillDegrees(fill_text);
+            Check(parsed.has_value(), "replay: FG_REPLAY_EDGE_FILL is 1 or h[,v] degrees (0-15)");
+            degrees = *parsed;
+        }
+        for (std::size_t v = 0; v < view_count; ++v) {
+            const ReplayView& view = frames[0].views[v];
+            FrameGenEdgeMargins& margins = fill_margins[v];
+            margins = FrameGenEdgeFillMargins({view.newest.angle_left, view.newest.angle_right, view.newest.angle_up,
+                                               view.newest.angle_down},
+                                              {view.width, view.height}, degrees[0], degrees[1]);
+            for (std::uint32_t* margin : {&margins.left, &margins.right, &margins.up, &margins.down}) {
+                *margin = (*margin + 31) / 32 * 32;
+            }
+            std::printf("Edge fill (FG_REPLAY_EDGE_FILL, %.1f / %.1f degrees): view %zu margins %u/%u/%u/%u px "
+                        "(left/right/up/down), output %ux%u (%.1f%% more pixels)\n",
+                        static_cast<double>(degrees[0]), static_cast<double>(degrees[1]), v, margins.left, margins.right,
+                        margins.up, margins.down, view.width + margins.left + margins.right,
+                        view.height + margins.up + margins.down,
+                        100.0 * (double(view.width + margins.left + margins.right) * (view.height + margins.up + margins.down) /
+                                     (double(view.width) * view.height) -
+                                 1.0));
+        }
+    }
+    // An output image of view `v` (with edge fill, wider, the frame at the
+    // margins' corner).
+    auto output_image = [&](XrSwapchain chain, std::size_t v, const ReplayView& view, std::int64_t format) {
+        const FrameGenEdgeMargins& margins = fill_margins[v];
+        FrameGenImage image{chain, 0, 0,
+                            {{0, 0},
+                             {static_cast<int>(view.width + margins.left + margins.right),
+                              static_cast<int>(view.height + margins.up + margins.down)}},
+                            format};
+        image.content = {static_cast<int>(margins.left), static_cast<int>(margins.up)};
+        return image;
+    };
     std::vector<XrSwapchain> sources(view_count), depths(view_count), outputs(view_count);
     for (std::size_t v = 0; v < view_count; ++v) {
         const ReplayView& view = frames[0].views[v];
@@ -7950,7 +8249,8 @@ int RunReplay(Harness& harness) {
             }
             g_swapchains[depths[v]].push_back(harness.create_depth_data(view.half_width, view.half_height, raw));
         }
-        g_swapchains[outputs[v]] = {harness.create(view.width, view.height)};
+        g_swapchains[outputs[v]] = {harness.create(view.width + fill_margins[v].left + fill_margins[v].right,
+                                                   view.height + fill_margins[v].up + fill_margins[v].down)};
         Check(gpu->Track(sources[v], EnumerateImages, error) && gpu->Track(depths[v], EnumerateImages, error) &&
                   gpu->Track(outputs[v], EnumerateImages, error),
               error);
@@ -8248,7 +8548,7 @@ int RunReplay(Harness& harness) {
             FrameGenViewSubmission& submission = views[v];
             const XrRect2Di rect{{0, 0}, {static_cast<int>(view.width), static_cast<int>(view.height)}};
             submission.source = {sources[v], static_cast<std::uint32_t>(k), 0, rect, harness.format};
-            submission.outputs = {{outputs[v], 0, 0, rect, output_format}};
+            submission.outputs = {output_image(outputs[v], v, view, output_format)};
             submission.request.extent = {view.width, view.height};
             submission.request.output = FrameGenOutputKind::kSrgb8;
             submission.request.synthesize = before.has_value();
@@ -8530,6 +8830,12 @@ int RunReplay(Harness& harness) {
         }
     };
     BandSums rotation_sums, aligned_sums;
+    // Edge reveal (FG_REPLAY_EDGE_FILL, FG_REPLAY_REVEAL): shares of the
+    // views revealed, the revealed pixels' errors summed by pixel, the turns.
+    struct RevealSums {
+        double revealed{0}, beyond{0}, black{0}, filled{0}, pixels{0}, degrees{0};
+        std::size_t views{0};
+    } reveal_sums;
     ReplayMasked masked_sums;
     // Per view: with one eye's depth the eyes differ.
     std::vector<double> view_bad(view_count, 0.0);
@@ -8593,7 +8899,59 @@ int RunReplay(Harness& harness) {
                 std::printf("frame %zu view %zu cockpit motion: mean %.3f px, %.1f%% of cells above 0.5 px\n", k, v,
                             cockpit_motion / cockpit_cells, 100.0 * cockpit_moving / cockpit_cells);
             }
-            const Pixels generated = harness.readback_sized(g_swapchains[outputs[v]][0]);
+            // With edge fill the output image and the frame's own pixels in it.
+            const Pixels wide = harness.readback_sized(g_swapchains[outputs[v]][0]);
+            const FrameGenEdgeMargins& margins = fill_margins[v];
+            Pixels generated;
+            if (margins.Any()) {
+                const std::uint32_t wide_width = view.width + margins.left + margins.right;
+                generated.resize(std::size_t{view.width} * view.height);
+                for (std::uint32_t y = 0; y < view.height; ++y) {
+                    std::copy_n(wide.begin() + (std::size_t{y + margins.up} * wide_width + margins.left), view.width,
+                                generated.begin() + std::size_t{y} * view.width);
+                }
+            } else {
+                generated = wide;
+            }
+            if (reveal) {
+                // The frame turned to its truth's pose, as a runtime turns it.
+                const bool images = !g_replay_output.empty() && v == 0 && !crop;
+                Pixels black, filled;
+                const ReplayReveal turned = RevealTurned(view, wide, margins, frames[truth_frame].views[v],
+                                                         images ? &black : nullptr, images ? &filled : nullptr);
+                const auto a = ReplayRotation(view.newest.orientation);
+                const auto b = ReplayRotation(frames[truth_frame].views[v].newest.orientation);
+                double trace = 0.0;
+                for (int i = 0; i < 3; ++i) {
+                    for (int j = 0; j < 3; ++j) trace += a[j][i] * b[j][i];
+                }
+                const double turned_degrees = std::acos(std::clamp((trace - 1.0) / 2.0, -1.0, 1.0)) * 57.29577951308232;
+                const double revealed = turned.pixels ? 100.0 * turned.revealed / turned.pixels : 0.0;
+                const double beyond = turned.pixels ? 100.0 * turned.beyond / turned.pixels : 0.0;
+                std::printf("frame %zu view %zu edge reveal: turned %.2f degrees to the truth's pose; %.2f%% of the view "
+                            "revealed (%.2f%% past the margins too); there error black %.4f, %s %.4f\n",
+                            k, v, turned_degrees, revealed, beyond, turned.black_error,
+                            margins.Any() ? "filled" : "unfilled", turned.fill_error);
+                reveal_sums.revealed += revealed;
+                reveal_sums.beyond += beyond;
+                reveal_sums.black += turned.black_error * turned.revealed;
+                reveal_sums.filled += turned.fill_error * turned.revealed;
+                reveal_sums.pixels += static_cast<double>(turned.revealed);
+                reveal_sums.degrees += turned_degrees;
+                ++reveal_sums.views;
+                if (images) {
+                    WriteHalfPpm(prefix + "-reveal-black.ppm", black, frames[truth_frame].views[v].width,
+                                 frames[truth_frame].views[v].height);
+                    WriteHalfPpm(prefix + "-reveal-filled.ppm", filled, frames[truth_frame].views[v].width,
+                                 frames[truth_frame].views[v].height);
+                    WriteHalfPpm(prefix + "-reveal-truth.ppm", frames[truth_frame].views[v].color,
+                                 frames[truth_frame].views[v].width, frames[truth_frame].views[v].height);
+                    if (margins.Any()) {
+                        WriteHalfPpm(prefix + "-wide.ppm", wide, view.width + margins.left + margins.right,
+                                     view.height + margins.up + margins.down);
+                    }
+                }
+            }
             std::vector<bool> valid;
             const Pixels truth = TurnTo(view, frames[truth_frame].views[v], valid, cubic_truth);
             const std::vector<std::uint8_t> depth_edges = ReplayDepthEdges(view);
@@ -8762,10 +9120,7 @@ int RunReplay(Harness& harness) {
             const auto jit_images = [&](std::size_t frame) {
                 std::vector<FrameGenImage> images;
                 for (std::size_t v = 0; v < view_count; ++v) {
-                    const ReplayView& view = frames[frame].views[v];
-                    images.push_back({outputs[v], 0, 0,
-                                      {{0, 0}, {static_cast<int>(view.width), static_cast<int>(view.height)}},
-                                      output_format});
+                    images.push_back(output_image(outputs[v], v, frames[frame].views[v], output_format));
                 }
                 return images;
             };
@@ -8923,6 +9278,14 @@ int RunReplay(Harness& harness) {
     }
     if (delta_pairs) {
         std::printf("Paired still appSpaceDeltaPose (FG_REPLAY_DELTA_PAIRS=still): %zu views\n", paired_still);
+    }
+    if (reveal && reveal_sums.views) {
+        const double n = static_cast<double>(reveal_sums.views);
+        std::printf("Edge reveal: %zu views turned %.2f degrees on average to their truth's pose; %.2f%% of a view "
+                    "revealed (%.2f%% past the margins too); there mean error black %.4f, %s %.4f\n",
+                    reveal_sums.views, reveal_sums.degrees / n, reveal_sums.revealed / n, reveal_sums.beyond / n,
+                    reveal_sums.pixels ? reveal_sums.black / reveal_sums.pixels : 0.0, edge_fill ? "filled" : "unfilled",
+                    reveal_sums.pixels ? reveal_sums.filled / reveal_sums.pixels : 0.0);
     }
     std::printf("Output hash: %zu frames written %016llx, %zu depth reads %016llx\n", hashed_frames,
                 static_cast<unsigned long long>(output_hash), hashed_depths, static_cast<unsigned long long>(depth_hash));
@@ -12719,6 +13082,7 @@ struct LeadFrame {
     std::array<std::vector<float>, 2> measured;
     std::array<std::vector<std::uint32_t>, 2> labels;
     double measured_ms{0.0};
+    std::array<double, 3> pass_ms{}; // downsample, search, refine
 };
 
 std::vector<LeadFrame> TraceLeadFrames(Harness& harness, const EngineFrames& frames, EngineRunOptions options,
@@ -12734,8 +13098,10 @@ std::vector<LeadFrame> TraceLeadFrames(Harness& harness, const EngineFrames& fra
         }
         LeadFrame& frame = trace[k];
         const std::vector<double> times = gpu.PassMilliseconds();
+        std::size_t p = 0;
         for (const FrameGenPass pass : {FrameGenPass::kDownsample, FrameGenPass::kSearch, FrameGenPass::kRefine}) {
-            frame.measured_ms += static_cast<std::size_t>(pass) < times.size() ? times[static_cast<std::size_t>(pass)] : 0.0;
+            frame.pass_ms[p] = static_cast<std::size_t>(pass) < times.size() ? times[static_cast<std::size_t>(pass)] : 0.0;
+            frame.measured_ms += frame.pass_ms[p++];
         }
         frame.merged = merged[k][0] && merged[k][1];
         for (int e = 0; e < 2 && frame.merged; ++e) {
@@ -12756,6 +13122,15 @@ void EngineLeadScenarios(Harness& harness) {
     const EngineFrames still = RenderEngineFrames(EngineScene{});
     std::vector<std::array<Pixels, 2>> off;
     RunEngineFrames(harness, still, {.mode = FrameGenEngineMode::kOff, .outputs = &off});
+    // The median of a run's frames' measured passes (frames after the first).
+    const auto median_ms = [](std::vector<double> times) {
+        if (times.empty()) return 0.0;
+        std::nth_element(times.begin(), times.begin() + times.size() / 2, times.end());
+        return times[times.size() / 2];
+    };
+    // The measured passes where the verdict held the vectors back: run, but
+    // predicated as where they are skipped (below).
+    double held_ms = 0.0;
 
     // Every frame's verdict holding the vectors back: the measured flow
     // copied bit for bit, the generated frames mk1's.
@@ -12767,10 +13142,12 @@ void EngineLeadScenarios(Harness& harness) {
             harness, still, {.mode = FrameGenEngineMode::kLead, .fault = EngineFault::kReversed, .outputs = &reversed, .led = &led},
             &run);
         std::size_t merged = 0, held = 0, copied = 0, frames_led = 0;
+        std::vector<double> held_times;
         for (std::size_t k = 0; k < trace.size(); ++k) {
             if (!trace[k].merged) continue;
             ++merged;
             held += trace[k].held ? 1 : 0;
+            if (k > 0 && trace[k].held) held_times.push_back(trace[k].measured_ms);
             copied += trace[k].held && trace[k].flow == trace[k].measured ? 1 : 0;
             frames_led += led[k] ? 1 : 0;
         }
@@ -12778,9 +13155,10 @@ void EngineLeadScenarios(Harness& harness) {
         for (std::size_t k = 0; k < off.size() && k < reversed.size(); ++k) {
             for (int e = 0; e < 2; ++e) differing += off[k][e] == reversed[k][e] ? 0 : 1;
         }
+        held_ms = median_ms(held_times);
         std::cout << "D3D12 engine lead: reversed vectors: " << DescribeEngineRun(run) << "; " << merged << " frames merged, "
-                  << frames_led << " led, " << held << " held back, " << copied << " the measured flow bit for bit; "
-                  << differing << " generated frames differ from mk1's" << std::endl;
+                  << frames_led << " led, " << held << " held back (the measured passes " << held_ms << " ms), " << copied
+                  << " the measured flow bit for bit; " << differing << " generated frames differ from mk1's" << std::endl;
         Check(merged > kEngineFrames / 2 && frames_led == merged && held == merged && copied == merged && differing == 0,
               "engine lead: frames whose verdict holds the vectors back are not mk1's (" + std::to_string(held) + " held of " +
                   std::to_string(merged) + ", " + std::to_string(copied) + " copied, " + std::to_string(differing) +
@@ -12851,17 +13229,23 @@ void EngineLeadScenarios(Harness& harness) {
             {.mode = FrameGenEngineMode::kLead,
              .before = [](FrameGenTuning& tuning, std::size_t) { tuning.engine_predicate = false; }});
         double lead_ms = 0.0, assist_ms = 0.0, unmeasured_ms = 0.0;
+        std::array<double, 3> lead_pass{}, assist_pass{};
+        std::vector<double> lead_times, assist_times;
         std::size_t valid = 0, assisted = 0, pairs = 0, kept = 0, compared = 0, same = 0;
         bool all_valid = true;
         for (std::size_t k = 1; k < lead.size(); ++k) {
             if (assist[k].merged) {
                 assist_ms += assist[k].measured_ms;
+                for (std::size_t p = 0; p < 3; ++p) assist_pass[p] += assist[k].pass_ms[p];
+                assist_times.push_back(assist[k].measured_ms);
                 ++assisted;
             }
             unmeasured_ms += unmeasured[k].merged ? unmeasured[k].measured_ms : 0.0;
             if (!lead[k].merged || lead[k].held) continue;
             ++valid;
             lead_ms += lead[k].measured_ms;
+            for (std::size_t p = 0; p < 3; ++p) lead_pass[p] += lead[k].pass_ms[p];
+            lead_times.push_back(lead[k].measured_ms);
             // Skipped: the measured flow as the frame before left it.
             if (lead[k - 1].merged && !lead[k - 1].held) {
                 ++pairs;
@@ -12877,6 +13261,13 @@ void EngineLeadScenarios(Harness& harness) {
         }
         lead_ms /= std::max<std::size_t>(valid, 1);
         assist_ms /= std::max<std::size_t>(assisted, 1);
+        for (std::size_t p = 0; p < 3; ++p) {
+            lead_pass[p] /= std::max<std::size_t>(valid, 1);
+            assist_pass[p] /= std::max<std::size_t>(assisted, 1);
+        }
+        std::cout << "D3D12 engine lead: downsample, search, refine " << lead_pass[0] << ", " << lead_pass[1] << ", "
+                  << lead_pass[2] << " ms skipped against " << assist_pass[0] << ", " << assist_pass[1] << ", "
+                  << assist_pass[2] << " ms run" << std::endl;
         std::cout << "D3D12 engine lead: " << DescribeEngineRun(run) << "; " << valid << " frames led with a verdict letting "
                   << "the vectors be used: the measured passes " << lead_ms << " ms (Assist " << assist_ms << " ms), "
                   << kept << " of " << pairs << " frames after one such left the measured flow as it was, " << same << " of "
@@ -12885,9 +13276,23 @@ void EngineLeadScenarios(Harness& harness) {
         Check(valid > kEngineFrames / 2 && pairs > 10 && kept == pairs,
               "engine lead: the measured passes ran where the verdict let the vectors be used (" + std::to_string(kept) +
                   " of " + std::to_string(pairs) + " frames kept the measured flow)");
-        Check(assist_ms > 0.0 && lead_ms <= 0.1 * assist_ms,
-              "engine lead: the skipped passes' stamps are not about 0 ms (" + std::to_string(lead_ms) + " ms against " +
-                  std::to_string(assist_ms) + ")");
+        // About 0 ms against Assist's: within 10% of them, beyond what
+        // predication itself costs. Predicated passes carry a fixed cost of
+        // their own whether they run or not (the held-back frames' passes
+        // took about 0.013 ms more than Assist's on an RTX 5090, and the
+        // skipped downsample's stamp about as much; at this size Assist's
+        // passes take only about 0.17 ms there, so that cost alone came to
+        // 10%). It is counted as the held-back median over Assist's, up to
+        // 20% of Assist's. Passes that ran where they should be skipped
+        // cost what they do in Assist.
+        const double lead_median = median_ms(lead_times), assist_median = median_ms(assist_times);
+        const double predication_ms = std::clamp(held_ms - assist_median, 0.0, 0.2 * assist_median);
+        std::cout << "D3D12 engine lead: medians: skipped " << lead_median << " ms, Assist " << assist_median
+                  << " ms, held back " << held_ms << " ms (predication " << predication_ms << " ms)" << std::endl;
+        Check(assist_median > 0.0 && lead_median <= 0.1 * assist_median + predication_ms,
+              "engine lead: the skipped passes' stamps are not about 0 ms (median " + std::to_string(lead_median) +
+                  " ms against Assist's " + std::to_string(assist_median) + " ms, predication " +
+                  std::to_string(predication_ms) + " ms)");
         Check(compared > 10 && same == compared && unmeasured_ms == 0.0,
               "engine lead: the merged flow read the measured flow it skipped (" + std::to_string(same) + " of " +
                   std::to_string(compared) + " as without it)");
