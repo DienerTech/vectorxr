@@ -1571,6 +1571,18 @@ void TestFrameGenProfileResolution() {
     Expect(inherited.ok && depthxr::ResolveFrameGenSettings(inherited.document, "DCS.exe").multiplier ==
                                depthxr::FrameGenMultiplier::kDynamic,
            "A profile without a frame multiplier should run Dynamic");
+    // Edge fill is off unless a profile (or the defaults) turns it on.
+    Expect(!inherited.document.framegen.defaults.edge_fill &&
+               !depthxr::ResolveFrameGenSettings(inherited.document, "DCS.exe").edge_fill,
+           "Edge fill should be off by default");
+    const depthxr::ParseResult filled = depthxr::ParseConfig(FrameGenConfigJson(
+        R"json({ "enabled": false, "profiles": [ { "name": "MSFS", "applicationIds": ["app-msfs"], "settings": { "edgeFill": true } } ] })json"));
+    Expect(filled.ok && filled.warnings.empty() &&
+               depthxr::ResolveFrameGenSettings(filled.document, "FlightSimulator2024.exe").edge_fill &&
+               !depthxr::ResolveFrameGenSettings(filled.document, "DCS.exe").edge_fill,
+           "A profile's edgeFill was not read: " + filled.error);
+    Expect(!depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "edgeFill": "yes" } })json")).ok,
+           "A non-boolean edgeFill was accepted");
 }
 
 // Frame Generation's A/B toggle takes a list too, and its legacy binding.
