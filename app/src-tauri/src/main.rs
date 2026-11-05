@@ -945,6 +945,9 @@ struct FrameGenSettings {
     // Head prediction past the runtime's limit.
     #[serde(default, skip_serializing_if = "is_false")]
     extend_head_prediction: bool,
+    // Edge fill: margins past the game's field of view (written only when on).
+    #[serde(default, skip_serializing_if = "is_false")]
+    edge_fill: bool,
 }
 
 fn default_framegen_interpolate_flow() -> String { "auto".to_owned() }
@@ -960,6 +963,7 @@ impl Default for FrameGenSettings {
             artifact_suppression: default_framegen_artifact_suppression(),
             motion_limit_percent: default_framegen_motion_limit_percent(),
             extend_head_prediction: false,
+            edge_fill: false,
         }
     }
 }
@@ -3418,6 +3422,7 @@ mod tests {
         assert_eq!(defaults.defaults.artifact_suppression, 50);
         assert_eq!(defaults.defaults.motion_limit_percent, 10);
         assert!(!defaults.defaults.extend_head_prediction);
+        assert!(!defaults.defaults.edge_fill);
         assert!(defaults.profiles.is_empty());
 
         // Older layers reject unknown keys (current ones ignore them with a
@@ -3435,12 +3440,14 @@ mod tests {
                 "settings": {
                     "synthesisMode": "interpolate", "flowQuality": "performance", "motionEstimation": "shader", "interpolateFlow": "shader",
                     "frameMultiplier": "3x", "artifactSuppression": 0, "motionLimitPercent": 25,
-                    "extendHeadPrediction": true
+                    "extendHeadPrediction": true,
+                    "edgeFill": true
                 }
             }]
         });
         let config: super::FrameGenModuleConfig = serde_json::from_value(input.clone()).unwrap();
         assert!(config.profiles[0].settings.extend_head_prediction);
+        assert!(config.profiles[0].settings.edge_fill);
         assert_eq!(serde_json::to_value(config).unwrap(), input);
 
         // Settings saved without a frame multiplier load as Dynamic and save it.
