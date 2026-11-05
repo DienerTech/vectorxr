@@ -5,7 +5,13 @@ param(
     [string]$Configuration = "Release",
     [switch]$SkipTests,
     [switch]$SkipFresh,
-    [switch]$CleanScratch
+    [switch]$CleanScratch,
+    # Tests CTest runs side by side; a test that touches a graphics device still runs alone (RUN_SERIAL in
+    # layer/CMakeLists.txt). The default, three quarters of the logical processors (up to 8), leaves the presenter
+    # tests' wall-clock pacing room: 3 on a 4-processor CI runner (on four of this desktop's processors 3 passed
+    # and 4 made the presenter tests late). 1 runs them one after another.
+    [ValidateRange(1, 64)]
+    [int]$TestJobs = [Math]::Max(1, [Math]::Min([Math]::Floor([Environment]::ProcessorCount * 3 / 4), 8))
 )
 
 Set-StrictMode -Version Latest
@@ -159,7 +165,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not $SkipTests) {
-    & $ctest --test-dir $buildPath -C $Configuration --output-on-failure
+    & $ctest --test-dir $buildPath -C $Configuration --output-on-failure --parallel $TestJobs
     if ($LASTEXITCODE -ne 0) {
         throw "Layer tests failed (exit code $LASTEXITCODE)."
     }

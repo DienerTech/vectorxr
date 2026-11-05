@@ -860,3 +860,43 @@ if(DEPTHXR_BUILD_TESTS)
     add_test(NAME depthxr_action_set_attachment_tests COMMAND depthxr_action_set_attachment_tests)
     set_tests_properties(depthxr_action_set_attachment_tests PROPERTIES TIMEOUT 10)
 endif()
+
+if(DEPTHXR_BUILD_TESTS)
+    # CTest may run tests side by side (ctest -j, as Build-Layer.ps1 does), but a test that touches a graphics device
+    # runs alone (RUN_SERIAL), WARP and the software Vulkan device included: never two at once (0x139 bug checks on
+    # this machine's GPU), and never beside the presenter's wall-clock pacing, which WARP's load on every core makes
+    # late (four presenter groups failed beside it under -j 8; none failed with only the CPU tests beside them).
+    # Every test is such a test except those listed here, which create no Direct3D or Vulkan device at all
+    # (stand-in runtimes and devices, or none).
+    set(_cpu_only_tests
+        vectorxr_hardware_probe_self_test
+        depthxr_layer_crt_imports_tests
+        depthxr_layer_load_tests
+        depthxr_crt_failure_report_tests
+        depthxr_test_adapter_tests
+        ${_presenter_tests}
+        depthxr_turbo_frame_tests
+        depthxr_pivot_pose_tests
+        depthxr_pivot_snap_tests
+        depthxr_pivot_gaze_tests
+        depthxr_eye_gaze_tests
+        depthxr_head_prediction_layer_tests
+        depthxr_spacewarp_probe_tests
+        depthxr_layer_tests
+        depthxr_head_prediction_tests
+        depthxr_turbo_trace_tests
+        depthxr_turbo_recovery_tests
+        depthxr_runtime_relay_tests
+        depthxr_external_status_tests
+        depthxr_process_exit_tests
+        depthxr_path_unicode_tests
+        depthxr_sound_player_tests
+        depthxr_thread_census_tests
+        depthxr_action_set_attachment_tests)
+    get_property(_layer_tests DIRECTORY PROPERTY TESTS)
+    foreach(_test IN LISTS _layer_tests)
+        if(NOT _test IN_LIST _cpu_only_tests)
+            set_property(TEST ${_test} PROPERTY RUN_SERIAL TRUE)
+        endif()
+    endforeach()
+endif()
