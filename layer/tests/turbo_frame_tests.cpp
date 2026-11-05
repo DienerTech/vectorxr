@@ -2347,7 +2347,19 @@ void TestUpstreamTurboDetectorWindow() {
 // letting its engaged pipeline go, through the scheduling delays of a busy
 // PC. A game that waits on a thread of its own and begins before rendering
 // (as DCS does) keeps Turbo.
+//
+// This runs on real threads and steady_clock, through the layer's own hooks;
+// how many frames the window needs is TestUpstreamTurboDetectorWindow's job,
+// on scripted times. Here a loaded machine (other builds) can make a pool
+// thread wake late for whole stretches, so the Toolkit shape gets as many
+// frames as it needs (up to kMaxFrames, several seconds) and must be seen and
+// stood aside from on the frame after; the game shape runs a long session and
+// must never be seen. Load only removes matches (a late wake, a preempted
+// begin), never adds them: the game's 3 ms render between begin and end can
+// never fit the 1 ms begin bound.
 void TestUpstreamToolkitTurboStandsAside() {
+    constexpr int kMaxFrames = 1200;
+    constexpr int kGameFrames = 300;
     for (const bool toolkit : {true, false}) {
         FakeRuntime runtime;
         TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
@@ -2357,17 +2369,44 @@ void TestUpstreamToolkitTurboStandsAside() {
                    depthxr::TurboFrameTestPeer::WaitForAsyncPrediction(),
                "Upstream Turbo establishment did not publish its runtime wait");
         Expect(depthxr::TurboFrameTestPeer::TurboEffective(), "Turbo must be engaged before the pattern is seen");
-        int seen_at = 0;
-        for (int frame = 1; frame <= 120; ++frame) {
-            // The pool thread's wait, as the last end returned; every 15th
-            // starts late, as on a busy PC.
-            std::future<XrFrameState> waited = std::async(std::launch::async, [frame] {
+
+        // One long-lived pool thread, as the Toolkit's: woken as each end
+        // returns, it waits the next frame (every 15th starts 5 ms late, as on
+        // a busy PC, whatever the machine adds).
+        std::mutex pool_mutex;
+        std::condition_variable pool_cv;
+        int requested = 0, done = 0;
+        bool stop = false;
+        XrFrameState pool_state{XR_TYPE_FRAME_STATE};
+        std::thread pool([&] {
+            std::unique_lock lock(pool_mutex);
+            for (;;) {
+                pool_cv.wait(lock, [&] { return stop || requested > done; });
+                if (stop) return;
+                const int frame = done + 1;
+                lock.unlock();
                 if (frame % 15 == 0) std::this_thread::sleep_for(5ms);
                 XrFrameState state{XR_TYPE_FRAME_STATE};
                 Expect(AppWait(&state) == XR_SUCCESS, "Upstream Turbo app wait failed");
-                return state;
-            });
-            const XrFrameState state = waited.get();
+                lock.lock();
+                pool_state = state;
+                ++done;
+                pool_cv.notify_all();
+            }
+        });
+        const auto pool_wait = [&] {
+            std::unique_lock lock(pool_mutex);
+            ++requested;
+            pool_cv.notify_all();
+            pool_cv.wait(lock, [&] { return done == requested; });
+            return pool_state;
+        };
+
+        int seen_at = 0, frames = 0;
+        bool stood_aside_next = false;
+        const int limit = toolkit ? kMaxFrames : kGameFrames;
+        for (int frame = 1; frame <= limit; ++frame) {
+            const XrFrameState state = pool_wait();
             if (toolkit) {
                 std::this_thread::sleep_for(3ms); // the game renders, then the layer above begins and ends
                 Expect(XR_SUCCEEDED(AppBegin()), "Upstream Turbo app begin failed");
@@ -2378,17 +2417,38 @@ void TestUpstreamToolkitTurboStandsAside() {
             end.displayTime = state.predictedDisplayTime;
             Expect(XR_SUCCEEDED(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end)),
                    "Upstream Turbo submit failed (frame " + std::to_string(frame) + ")");
-            if (!seen_at && depthxr::TurboFrameTestPeer::UpstreamTurboSeen()) {
-                seen_at = frame;
+            frames = frame;
+            if (seen_at) {
+                // The frame after the one that saw it: Turbo has stood aside.
+                stood_aside_next = !depthxr::TurboFrameTestPeer::TurboEffective();
+                break;
             }
+            if (depthxr::TurboFrameTestPeer::UpstreamTurboSeen()) seen_at = frame;
         }
-        Expect(depthxr::TurboFrameTestPeer::TurboEffective() == !toolkit,
-               toolkit ? "Turbo must stand aside for OpenXR Toolkit's Turbo above it"
-                       : "Turbo must stay engaged for a game that begins before it renders");
+        {
+            std::scoped_lock lock(pool_mutex);
+            stop = true;
+            pool_cv.notify_all();
+        }
+        pool.join();
+
         if (toolkit) {
-            Expect(seen_at > 0 && seen_at <= 90, "Toolkit's Turbo was seen at frame " + std::to_string(seen_at));
+            std::cout << "Upstream Turbo: Toolkit's pattern seen at frame " << seen_at << " (window "
+                      << depthxr::UpstreamTurboDetector::kWindow << ")" << std::endl;
+            Expect(seen_at > 0, "Toolkit's Turbo was not seen in " + std::to_string(frames) + " frames");
+            // The establishment end above is the window's first frame.
+            Expect(seen_at + 1 >= static_cast<int>(depthxr::UpstreamTurboDetector::kWindow),
+                   "Toolkit's Turbo was seen at frame " + std::to_string(seen_at) +
+                       ", before a window could hold enough frames");
+            Expect(stood_aside_next && !depthxr::TurboFrameTestPeer::TurboEffective(),
+                   "Turbo must stand aside for OpenXR Toolkit's Turbo above it (seen at frame " +
+                       std::to_string(seen_at) + ")");
             Expect(!depthxr::TurboFrameTestPeer::Handoff().wait_valid,
                    "Standing aside must let the engaged async pipeline's worker wait go");
+        } else {
+            Expect(!seen_at && frames == kGameFrames && depthxr::TurboFrameTestPeer::TurboEffective(),
+                   "Turbo must stay engaged for a game that begins before it renders (seen at frame " +
+                       std::to_string(seen_at) + ")");
         }
         Expect(runtime.StaleRejections() == 0, "Standing aside must not submit a stale frame");
         depthxr::TurboFrameTestPeer::SetToolkitAbove(false);
