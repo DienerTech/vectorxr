@@ -20,6 +20,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 
@@ -244,18 +245,30 @@ std::uint64_t MiB(std::uint64_t bytes) {
     return (bytes + (1u << 19)) >> 20;
 }
 
-// Holds the game's immediate context for a sequence of the bridge's calls
-// that changes its state and puts it back (the depth copy). Multithread
+// Holds the game's immediate context for the bridge's calls on it at a
+// release (a depth copy changes its state and puts it back). Multithread
 // protection serializes each Direct3D 11 call on its own: without the hold,
 // another thread's draw could land between the bridge's calls, under the
 // bridge's state, or have its own state overwritten when the game's goes
-// back. Taken whether protection is on or not (a thread entering it alone
-// does not wait); it serializes the CPU's calls only, nothing waits for the
-// GPU inside it.
+// back. Entered whether protection is on or not (a thread entering it alone
+// does not wait; Direct3D 11 takes the same lock for some calls, Flush among
+// them, even without protection, and its debug layer to read whether
+// protection is on). It serializes the CPU's calls only, nothing waits for
+// the GPU inside it.
+//
+// Lock order: taken before the bridge's mutex, and, at a hand-over
+// (D3D11Bridge::StageReleases), before any lock of the layer's. A game thread
+// may hold the device's lock (ID3D11Multithread::Enter) through an OpenXR
+// call that takes those: waiting for the context while holding one of them
+// would deadlock with it.
 class ContextHold {
   public:
-    explicit ContextHold(ID3D11Multithread* multithread) : multithread_(multithread) {
-        if (multithread_) multithread_->Enter();
+    ContextHold(ID3D11Multithread* multithread, const std::function<void()>* before_enter) {
+        if (multithread) {
+            if (before_enter && *before_enter) (*before_enter)();
+            multithread_ = multithread;
+            multithread_->Enter();
+        }
     }
     ~ContextHold() {
         if (multithread_) multithread_->Leave();
@@ -264,7 +277,7 @@ class ContextHold {
     ContextHold& operator=(const ContextHold&) = delete;
 
   private:
-    ID3D11Multithread* multithread_;
+    ID3D11Multithread* multithread_{nullptr};
 };
 
 // The session's mean and longest handover, "mean/max" in milliseconds.
@@ -305,12 +318,20 @@ struct D3D11Bridge::Impl {
         std::vector<Copy> copies;
         UINT64 done{0}; // the done value after its last copy
     };
+    // A release whose Direct3D 11 half ran ahead of its hand-over
+    // (StageReleases): the image, its "written" value and that half's time.
+    struct Staged {
+        std::uint32_t index{0};
+        UINT64 written{0};
+        double ms{0.0};
+    };
     struct Swapchain {
         Mode mode{Mode::kTwin};
         DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN}; // as the application asked
         DXGI_FORMAT storage{DXGI_FORMAT_UNKNOWN};
         DXGI_FORMAT depth_target{DXGI_FORMAT_UNKNOWN}; // depth: the runtime images' depth-stencil view format
         std::string private_reason;                    // depth kept private: why
+        std::string protection; // mirrored depth: the device's multithread protection (NoteDepthProtection)
         std::uint32_t width{0};
         std::uint32_t height{0};
         std::uint32_t array_size{1};
@@ -323,6 +344,8 @@ struct D3D11Bridge::Impl {
         ComPtr<ID3D12DescriptorHeap> depth_targets;
         std::vector<Image> images;
         std::deque<std::uint32_t> acquired; // acquired and not released yet, oldest first
+        std::uint32_t pending{0};  // the application's releases whose hand-over waits (ReleaseCalled)
+        std::deque<Staged> staged; // releases whose Direct3D 11 half ran (StageReleases), oldest first
         UINT64 last_done{0};
         std::uint64_t twin_bytes{0};
         std::uint64_t copies{0};
@@ -390,10 +413,15 @@ struct D3D11Bridge::Impl {
     std::uint64_t slow_handovers{0};
     std::function<void(const std::string&)> log;
     std::function<void()> depth_copy_hook; // SetDepthCopyHookForTest
+    // SetContextWaitHookForTest: read without `mutex` (set while nothing runs).
+    std::function<void()> context_wait_hook;
+    bool depth_protection_reported{false}; // the device has none to turn on: said once
 
-    // Counts a handover that started at `start` (holding `mutex`).
-    void NoteHandover(std::chrono::steady_clock::time_point start) {
-        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    // Counts a handover that started at `start`, `ahead_ms` of it having run
+    // before (its Direct3D 11 half, StageReleases), holding `mutex`.
+    void NoteHandover(std::chrono::steady_clock::time_point start, double ahead_ms = 0.0) {
+        const double ms =
+            ahead_ms + std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         handover_ms_total += ms;
         handover_ms_max = std::max(handover_ms_max, ms);
         ++handovers;
@@ -430,6 +458,32 @@ struct D3D11Bridge::Impl {
                      : "its device has no multithread protection to turn on: the bridge's Direct3D 11 calls there "
                        "may race the game's rendering."));
         }
+    }
+
+    // Holds the game's immediate context (ContextHold): before `mutex`.
+    ContextHold HoldContext() {
+        return ContextHold(multithread.Get(), &context_wait_hook);
+    }
+
+    // When a depth swapchain is mirrored, before its first copy (holding
+    // `mutex`, AddSwapchain having turned protection on before): the copy
+    // changes the immediate context's state and puts it back over many
+    // calls, which only multithread protection keeps the game's other
+    // threads out of (ContextHold), and a game rendering on a thread that
+    // never calls OpenXR would otherwise never get it (NoteThread sees
+    // OpenXR's threads only). Turned on once, never off; a game's own is
+    // left as it is. What the chain's description says of it.
+    std::string NoteDepthProtection(bool was_protected) {
+        multithread_protected = multithread->GetMultithreadProtected() != FALSE;
+        if (multithread_protected) {
+            return was_protected ? "on" : "turned on";
+        }
+        if (log && !depth_protection_reported) {
+            depth_protection_reported = true;
+            log("Direct3D 11 bridge: the game's device has no multithread protection to turn on: its depth copies "
+                "may race a thread of the game's rendering at the same time.");
+        }
+        return "unavailable";
     }
 
     // The Direct3D 12 debug layer's errors since the last call (holding `mutex`).
@@ -512,6 +566,9 @@ struct D3D11Bridge::Impl {
                << ", twinMiB=" << MiB(chain.twin_bytes) << ", composed=" << (chain.composed ? 1 : 0)
                << ", copies=" << chain.copies << ", doneWaits=" << chain.done_waits
                << ", skippedCopies=" << chain.skipped_copies << ", unmatchedReleases=" << chain.unmatched_releases;
+        if (!chain.protection.empty()) {
+            stream << ", multithreadProtection=" << chain.protection;
+        }
         return stream.str();
     }
 
@@ -925,18 +982,15 @@ struct D3D11Bridge::Impl {
     }
 
     // Copies the game's depth into the image's twin on the game's immediate
-    // context (holding `mutex`), leaving the context's state as it was. A
-    // game still holding the image as its depth target gets the target back
-    // after the copy: Direct3D 11 reads no texture bound for writing (it
-    // would unbind the copy's read instead). The whole sequence holds the
-    // context (ContextHold), so no other thread's call lands inside it.
+    // context (holding the context, ContextHold, then `mutex`), leaving the
+    // context's state as it was. A game still holding the image as its depth
+    // target gets the target back after the copy: Direct3D 11 reads no
+    // texture bound for writing (it would unbind the copy's read instead).
+    // The caller's hold makes the whole sequence one: no other thread's call
+    // lands inside it.
     void CopyDepthToTwin(const Swapchain& chain, Image& image) {
         const auto start = std::chrono::steady_clock::now();
-        ID3D11DeviceContext4* context = context11.Get();
-        {
-            const ContextHold hold(multithread.Get());
-            CopyDepthToTwinHeld(chain, image, context);
-        }
+        CopyDepthToTwinHeld(chain, image, context11.Get());
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         depth_copy_ms_total += ms;
         depth_copy_ms_max = std::max(depth_copy_ms_max, ms);
@@ -1017,6 +1071,88 @@ struct D3D11Bridge::Impl {
                                                                depth_target.Get(), 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
                                                                nullptr, nullptr);
         }
+    }
+
+    // Whether the release of `chain`'s oldest acquired image needs the
+    // game's immediate context (holding `mutex`): it is copied, and its
+    // Direct3D 11 half has not run yet.
+    static bool NeedsContext(const Swapchain& chain) {
+        return chain.staged.empty() && !chain.acquired.empty() && chain.mode != Mode::kPrivate &&
+               chain.acquired.front() < chain.images.size();
+    }
+
+    // The Direct3D 11 half of the release of `chain`'s oldest acquired image
+    // (holding the context, then `mutex`; NeedsContext): a depth image's copy
+    // into its twin, a multisampled image's resolve, and the "written"
+    // signal the bridge's queue waits for, flushed.
+    Staged Stage(Swapchain& chain) {
+        const auto start = std::chrono::steady_clock::now();
+        Staged staged;
+        staged.index = chain.acquired.front();
+        chain.acquired.pop_front();
+        NoteThread();
+        Image& image = chain.images[staged.index];
+        if (chain.mode == Mode::kDepth) {
+            // The twin is written again only after the bridge's queue is done
+            // drawing its last release (a wait on the GPU, ending as the
+            // colour's at acquire does); then the game's depth goes into it.
+            const UINT64 value = image.done;
+            if (value && done->GetCompletedValue() < value) {
+                context11->Wait(done11.Get(), value);
+                ++chain.done_waits;
+                ++done_waits;
+            }
+            CopyDepthToTwin(chain, image);
+        }
+        if (chain.mode == Mode::kResolve) {
+            const DXGI_FORMAT format = ResolveFormat(chain.format);
+            for (UINT slice = 0; slice < chain.array_size; ++slice) {
+                const UINT subresource = D3D11CalcSubresource(0, slice, 1);
+                context11->ResolveSubresource(image.twin11.Get(), subresource, image.private11.Get(), subresource,
+                                              format);
+            }
+        }
+        staged.written = ++written_value;
+        context11->Signal(written11.Get(), staged.written);
+        context11->Flush();
+        staged.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        return staged;
+    }
+
+    // The Direct3D 12 half (holding `mutex`; nothing of the game's context):
+    // the bridge's queue copies the twin into the runtime's image once
+    // Direct3D 11's "written" is signalled, ahead of anything else queued on
+    // it for the release (Frame Generation's capture). False when the copy
+    // was skipped (the bridge's queue is stalled).
+    bool Submit(Swapchain& chain, const Staged& staged) {
+        const auto start = std::chrono::steady_clock::now();
+        Image& image = chain.images[staged.index];
+        Copy* copy = ReadyCopy(chain, image);
+        if (!copy) {
+            NoteHandover(start, staged.ms);
+            // Every recording of the copy is still queued: the bridge's queue is
+            // stalled. The runtime's image keeps what it had.
+            ++chain.skipped_copies;
+            ++skipped_copies;
+            if (skipped_copies == next_skip_report && log) {
+                next_skip_report *= 10;
+                log("Direct3D 11 bridge: its queue is stalled; releases not copied into the runtime's images so "
+                    "far: " + std::to_string(skipped_copies) + ".");
+            }
+            return false;
+        }
+        queue->Wait(written.Get(), staged.written);
+        ID3D12CommandList* lists[] = {copy->list.Get()};
+        queue->ExecuteCommandLists(1, lists);
+        const UINT64 done_at = ++done_value;
+        queue->Signal(done.Get(), done_at);
+        copy->done = done_at;
+        image.done = done_at;
+        chain.last_done = done_at;
+        ++chain.copies;
+        ++copies;
+        NoteHandover(start, staged.ms);
+        return true;
     }
 
     bool MakePrivate(const Swapchain& chain, Image& image, const XrSwapchainCreateInfo& info, std::string& reason) {
@@ -1475,11 +1611,21 @@ bool D3D11Bridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateInf
             Impl::KeepDepthPrivate(chain, why);
         }
     }
+    // Before taking `mutex`: turning protection on may wait for the
+    // context's lock.
+    const bool protect = chain.mode == Impl::Mode::kDepth && impl_->multithread;
+    const bool was_protected = protect && impl_->multithread->GetMultithreadProtected() != FALSE;
+    if (protect && !was_protected) {
+        impl_->multithread->SetMultithreadProtected(TRUE);
+    }
     if (chain.mode == Impl::Mode::kPrivate && chain.private_reason.rfind("VECTORXR_", 0) != 0 && impl_->log) {
         impl_->log("Direct3D 11 bridge: depth swapchain " + Hex(reinterpret_cast<std::uintptr_t>(swapchain)) +
                    " stays the game's own (its depth is left out of submitted frames): " + chain.private_reason + ".");
     }
     std::scoped_lock lock(impl_->mutex);
+    if (protect) {
+        chain.protection = impl_->NoteDepthProtection(was_protected);
+    }
     impl_->swapchains[swapchain] = std::move(chain);
     ++impl_->swapchains_added;
     return true;
@@ -1548,7 +1694,7 @@ void D3D11Bridge::Acquired(XrSwapchain swapchain, std::uint32_t index) {
     if (!impl_) {
         return;
     }
-    std::scoped_lock lock(impl_->mutex);
+    std::unique_lock lock(impl_->mutex);
     Impl::Swapchain* chain = impl_->Find(swapchain);
     if (!chain) {
         return;
@@ -1566,87 +1712,112 @@ void D3D11Bridge::Acquired(XrSwapchain swapchain, std::uint32_t index) {
         return;
     }
     impl_->NoteThread();
-    impl_->context11->Wait(impl_->done11.Get(), value);
     ++chain->done_waits;
     ++impl_->done_waits;
+    // Queued without `mutex`: a call on the game's context may wait for its
+    // lock, which a game thread may hold while it waits for `mutex`.
+    lock.unlock();
+    impl_->context11->Wait(impl_->done11.Get(), value);
 }
 
 bool D3D11Bridge::Released(XrSwapchain swapchain) {
     if (!impl_) {
         return true;
     }
-    std::scoped_lock lock(impl_->mutex);
+    std::unique_lock lock(impl_->mutex);
     Impl::Swapchain* chain = impl_->Find(swapchain);
     if (!chain) {
         return true;
     }
+    // A release whose Direct3D 11 half did not run ahead (StageReleases)
+    // runs it here, holding the context first (ContextHold's lock order).
+    std::optional<ContextHold> hold;
+    if (Impl::NeedsContext(*chain)) {
+        lock.unlock();
+        hold.emplace(impl_->multithread.Get(), &impl_->context_wait_hook);
+        lock.lock();
+        chain = impl_->Find(swapchain);
+        if (!chain) {
+            return true;
+        }
+    }
     ++impl_->releases;
+    if (chain->pending > 0) {
+        --chain->pending;
+    }
+    if (!chain->staged.empty()) {
+        // ...and the bridge's queue then copies it into the runtime's image.
+        const Impl::Staged staged = chain->staged.front();
+        chain->staged.pop_front();
+        hold.reset();
+        return impl_->Submit(*chain, staged);
+    }
     if (chain->acquired.empty()) {
         ++chain->unmatched_releases;
         ++impl_->unmatched_releases;
         return true;
     }
-    const std::uint32_t index = chain->acquired.front();
-    chain->acquired.pop_front();
-    if (chain->mode == Impl::Mode::kPrivate || index >= chain->images.size()) {
+    if (!Impl::NeedsContext(*chain)) {
+        // Private depth (or an index past the images): nothing to copy.
+        chain->acquired.pop_front();
         return true;
     }
-    impl_->NoteThread();
-    Impl::Image& image = chain->images[index];
     // The game's rendering into the image is handed to the bridge's queue
     // (depth copied into its twin first, multisampled images resolved)...
-    const auto handover = std::chrono::steady_clock::now();
-    if (chain->mode == Impl::Mode::kDepth) {
-        // The twin is written again only after the bridge's queue is done
-        // drawing its last release (a wait on the GPU, ending as the
-        // colour's at acquire does); then the game's depth goes into it.
-        const UINT64 value = image.done;
-        if (value && impl_->done->GetCompletedValue() < value) {
-            impl_->context11->Wait(impl_->done11.Get(), value);
-            ++chain->done_waits;
-            ++impl_->done_waits;
-        }
-        impl_->CopyDepthToTwin(*chain, image);
+    const Impl::Staged staged = impl_->Stage(*chain);
+    hold.reset();
+    return impl_->Submit(*chain, staged);
+}
+
+void D3D11Bridge::StageReleases(XrSwapchain swapchain) {
+    if (!impl_) {
+        return;
     }
-    if (chain->mode == Impl::Mode::kResolve) {
-        const DXGI_FORMAT format = ResolveFormat(chain->format);
-        for (UINT slice = 0; slice < chain->array_size; ++slice) {
-            const UINT subresource = D3D11CalcSubresource(0, slice, 1);
-            impl_->context11->ResolveSubresource(image.twin11.Get(), subresource, image.private11.Get(),
-                                                 subresource, format);
+    const auto waiting = [&](const Impl::Swapchain& chain) {
+        return chain.pending > chain.staged.size() && chain.acquired.size() > 0;
+    };
+    {
+        std::scoped_lock lock(impl_->mutex);
+        bool any = false;
+        if (swapchain != XR_NULL_HANDLE) {
+            const Impl::Swapchain* chain = impl_->Find(swapchain);
+            any = chain && waiting(*chain);
+        } else {
+            any = std::any_of(impl_->swapchains.begin(), impl_->swapchains.end(),
+                              [&](const auto& entry) { return waiting(entry.second); });
+        }
+        if (!any) {
+            return;
         }
     }
-    const UINT64 written = ++impl_->written_value;
-    impl_->context11->Signal(impl_->written11.Get(), written);
-    impl_->context11->Flush();
-    Impl::Copy* copy = impl_->ReadyCopy(*chain, image);
-    if (!copy) {
-        impl_->NoteHandover(handover);
-        // Every recording of the copy is still queued: the bridge's queue is
-        // stalled. The runtime's image keeps what it had.
-        ++chain->skipped_copies;
-        ++impl_->skipped_copies;
-        if (impl_->skipped_copies == impl_->next_skip_report && impl_->log) {
-            impl_->next_skip_report *= 10;
-            impl_->log("Direct3D 11 bridge: its queue is stalled; releases not copied into the runtime's images so "
-                       "far: " + std::to_string(impl_->skipped_copies) + ".");
+    // The context first, holding nothing else (ContextHold's lock order)...
+    const ContextHold hold = impl_->HoldContext();
+    std::scoped_lock lock(impl_->mutex);
+    const auto stage = [&](Impl::Swapchain& chain) {
+        // ...each release the application made, oldest first: the image
+        // acquired earliest, as Released hands it over.
+        while (waiting(chain)) {
+            if (chain.mode == Impl::Mode::kPrivate || chain.acquired.front() >= chain.images.size()) {
+                return; // nothing to run ahead: Released hands it over as it is
+            }
+            chain.staged.push_back(impl_->Stage(chain));
         }
-        return false;
+    };
+    if (swapchain != XR_NULL_HANDLE) {
+        if (Impl::Swapchain* chain = impl_->Find(swapchain)) {
+            stage(*chain);
+        }
+    } else {
+        for (auto& [handle, chain] : impl_->swapchains) {
+            stage(chain);
+        }
     }
-    // ...which copies it into the runtime's image, ahead of anything else
-    // queued on it for the release (Frame Generation's capture).
-    impl_->queue->Wait(impl_->written.Get(), written);
-    ID3D12CommandList* lists[] = {copy->list.Get()};
-    impl_->queue->ExecuteCommandLists(1, lists);
-    const UINT64 done = ++impl_->done_value;
-    impl_->queue->Signal(impl_->done.Get(), done);
-    copy->done = done;
-    image.done = done;
-    chain->last_done = done;
-    ++chain->copies;
-    ++impl_->copies;
-    impl_->NoteHandover(handover);
-    return true;
+}
+
+void D3D11Bridge::SetContextWaitHookForTest(std::function<void()> hook) {
+    if (impl_) {
+        impl_->context_wait_hook = std::move(hook);
+    }
 }
 
 void D3D11Bridge::SetDepthCopyHookForTest(std::function<void()> hook) {
@@ -1656,12 +1827,15 @@ void D3D11Bridge::SetDepthCopyHookForTest(std::function<void()> hook) {
     }
 }
 
-void D3D11Bridge::ReleaseCalled() {
+void D3D11Bridge::ReleaseCalled(XrSwapchain swapchain) {
     if (!impl_) {
         return;
     }
     std::scoped_lock lock(impl_->mutex);
     impl_->NoteThread();
+    if (Impl::Swapchain* chain = impl_->Find(swapchain)) {
+        ++chain->pending;
+    }
 }
 
 void D3D11Bridge::Abandoned(XrSwapchain swapchain) {

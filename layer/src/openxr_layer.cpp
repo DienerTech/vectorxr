@@ -4697,6 +4697,9 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
     DrainTurboAsyncWait(kSwapchainDrainTimeout);
     {
         watch.Step("releasing the swapchain's deferred releases");
+        // The Direct3D 11 bridge's work on the game's context, before mutex_
+        // (D3D11Bridge::StageReleases).
+        d3d11_bridge_.StageReleases(swapchain);
         std::scoped_lock lock(mutex_);
         auto it = tracked_swapchains_.find(swapchain);
         if (it != tracked_swapchains_.end()) {
@@ -4839,6 +4842,11 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
     NoteThread(ThreadCensus::Call::AcquireSwapchainImage);
     std::uint32_t image_count = 0;
     {
+        // The Direct3D 11 bridge's work on the game's context for the
+        // hand-over below, before any lock of the layer's (a game thread may
+        // hold the context's lock through an OpenXR call that takes them:
+        // D3D11Bridge::StageReleases).
+        d3d11_bridge_.StageReleases(swapchain);
         // The releases go on without mutex_ (ForwardHandedOverReleases).
         std::unique_lock handover(bridge_handover_mutex_);
         std::unique_lock lock(mutex_);
@@ -4925,7 +4933,9 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
         // An image acquired ahead is waited for once the one before it is
         // released (OpenXR's order): a bridged release kept for the frame's
         // end goes on first, as at the next acquire (without mutex_:
-        // ForwardHandedOverReleases).
+        // ForwardHandedOverReleases). The Direct3D 11 bridge's work on the
+        // game's context first, as at an acquire.
+        d3d11_bridge_.StageReleases(swapchain);
         std::unique_lock handover(bridge_handover_mutex_);
         std::unique_lock lock(mutex_);
         if (const auto it = tracked_swapchains_.find(swapchain);
@@ -4991,7 +5001,7 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                 bridged->second.bridge_handovers.push_back(*released_index);
                 // The game may release on another thread than it ends frames
                 // on: Direct3D 11's immediate context is then shared.
-                d3d11_bridge_.ReleaseCalled();
+                d3d11_bridge_.ReleaseCalled(swapchain);
                 if (framegen_.TracesSwapchainCalls()) {
                     framegen_.Trace().Record("rel", reinterpret_cast<uint64_t>(swapchain), *released_index, 2);
                 }
@@ -9634,6 +9644,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
     // A bridged session's hand-over below forwards its releases without
     // mutex_ (ForwardHandedOverReleases); no other hand-over comes between.
+    // The Direct3D 11 bridge's work on the game's context for the frame's
+    // hand-over, before any lock of the layer's: a game thread may hold the
+    // context's lock (ID3D11Multithread::Enter) through an OpenXR call that
+    // takes them (D3D11Bridge::StageReleases).
+    d3d11_bridge_.StageReleases(XR_NULL_HANDLE);
     std::unique_lock handover(bridge_handover_mutex_, std::defer_lock);
     if (d3d11_bridge_.Active() || vulkan_bridge_.Active()) {
         handover.lock();

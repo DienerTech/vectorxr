@@ -2345,7 +2345,8 @@ struct Eye {
 XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, const std::vector<Color>& colors,
                const std::array<Eye, 2>& eyes, const Target* depth = nullptr, Gate* hold = nullptr,
                bool unknown_after_depth = false,
-               const std::function<void(std::array<XrCompositionLayerDepthInfoKHR, 2>&)>& edit_depth = {}) {
+               const std::function<void(std::array<XrCompositionLayerDepthInfoKHR, 2>&)>& edit_depth = {},
+               const std::function<XrResult(const XrFrameEndInfo&)>& end_frame = {}) {
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState state{XR_TYPE_FRAME_STATE};
     Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "xrWaitFrame");
@@ -2426,7 +2427,8 @@ XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, 
     end.layerCount = 1;
     end.layers = layers;
     g_runtime.hold = hold;
-    const XrResult result = app.api.end_frame(app.session, &end);
+    // `end_frame`: ends it instead (the frame's images all rendered and released).
+    const XrResult result = end_frame ? end_frame(end) : app.api.end_frame(app.session, &end);
     if (g_runtime.hold) {
         // The stand-in never read the frame back: let the game run on.
         g_runtime.hold->Open();
@@ -3328,6 +3330,114 @@ void TestReleaseOnAnotherThread(Game& game) {
     Target right = MakeTarget(app, ColorInfo(), "the right eye");
     CheckReleaseOnAnotherThread(app, game, left, right);
     StopApp(app);
+    EndCase(game);
+}
+
+// 4a. Lock order. A game thread holds the device's lock
+// (ID3D11Multithread::Enter, protection on) through its
+// xrReleaseSwapchainImage of the next frame's image, while the frame's
+// thread is in xrEndFrame, whose hand-over needs that lock (the bridge's
+// depth copy and "written" signal on the game's context). Driven by events:
+// the game thread enters the lock, the frame's thread ends its frame, and
+// the game thread releases only once the bridge is about to wait for the
+// lock (SetContextWaitHookForTest). Waiting for it while holding the layer's
+// mutex (the hand-over's lock) deadlocks: the release waits for that mutex.
+// The bridge waits for it before taking any of the layer's locks
+// (StageReleases): the release goes through, the game thread lets the lock
+// go, and the frame ends. A deadlock fails the case after a timeout (the
+// process ends: its threads cannot be got back).
+void TestContextHeldAcrossRelease(Game& game) {
+    const std::string name = "context-held-across-release";
+    BeginCase(name, game);
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(game.context.As(&multithread)), name + ": the game's context has ID3D11Multithread");
+    multithread->SetMultithreadProtected(TRUE); // a game entering the lock has protection on
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          name + ": a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target depth = MakeTarget(app, DepthInfo(2), "depth");
+    Target next = MakeTarget(app, ColorInfo(), "the next frame's image");
+    Check(!Peer::Bridge().Unmirrored(depth.swapchain), name + ": depth is mirrored");
+    const std::array<Eye, 2> eyes{{{&left, 0}, {&right, 0}}};
+    Check(Frame(app, game, {&left, &right}, {FrameColor(1, 0), FrameColor(1, 1)}, eyes, &depth) == XR_SUCCESS,
+          name + ": a first frame");
+
+    // Ends the case if `event` is not set in time: a deadlock.
+    const auto await = [&](HANDLE event, const char* what) {
+        if (WaitForSingleObject(event, 10000) != WAIT_OBJECT_0) {
+            std::cout << "FAILED: " << name << ": " << what
+                      << " within 10 s: deadlocked (the frame's thread waits for the device's lock holding a lock "
+                         "the game thread's release waits for)\n"
+                      << std::flush;
+            TerminateProcess(GetCurrentProcess(), 1);
+        }
+    };
+    const HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE waiting = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE released = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE ended = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::atomic<DWORD> frame_thread{0};
+    std::atomic<bool> hooked{false};
+    Peer::Bridge().SetContextWaitHookForTest([&] {
+        if (GetCurrentThreadId() == frame_thread.load() && !hooked.exchange(true)) {
+            SetEvent(waiting);
+        }
+    });
+    XrResult released_result = XR_ERROR_RUNTIME_FAILURE;
+    XrResult end_result = XR_ERROR_RUNTIME_FAILURE;
+    const std::size_t shown_before = ShownCount();
+    std::thread game_thread;
+    std::thread frame;
+    // The frame rendered and released on this thread; then the game thread
+    // takes the lock, and the frame's thread ends the frame.
+    const XrResult framed = Frame(
+        app, game, {&left, &right}, {FrameColor(3, 0), FrameColor(3, 1)}, eyes, &depth, nullptr, false, {},
+        [&](const XrFrameEndInfo& end) {
+            game_thread = std::thread([&] {
+                // The next frame's image, acquired and rendered before the lock.
+                const std::uint32_t index = Acquire(app, next);
+                Draw(game, next.images[index], FrameColor(2, 0));
+                multithread->Enter();
+                SetEvent(entered);
+                await(waiting, "the bridge did not come to the device's lock");
+                XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                released_result = app.api.release(next.swapchain, &release);
+                SetEvent(released);
+                multithread->Leave();
+            });
+            await(entered, "the game thread did not enter the device's lock");
+            frame = std::thread([&] {
+                frame_thread = GetCurrentThreadId();
+                end_result = app.api.end_frame(app.session, &end);
+                SetEvent(ended);
+            });
+            await(released, "the game thread's xrReleaseSwapchainImage did not return");
+            await(ended, "the frame's xrEndFrame did not return");
+            game_thread.join();
+            frame.join();
+            return end_result;
+        });
+    Check(framed == end_result, name + ": the frame's result");
+    Peer::Bridge().SetContextWaitHookForTest(nullptr);
+    for (const HANDLE event : {entered, waiting, released, ended}) CloseHandle(event);
+    Check(hooked, name + ": the frame's thread came to the device's lock while the game thread held it");
+    Check(released_result == XR_SUCCESS, name + ": the release " + std::to_string(released_result));
+    Check(end_result == XR_SUCCESS, name + ": the frame " + std::to_string(end_result));
+    const std::vector<ShownFrame> shown = Shown(shown_before);
+    Check(shown.size() == 1 && shown[0].views.size() == 2 && Near(shown[0].views[0].texel, FrameColor(3, 0)) &&
+              Near(shown[0].views[1].texel, FrameColor(3, 1)) && shown[0].views[0].depth,
+          name + ": the frame is shown, with its depth");
+    // And on: the next frame's image too.
+    Check(Frame(app, game, {&left, &right}, {FrameColor(4, 0), FrameColor(4, 1)}, eyes, &depth) == XR_SUCCESS,
+          name + ": a frame after");
+    CheckValidation(game, name);
+    StopApp(app);
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
     EndCase(game);
 }
 
@@ -6739,7 +6849,9 @@ int main(int argc, char** argv) {
     CheckFrameGenStatusLine();
     const bool bridged = TestBridgedSession(game);
     const char* only = std::getenv("BRIDGE_TEST_ONLY");
-    if (bridged && only && std::string(only) == "depth-rects") {
+    if (bridged && only && std::string(only) == "lock-order") {
+        TestContextHeldAcrossRelease(game);
+    } else if (bridged && only && std::string(only) == "depth-rects") {
         TestDepthRects(game, false);
         TestDepthRects(game, true);
         TestDepthRects(game, false, false);
@@ -6763,6 +6875,7 @@ int main(int argc, char** argv) {
         TestDestroyInstanceWithSession(game);
         TestStatusFile(game);
         TestReleaseOnAnotherThread(game);
+        TestContextHeldAcrossRelease(game);
         TestPrivateDepthSession(game);
         TestDepthRects(game, false);
         TestDepthRects(game, true);

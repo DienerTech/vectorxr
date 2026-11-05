@@ -787,7 +787,9 @@ The bridge keeps a Direct3D 11 game's depth to itself, as before, when it cannot
 images with more than one sample, or a runtime that does not make its depth images depth
 targets. The log says so for each such depth swapchain, and the game's depth then reaches
 neither Frame Generation nor the runtime. `VECTORXR_D3D11_BRIDGE_DEPTH=private` keeps every
-Direct3D 11 game's depth to itself, if copying it ever causes a problem in a game.
+Direct3D 11 game's depth to itself, if copying it ever causes a problem in a game. While the
+bridge copies a game's depth, it turns the game's Direct3D 11 multithread protection on (if the
+game has not), so no other thread of the game's renders in the middle of a copy.
 
 Depth whose rectangle lies outside its depth image, as UEVR sends with an upscaler or a screen
 percentage that makes its depth image smaller than its color image, is left out of the frame for

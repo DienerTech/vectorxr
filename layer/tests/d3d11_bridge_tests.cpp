@@ -1523,10 +1523,17 @@ void TestDepthKeepsGameState(Game& game) {
 // the copy has put the game's state back (it never sees the copy's shader),
 // and what it binds stays bound (the copy's restore does not overwrite it).
 // Each Direct3D 11 call being serialized on its own would let it in between.
-void TestDepthCopyHoldsContext(Game& game) {
+// `game_protected` false: the game never turned protection on, and the other
+// thread is a render thread that never calls OpenXR (the bridge sees one
+// thread only): mirroring a depth swapchain turns it on, says so once, and
+// the other thread is kept out all the same. Without that, its calls ran
+// inside the copy (protection stayed off).
+void TestDepthCopyHoldsContext(Game& game, bool game_protected = true) {
+    const std::string name = game_protected ? "depth copy holds the context"
+                                            : "depth copy holds the context from a thread that never calls OpenXR";
     ComPtr<ID3D11Multithread> multithread;
     Check(SUCCEEDED(game.context.As(&multithread)), "the game's context has ID3D11Multithread");
-    multithread->SetMultithreadProtected(TRUE);
+    multithread->SetMultithreadProtected(game_protected ? TRUE : FALSE);
     GameDepthDraw draw(game);
     GameViews views(game, 32, 32);
     D3D11Bridge bridge;
@@ -1580,8 +1587,21 @@ void TestDepthCopyHoldsContext(Game& game) {
     CloseHandle(inside);
     bridge.SetDepthCopyHookForTest(nullptr);
 
-    Check(!other_ran_inside, "the other thread's calls wait for the copy to put the game's state back");
-    Check(other_saw.Get() == views.shader.Get(), "the other thread sees the game's own compute shader");
+    Check(!other_ran_inside, name + ": the other thread's calls wait for the copy to put the game's state back");
+    Check(other_saw.Get() == views.shader.Get(), name + ": the other thread sees the game's own compute shader");
+    // Checked after the interleaving, which shows what protection being off would let in.
+    Check(multithread->GetMultithreadProtected() != FALSE,
+          name + ": a mirrored depth swapchain leaves multithread protection on");
+    Check(Contains(bridge.Describe(swapchain),
+                   game_protected ? "multithreadProtection=on" : "multithreadProtection=turned on"),
+          name + ": the swapchain's description says so: " + bridge.Describe(swapchain));
+    Check(g_log.empty(), name + ": nothing to report");
+    Check(bridge.AddSwapchain(Handle(0x57), DepthSwapchainInfo(DXGI_FORMAT_D32_FLOAT, 32, 32, 1), FakeEnumerate,
+                              reason) &&
+              Contains(bridge.Describe(Handle(0x57)), "multithreadProtection=on") &&
+              !Contains(bridge.Describe(Handle(0x57)), "turned on"),
+          name + ": a second depth swapchain finds it on: " + bridge.Describe(Handle(0x57)));
+    Check(Contains(bridge.Summary(), "secondThread=no, multithreadProtected=yes"), name + ": " + bridge.Summary());
     ComPtr<ID3D11ComputeShader> shader;
     game.context->CSGetShader(&shader, nullptr, nullptr);
     ComPtr<ID3D11UnorderedAccessView> write;
@@ -1597,7 +1617,7 @@ void TestDepthCopyHoldsContext(Game& game) {
     Check(compare.exact == compare.texels, "the depth arrives exact beside the other thread's work (" +
                                                std::to_string(compare.wrong) + " wrong, " + compare.first_wrong + ")");
     g_log.clear();
-    CheckClean(bridge, game, "depth copy holds the context");
+    CheckClean(bridge, game, name);
     bridge.End();
     multithread->SetMultithreadProtected(FALSE);
 }
@@ -2270,6 +2290,7 @@ int main(int argc, char** argv) {
     TestDepthStillBound(game);
     TestDepthKeepsGameState(game);
     TestDepthCopyHoldsContext(game);
+    TestDepthCopyHoldsContext(game, false);
     TestDepthDoneWait(game);
     TestDepthPrivate(game);
     TestDepthReachesFrameGen(game);
