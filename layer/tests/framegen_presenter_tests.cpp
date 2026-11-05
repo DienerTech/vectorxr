@@ -331,6 +331,10 @@ struct GpuLog {
     };
     std::mutex syntheses_mutex;
     std::vector<Synthesis> syntheses;
+    // The output images each Synthesize was given (under syntheses_mutex).
+    std::vector<std::vector<FrameGenImage>> synthesis_outputs;
+    // Edge fill (SupportsEdgeFill): the backend fills output images' margins.
+    bool edge_fill{false};
     std::atomic<int> synthesis_failures{0};
     // SynthesizeStale: supported, written, and asked of a motion frame that
     // was not the frame's previous one or not measured yet.
@@ -437,6 +441,7 @@ class FakeGpu final : public FrameGenGpu {
   public:
     explicit FakeGpu(GpuLog* log) : log_(log) {}
     const char* Name() const override { return "Fake"; }
+    bool SupportsEdgeFill() const override { return log_->edge_fill; }
     std::string HardwareFlowStatus() const override {
         return log_->hardware_available ? "active" : "fake GPU has no optical flow hardware";
     }
@@ -716,6 +721,7 @@ class FakeGpu final : public FrameGenGpu {
         {
             std::scoped_lock lock(log_->syntheses_mutex);
             log_->syntheses.push_back({frame, mode, fraction, now});
+            log_->synthesis_outputs.push_back(outputs);
         }
         // Seen from the eye's position at the frame's time, as the presenter
         // places the views (where depth is used).
@@ -1245,6 +1251,9 @@ struct Runtime {
     std::vector<XrTime> submitted_times;
     std::vector<std::chrono::steady_clock::time_point> submitted_at;
     std::vector<std::vector<XrSwapchain>> submitted_swapchains;
+    // Each submission's first layer's projection views as submitted (their
+    // `next` pointers are not followed).
+    std::vector<std::vector<XrCompositionLayerProjectionView>> submitted_views;
     std::vector<bool> submitted_depth;
     std::vector<float> submitted_left_x; // the first projection view's position
 
@@ -1430,6 +1439,12 @@ struct Runtime {
                 left_x = projection->viewCount ? projection->views[0].pose.position.x : 0.0f;
             }
             submitted_swapchains.push_back(swapchains);
+            if (info->layerCount) {
+                const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+                submitted_views.emplace_back(projection->views, projection->views + projection->viewCount);
+            } else {
+                submitted_views.emplace_back();
+            }
             submitted_depth.push_back(depth);
             submitted_left_x.push_back(left_x);
             log.push_back({info->displayTime, swapchains, info->layerCount, releases});
@@ -1809,6 +1824,162 @@ void TestOutputsKeptAcrossMultipliers() {
     for (int i = 0; i < 6; ++i) app.Frame();
     Check(g_creates == 4, "outputs: stepping down and back up reallocates nothing");
     Check(!runtime.ordering_violation && !g_release_violation, "outputs: calls stayed ordered");
+}
+
+// Edge fill: the views of a submission shown from output images widened by
+// `margins` (the game's views: ±0.8 rad, 1600 x 1600): each image whole, its
+// field of view the game's carried on across the margins at the game's
+// pixel spacing, and no depth.
+bool ShowsFilled(const std::vector<XrCompositionLayerProjectionView>& views, const FrameGenEdgeMargins& margins) {
+    const double spacing = (std::tan(0.8) - std::tan(-0.8)) / 1600.0;
+    for (const XrCompositionLayerProjectionView& view : views) {
+        const XrRect2Di& rect = view.subImage.imageRect;
+        const double tl = std::tan(double(view.fov.angleLeft)), tr = std::tan(double(view.fov.angleRight));
+        const double tu = std::tan(double(view.fov.angleUp)), td = std::tan(double(view.fov.angleDown));
+        if (rect.offset.x != 0 || rect.offset.y != 0 ||
+            rect.extent.width != static_cast<std::int32_t>(1600 + margins.left + margins.right) ||
+            rect.extent.height != static_cast<std::int32_t>(1600 + margins.up + margins.down) ||
+            std::abs((tr - tl) / rect.extent.width - spacing) > 1e-6 * spacing * 10 ||
+            std::abs((tu - td) / rect.extent.height - spacing) > 1e-6 * spacing * 10 ||
+            std::abs(tl - (std::tan(-0.8) - margins.left * spacing)) > 1e-5 ||
+            std::abs(tu - (std::tan(0.8) + margins.up * spacing)) > 1e-5 || view.next) {
+            return false;
+        }
+    }
+    return !views.empty();
+}
+
+// The margins an output image gets for the test app's views: as asked
+// (FrameGenEdgeFillMargins), each rounded up to whole 32-pixel tiles.
+FrameGenEdgeMargins TestAppMargins() {
+    FrameGenEdgeMargins margins =
+        FrameGenEdgeFillMargins({-0.8f, 0.8f, 0.8f, -0.8f}, {1600, 1600}, kFrameGenEdgeFillHorizontalDegrees,
+                                kFrameGenEdgeFillVerticalDegrees);
+    for (std::uint32_t* margin : {&margins.left, &margins.right, &margins.up, &margins.down}) {
+        *margin = (*margin + 31) / 32 * 32;
+    }
+    return margins;
+}
+
+// Edge fill's margins: degrees past each edge at the frame's own pixel
+// spacing (the outer edge of a wide view needs far more pixels than its inner
+// one), the widened field of view exactly what the margins' pixels show,
+// within half the frame and the largest image; the research switch's values.
+void TestEdgeFillMargins() {
+    // A Pimax Crystal Super left eye (round 1): 63.5 degrees out, 51.5 in,
+    // 58.7 up and down, 6240 x 6280.
+    constexpr double kDegree = 3.14159265358979323846 / 180.0;
+    const FrameGenFov pimax{static_cast<float>(-63.5 * kDegree), static_cast<float>(51.5 * kDegree),
+                            static_cast<float>(58.7 * kDegree), static_cast<float>(-58.7 * kDegree)};
+    const FrameGenExtent extent{6240, 6280};
+    const FrameGenEdgeMargins margins = FrameGenEdgeFillMargins(pimax, extent, 3.0f, 1.5f);
+    Check(margins.left > 2 * margins.right && margins.up == margins.down && margins.up > 0,
+          "edge fill margins: the outer edge needs the widest margin (" + std::to_string(margins.left) + "/" +
+              std::to_string(margins.right) + "/" + std::to_string(margins.up) + ")");
+    const FrameGenFov widened = FrameGenEdgeFillFov(pimax, extent, margins);
+    Check(widened.left <= pimax.left - 3.0f * kDegree + 1e-4 && widened.left > pimax.left - 3.3f * kDegree &&
+              widened.right >= pimax.right + 3.0f * kDegree - 1e-4 && widened.up >= pimax.up + 1.5f * kDegree - 1e-4 &&
+              widened.down <= pimax.down - 1.5f * kDegree + 1e-4,
+          "edge fill margins: each edge reaches its degrees, no more than a pixel past them");
+    const double spacing = (std::tan(double(pimax.right)) - std::tan(double(pimax.left))) / extent.width;
+    const double widened_spacing = (std::tan(double(widened.right)) - std::tan(double(widened.left))) /
+                                   (extent.width + margins.left + margins.right);
+    Check(std::abs(widened_spacing / spacing - 1.0) < 1e-5, "edge fill margins: the margins keep the frame's pixel spacing");
+    Check(!FrameGenEdgeFillMargins(pimax, extent, 0.0f, 0.0f).Any(), "edge fill margins: none for no degrees");
+    Check(!FrameGenEdgeFillMargins({0.5f, -0.5f, 0.5f, -0.5f}, extent, 3.0f, 3.0f).Any(),
+          "edge fill margins: none for a field of view that is not one");
+    const FrameGenEdgeMargins capped = FrameGenEdgeFillMargins(pimax, {16000, 16000}, 15.0f, 15.0f);
+    Check(16000 + capped.left + capped.right <= kFrameGenEdgeFillMaxExtent &&
+              16000 + capped.up + capped.down <= kFrameGenEdgeFillMaxExtent,
+          "edge fill margins: the image fits the largest texture");
+    const FrameGenEdgeMargins halved = FrameGenEdgeFillMargins({-1.4f, 1.4f, 1.4f, -1.4f}, {100, 100}, 15.0f, 15.0f);
+    Check(halved.left <= 50 && halved.up <= 50, "edge fill margins: no wider than half the frame");
+    Check(ParseFrameGenEdgeFillDegrees("4") == std::array<float, 2>{4.0f, 4.0f} &&
+              ParseFrameGenEdgeFillDegrees("4,2.5") == std::array<float, 2>{4.0f, 2.5f} &&
+              !ParseFrameGenEdgeFillDegrees("") && !ParseFrameGenEdgeFillDegrees("20") &&
+              !ParseFrameGenEdgeFillDegrees("-1,2") && !ParseFrameGenEdgeFillDegrees("on"),
+          "edge fill margins: the research switch's values");
+}
+
+// Edge fill on the frames written inline (Interpolate at 2x): generated
+// frames go out in output images wider than the game's by a margin each
+// side, the frame placed at the margins' corner (FrameGenImage::content),
+// submitted with the field of view widened to match and without the game's
+// depth; the game's own frames are as it submitted them. Without a backend
+// that fills margins, or turned off live, the outputs are the game's size.
+void TestEdgeFill() {
+    const FrameGenEdgeMargins asked =
+        FrameGenEdgeFillMargins({-0.8f, 0.8f, 0.8f, -0.8f}, {1600, 1600}, kFrameGenEdgeFillHorizontalDegrees,
+                                kFrameGenEdgeFillVerticalDegrees);
+    // 3 degrees past tan 1.03 at 1600 px across tangents 2.06: ~88 px; 1.5
+    // degrees vertically ~43 px.
+    Check(asked.left == asked.right && asked.up == asked.down && asked.left >= 80 && asked.left <= 96 &&
+              asked.up >= 38 && asked.up <= 48,
+          "edge fill: margins for the test view (" + std::to_string(asked.left) + ", " + std::to_string(asked.up) + ")");
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.edge_fill = true;
+    {
+        // A backend that cannot fill margins: outputs at the frame's size.
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+        presenter.Configure(settings);
+        App app(presenter, runtime);
+        for (int i = 0; i < 6; ++i) app.Frame();
+        Check(g_creates == 2 && g_create_sizes[0] == std::make_pair(1600u, 1600u),
+              "edge fill: without the backend's support the outputs are the frame's size");
+        Check(!gpu.last.empty() && gpu.last[0].outputs[0].content.x == 0 && gpu.last[0].outputs[0].content.y == 0,
+              "edge fill: without the backend's support the frame fills its output");
+    }
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.edge_fill = true;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    presenter.Configure(settings);
+    App app(presenter, runtime);
+    for (int i = 0; i < 6; ++i) app.Frame();
+    const FrameGenEdgeMargins margins = TestAppMargins();
+    Check(g_creates == 2 && g_create_sizes[0].first == 1600 + margins.left + margins.right &&
+              g_create_sizes[0].second == 1600 + margins.up + margins.down,
+          "edge fill: each eye's output is the frame and its margins (" + std::to_string(g_create_sizes[0].first) + "x" +
+              std::to_string(g_create_sizes[0].second) + ")");
+    Check(!gpu.last.empty() && gpu.last[0].outputs[0].content.x == static_cast<std::int32_t>(margins.left) &&
+              gpu.last[0].outputs[0].content.y == static_cast<std::int32_t>(margins.up) &&
+              gpu.last[0].outputs[0].rect.extent.width == static_cast<std::int32_t>(g_create_sizes[0].first) &&
+              gpu.last[1].outputs[0].content.x == static_cast<std::int32_t>(margins.left),
+          "edge fill: the backend is told where the frame lies in its output");
+    std::size_t generated = 0, real = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = 0; i < runtime.submitted_views.size(); ++i) {
+            const auto& views = runtime.submitted_views[i];
+            if (views.empty()) continue;
+            if (IsAppImage(runtime.submitted_swapchains[i])) {
+                ++real;
+                Check(views[0].fov.angleLeft == -0.8f && views[0].subImage.imageRect.extent.width == 1600,
+                      "edge fill: the game's own frames keep its field of view");
+            } else {
+                ++generated;
+                Check(ShowsFilled(views, margins) && !runtime.submitted_depth[i],
+                      "edge fill: a generated frame is shown widened across its margins, without depth");
+            }
+        }
+    }
+    Check(generated >= 2 && real >= 2, "edge fill: generated and real frames were shown");
+    // Off while running: the next frames' outputs are the frame's size again.
+    settings.edge_fill = false;
+    presenter.Configure(settings);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    Check(g_creates == 4 && g_create_sizes[2] == std::make_pair(1600u, 1600u),
+          "edge fill: turned off, the outputs are made anew at the frame's size (" + std::to_string(g_creates) + ")");
+    Check(gpu.last[0].outputs[0].content.x == 0 && gpu.last[0].outputs[0].rect.extent.width == 1600,
+          "edge fill: turned off, the frame fills its output");
+    Check(!runtime.ordering_violation && !g_release_violation, "edge fill: calls stayed ordered");
 }
 
 void TestSubmissionSpacing() {
@@ -3697,6 +3868,75 @@ void TestJitExtrapolation() {
     CheckOrderedTimes(log, "jit extrapolation");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "jit extrapolation: calls stayed ordered");
+}
+
+// Edge fill just in time (Extrapolate at 3x): every frame the presenter
+// thread writes, real frames' exact copies too, goes to an output widened
+// by the margins, the frame at their corner, and is shown with the field of
+// view widened to match, never with the game's depth.
+void TestJitEdgeFill() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.edge_fill = true;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k3, app, runtime, owned);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::k3;
+    settings.edge_fill = true;
+    presenter.Configure(settings);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < 700ms) {
+        const XrFrameState state = app->Wait();
+        app->Begin();
+        std::this_thread::sleep_for(4ms);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "jit edge fill: end");
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.state == FrameGenState::kActive, "jit edge fill: presents from its own thread");
+    const FrameGenEdgeMargins margins = TestAppMargins();
+    std::size_t outputs = 0, misplaced = 0;
+    {
+        std::scoped_lock lock(gpu.syntheses_mutex);
+        for (const auto& images : gpu.synthesis_outputs) {
+            for (const FrameGenImage& image : images) {
+                ++outputs;
+                misplaced += image.content.x != static_cast<std::int32_t>(margins.left) ||
+                                     image.content.y != static_cast<std::int32_t>(margins.up) ||
+                                     image.rect.extent.width != static_cast<std::int32_t>(1600 + margins.left + margins.right)
+                                 ? 1
+                                 : 0;
+            }
+        }
+    }
+    Check(outputs > 20 && misplaced == 0, "jit edge fill: every frame written is placed inside its margins (" +
+                                              std::to_string(misplaced) + " of " + std::to_string(outputs) + " not)");
+    std::size_t shown = 0, plain = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = first + 10; i < runtime.submitted_views.size(); ++i) {
+            if (runtime.submitted_views[i].empty()) continue;
+            ++shown;
+            plain += ShowsFilled(runtime.submitted_views[i], margins) && !runtime.submitted_depth[i] ? 0 : 1;
+        }
+    }
+    Check(shown > 20 && plain == 0, "jit edge fill: every refresh is shown widened across the margins (" +
+                                        std::to_string(plain) + " of " + std::to_string(shown) + " not)");
+    int creates = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        creates = g_creates;
+    }
+    Check(creates == 2, "jit edge fill: one output per eye, made once (" + std::to_string(creates) + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "jit edge fill: calls stayed ordered");
 }
 
 // Interpolate at 3x just in time: the presenter thread shows every refresh,
@@ -15802,6 +16042,8 @@ int main(int argc, char** argv) {
     RUN(TestQuadExtrapolation);
     RUN(TestSubmissionSpacing);
     RUN(TestOutputsKeptAcrossMultipliers);
+    RUN(TestEdgeFillMargins);
+    RUN(TestEdgeFill);
     RUN(TestDepthCapture);
     RUN(TestEyePredictionSwitch);
     RUN(TestEngineMotionCensus);
@@ -15825,6 +16067,7 @@ int main(int argc, char** argv) {
     RUN(TestSlowDynamicHorizonJitterReported);
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
+    RUN(TestJitEdgeFill);
     RUN(TestJitEyeShiftReported);
     RUN(TestEyeProbe);
     RUN(TestJitDynamicExtrapolation);
