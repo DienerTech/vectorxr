@@ -15654,17 +15654,31 @@ void TestInterpolateFlowAcceptanceDelay() {
           "flow delay: switches and recovery are logged with reasons");
 }
 
+// --group <name> runs one group of the tests below (GROUP marks where each
+// begins), so CTest can run the groups side by side; without it, all of them.
+const char* g_group = nullptr;
+bool g_group_active = true;
+int g_tests_run = 0;
+#define GROUP(name) (g_group_active = !g_group || std::string(g_group) == (name))
+
 #define RUN(test)                                                                                \
     do {                                                                                         \
         const char* only = std::getenv("FG_TEST_ONLY");                                          \
+        if (!g_group_active) break;                                                              \
         if (only && std::string(#test).find(only) == std::string::npos) break;                   \
         std::cerr << #test << (g_jit ? " (just in time)" : "") << std::endl;                     \
+        ++g_tests_run;                                                                           \
+        const auto run_started = std::chrono::steady_clock::now();                               \
         test();                                                                                  \
+        std::cerr << "  " #test " took "                                                         \
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - run_started).count() \
+                  << " s" << std::endl;                                                          \
     } while (0)
 
 // Dynamic stand-by and its benefit guard, GPU-aware pacing, pauses and
 // telemetry.
 void RunPolicyTests() {
+    GROUP("policy");
     for (const bool jit : {false, true}) {
         g_jit = jit;
         RUN(TestCaptureOnlyWhileArmed);
@@ -15687,6 +15701,7 @@ void RunPolicyTests() {
     RUN(TestLeadResetOnRestart);
     RUN(TestLeadStepsDownAfterHitches);
     RUN(TestLeadDoesNotFlap);
+    GROUP("policy_late");
     RUN(TestLeadCeilingKeepsLeadTheRingHolds);
     RUN(TestLeadCeilingRespectsProvenLead);
     RUN(TestLeadCeilingResetsOnRestart);
@@ -15790,7 +15805,13 @@ int main(int argc, char** argv) {
         RunPolicyTests();
         return 0;
     }
-    const HANDLE policy = std::getenv("FG_TEST_SERIAL") ? nullptr : StartPolicyTests();
+    if (argc > 2 && std::string(argv[1]) == "--group") {
+        // One group, in this process: of the tests below or of the policy
+        // tests.
+        g_group = argv[2];
+    }
+    const HANDLE policy = g_group || std::getenv("FG_TEST_SERIAL") ? nullptr : StartPolicyTests();
+    GROUP("pacing");
     RUN(TestCompositionExtensions);
     RUN(TestCompositionUnsupportedChains);
     RUN(TestCompositionRefusalSurvivesRuntimeFailure);
@@ -15838,6 +15859,7 @@ int main(int argc, char** argv) {
     RUN(TestToggleOffLogsNoEngagement);
     // The threaded presenter's lifecycle with frames written together, then
     // just in time.
+    GROUP("lifecycle");
     for (const bool jit : {false, true}) {
         g_jit = jit;
         RUN(TestThreadedToggleAndReset);
@@ -15912,6 +15934,7 @@ int main(int argc, char** argv) {
     RUN(TestEchoRuntimeClearsHalving);
     RUN(TestEchoHitchKeepsRefresh);
     // Quad views Frame Generation composes itself.
+    GROUP("quad");
     RUN(TestQuadClaimAndCompose);
     RUN(TestQuadSetupThroughComposedFrame);
     RUN(TestQuadFallbackShownAsIs);
@@ -15935,6 +15958,7 @@ int main(int argc, char** argv) {
     RUN(TestQuadComposeStallOnce);
     // Runtime clocks that misbehave (Varjo's, SteamVR's): last, so the tests
     // above keep the timing they had beside the policy tests.
+    GROUP("clocks");
     RUN(TestVarjoClockJumpDynamic);
     RUN(TestVarjoClockJumpWhilePresenting);
     RUN(TestVarjoTransientThrottle);
@@ -15952,8 +15976,11 @@ int main(int argc, char** argv) {
     }
     RUN(TestAutoGpuBoundProbeReturnsPromptly);
     RUN(TestAutoProbeAllowsLatencyAndShortHitch);
+    GROUP("probe_burst");
     RUN(TestAutoProbeSurvivesTransitionBurst);
     g_jit = false;
+    // The lead against hitches and late frames.
+    GROUP("lead");
     RUN(TestClockLogPairs);
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
@@ -15971,6 +15998,7 @@ int main(int argc, char** argv) {
     }
     g_jit = false;
     // The lead's ceiling from the history ring.
+    GROUP("ceiling");
     RUN(TestRingLeadFloor);
     RUN(TestLeadCeilingFollowsRing);
     RUN(TestLeadCeilingDynamicFollowsSpacing);
@@ -15983,7 +16011,13 @@ int main(int argc, char** argv) {
     RUN(TestLeadCeilingProbeAndTrial);
     RUN(TestLeadCeilingRaisesOnBursts);
     RUN(TestLeadCeilingActsThroughHitches);
-    if (!policy) {
+    if (g_group) {
+        RunPolicyTests();
+        if (g_tests_run == 0 && !std::getenv("FG_TEST_ONLY")) {
+            std::cerr << "FAILED: no tests in group " << g_group << std::endl;
+            return 1;
+        }
+    } else if (!policy) {
         RunPolicyTests();
     } else {
         DWORD code = 1;

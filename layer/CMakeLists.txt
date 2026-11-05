@@ -576,10 +576,18 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_executable(depthxr_framegen_presenter_tests tests/framegen_presenter_tests.cpp)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-        add_test(NAME depthxr_framegen_presenter_tests COMMAND depthxr_framegen_presenter_tests)
-        # Paced by the wall clock: about 375 s on a fast desktop (0.19.2), longer on a shared CI runner. The lead
-        # ceiling's tests add about 3 minutes; serially (FG_TEST_SERIAL=1) the suite takes about 16 minutes.
-        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 1200)
+        # Paced by the wall clock, mostly waiting: about 680 s on a fast desktop (0.20.1) in one process beside its
+        # policy tests (no argument). CTest runs its groups (--group, GROUP in the test) as tests of their own, side by
+        # side under ctest -j: 45-160 s each on a desktop, about 18 minutes in all. -R depthxr_framegen_presenter_tests_
+        # selects them. They create no graphics device.
+        set(_presenter_tests "")
+        foreach(_group IN ITEMS pacing lifecycle quad clocks probe_burst lead ceiling policy policy_late)
+            add_test(NAME depthxr_framegen_presenter_tests_${_group}
+                     COMMAND depthxr_framegen_presenter_tests --group ${_group})
+            list(APPEND _presenter_tests depthxr_framegen_presenter_tests_${_group})
+        endforeach()
+        # COST: CTest starts the longest tests first, before it has timings of its own.
+        set_tests_properties(${_presenter_tests} PROPERTIES TIMEOUT 600 COST 200)
         add_executable(depthxr_osd_tests tests/osd_tests.cpp)
         target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
         target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
