@@ -27,6 +27,7 @@
 
 #include "depthxr/framegen_gpu.h"
 #include "depthxr/framegen_plan.h"
+#include "depthxr/game_context_lock.h"
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 #include "depthxr/quadviews_sizing.h"
@@ -76,6 +77,10 @@ class D3D11BridgeLayerTestPeer {
     }
     static D3D11Bridge& Bridge() {
         return OpenXrLayer::Instance().d3d11_bridge_;
+    }
+    // The game's device's lock, as the layer takes it before its own locks.
+    static GameContextLock& GameContext() {
+        return *OpenXrLayer::Instance().game_context_;
     }
     static bool QueueSubstituted() {
         return OpenXrLayer::Instance().framegen_queue_.Active();
@@ -2020,6 +2025,22 @@ struct FrameGenChain {
 };
 FrameGenChain g_framegen_chain;
 
+// Set: the stand-in's captures and generations call the game's context
+// (Flush), as Direct3D 11's backend does, and note their threads.
+std::atomic<ID3D11DeviceContext*> g_capture_context{nullptr};
+struct CaptureThreads {
+    std::mutex mutex;
+    std::vector<DWORD> threads;
+    void push(DWORD thread) {
+        std::scoped_lock lock(mutex);
+        threads.push_back(thread);
+    }
+    std::size_t Count(DWORD thread) {
+        std::scoped_lock lock(mutex);
+        return static_cast<std::size_t>(std::count(threads.begin(), threads.end(), thread));
+    }
+} g_capture_threads, g_execute_threads;
+
 class StandInGpu final : public depthxr::FrameGenGpu {
   public:
     const char* Name() const override { return "Stand-in"; }
@@ -2035,11 +2056,22 @@ class StandInGpu final : public depthxr::FrameGenGpu {
     void Forget(XrSwapchain) override {}
     bool Capture(std::size_t, const depthxr::FrameGenImage&, const depthxr::FrameGenViewRequest&,
                  depthxr::FrameGenFlowQuality, std::string&) override {
+        // As Direct3D 11's backend copies the released image on the game's
+        // immediate context, under Frame Generation's (and the layer's) locks.
+        if (ID3D11DeviceContext* context = g_capture_context.load()) {
+            g_capture_threads.push(GetCurrentThreadId());
+            context->Flush();
+        }
         return true;
     }
     bool WaitIdle() override { return true; }
     bool Execute(const std::vector<depthxr::FrameGenViewSubmission>& views, const depthxr::FrameGenTuning&,
                  depthxr::FrameGenExecuteResult& result, std::string&) override {
+        // As Direct3D 11's backend generates on the game's immediate context.
+        if (ID3D11DeviceContext* context = g_capture_context.load()) {
+            g_execute_threads.push(GetCurrentThreadId());
+            context->Flush();
+        }
         result.synthesized.assign(views.size(), true);
         return true;
     }
@@ -2702,6 +2734,8 @@ struct QuadFrameOptions {
     // XR_ERROR_SESSION_LOST ends the frame there (returned as it is); any
     // other failure of theirs fails the test.
     bool session_may_be_lost{false};
+    // Ends the frame instead of xrEndFrame on this thread.
+    std::function<XrResult(const XrFrameEndInfo&)> end_frame;
 };
 
 // One application frame of quad views: the four views located at the frame's
@@ -2771,7 +2805,7 @@ XrResult QuadFrame(App& app, Game& game, const QuadTargets& targets, int frame, 
     end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     end.layerCount = 1;
     end.layers = layers;
-    return app.api.end_frame(app.session, &end);
+    return options.end_frame ? options.end_frame(end) : app.api.end_frame(app.session, &end);
 }
 
 // --- The cases --------------------------------------------------------------
@@ -3440,6 +3474,417 @@ void TestContextHeldAcrossRelease(Game& game) {
           name + ": a frame after");
     CheckValidation(game, name);
     StopApp(app);
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// 4c-4e. Lock order past the bridge's staging: the device's lock
+// (ID3D11Multithread::Enter) before any of the layer's locks, wherever the
+// layer uses the game's immediate context under them (GameContextLock). A
+// game thread holds the device's lock through an OpenXR call that takes the
+// layer's lock (`game_call`; xrLocateViews, as a render thread may), while
+// `layer_call`, on a thread of its own, uses the game's context under the
+// layer's locks. Driven by events:
+//  - `layer_call`'s thread comes to the layer's GameContextLock (its test
+//    hook): it holds none of the layer's locks yet;
+//  - there, the game thread enters the device's lock (and runs
+//    `while_entered`, a release landing at that moment), and the hook
+//    returns;
+//  - the game thread gives `layer_call` 200 ms (to take the layer's locks,
+//    would it use the context without the device's lock first), then makes
+//    `game_call` and lets the lock go.
+// Both calls must return. A layer call that took its locks first and then
+// waited for the device's lock deadlocks with `game_call`, which waits for
+// those locks: each wait ends the process after 10 s (FAILED). `hold`: which
+// of `layer_call`'s holds of the device's lock is the one (1: its first).
+struct HeldContextRun {
+    bool hooked{false}; // `layer_call` came to the device's lock before its own locks
+    DWORD layer_thread{0};
+    XrResult game_result{XR_ERROR_RUNTIME_FAILURE};
+    XrResult layer_result{XR_ERROR_RUNTIME_FAILURE};
+};
+
+HeldContextRun RunWithHeldContext(const std::string& name, ID3D11Multithread* multithread,
+                                  const std::function<XrResult()>& layer_call,
+                                  const std::function<XrResult()>& game_call,
+                                  const std::function<void()>& while_entered = {}, int hold = 1) {
+    const auto await = [&](HANDLE event, const char* what) {
+        if (WaitForSingleObject(event, 10000) != WAIT_OBJECT_0) {
+            std::cout << "FAILED: " << name << ": " << what
+                      << " within 10 s: deadlocked (a call waits for the device's lock holding a lock of the "
+                         "layer's that the game thread, holding the device's lock, waits for)\n"
+                      << std::flush;
+            TerminateProcess(GetCurrentProcess(), 1);
+        }
+    };
+    const HANDLE at_lock = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE called = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::atomic<DWORD> layer_thread{0};
+    std::atomic<bool> hooked{false};
+    std::atomic<int> holds{0};
+    Peer::GameContext().SetWaitHookForTest([&] {
+        if (GetCurrentThreadId() != layer_thread.load() || ++holds != hold || hooked.exchange(true)) return;
+        SetEvent(at_lock);
+        await(entered, "the game thread did not enter the device's lock");
+    });
+    HeldContextRun run;
+    std::thread game_thread([&] {
+        await(at_lock, "the layer's call did not come to the device's lock ahead of its own locks");
+        multithread->Enter();
+        if (while_entered) while_entered();
+        SetEvent(entered);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        run.game_result = game_call();
+        SetEvent(called);
+        multithread->Leave();
+    });
+    std::thread layer_thread_([&] {
+        layer_thread = GetCurrentThreadId();
+        run.layer_result = layer_call();
+        SetEvent(done);
+    });
+    await(called, "the game thread's call did not return");
+    await(done, "the layer's call did not return");
+    game_thread.join();
+    layer_thread_.join();
+    Peer::GameContext().SetWaitHookForTest(nullptr);
+    for (const HANDLE event : {at_lock, entered, called, done}) CloseHandle(event);
+    run.hooked = hooked;
+    run.layer_thread = layer_thread;
+    return run;
+}
+
+// The game's views at the runtime's time (xrLocateViews takes the layer's lock).
+XrResult LocateViewsNow(App& app, XrViewConfigurationType configuration, std::uint32_t count) {
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = configuration;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        locate.displayTime = g_runtime.time;
+    }
+    locate.space = app.space;
+    XrViewState state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 4> views{};
+    for (XrView& view : views) view.type = XR_TYPE_VIEW;
+    std::uint32_t located = 0;
+    return app.api.locate_views(app.session, &locate, &state, count, &located, views.data());
+}
+
+// The game's device's lock, with protection on (as a game entering it has).
+ComPtr<ID3D11Multithread> ProtectedContext(Game& game, const std::string& name) {
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(game.context.As(&multithread)), name + ": the game's context has ID3D11Multithread");
+    multithread->SetMultithreadProtected(TRUE);
+    return multithread;
+}
+
+// 4c. Quad views in a bridged session: the layer composes the four views on
+// the game's context in xrEndFrame, into swapchains of its own whose acquire
+// and release (the bridge's wait, and its "written" signal: a release
+// StageReleases never stages) also use the game's context, all under the
+// layer's locks. A game thread holds the device's lock through xrLocateViews
+// meanwhile.
+void TestQuadViewsUnderHeldContext(Game& game) {
+    const std::string name = "quad-views-context-held";
+    CaseSettings settings;
+    settings.quadviews = true;
+    BeginCase(name, game, settings);
+    g_runtime.recommended_width = g_runtime.recommended_height = kQuadStereoSize;
+    g_runtime.paced = true;
+    ComPtr<ID3D11Multithread> multithread = ProtectedContext(game, name);
+    App app = StartApp({kD3D11Extension, kQuadViewsExtension, kFoveatedExtension});
+    std::uint32_t count = 0;
+    std::array<XrViewConfigurationView, 4> configuration{};
+    for (XrViewConfigurationView& view : configuration) view.type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
+    Check(app.api.enumerate_views(app.api.instance, app.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO, 4,
+                                  &count, configuration.data()) == XR_SUCCESS &&
+              count == 4,
+          name + ": four quad views");
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          name + ": a bridged session");
+    Check(!Peer::ToggleFrameGen(), name + ": Frame Generation toggled off (the layer composes)");
+    BeginSession(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO);
+    QuadTargets targets;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        targets[i] = MakeTarget(app,
+                                ColorInfo(1, configuration[i].recommendedImageRectWidth,
+                                          configuration[i].recommendedImageRectHeight),
+                                i < 2 ? "a peripheral view" : "a focus view");
+    }
+    for (int frame = 0; frame < 3; ++frame) {
+        Check(QuadFrame(app, game, targets, frame) == XR_SUCCESS, name + ": a quad frame before");
+    }
+    const std::uint64_t composed = Peer::QuadFrames().first;
+    const std::size_t shown_before = ShownCount();
+    HeldContextRun run;
+    QuadFrameOptions options;
+    options.end_frame = [&](const XrFrameEndInfo& end) {
+        run = RunWithHeldContext(
+            name, multithread.Get(), [&] { return app.api.end_frame(app.session, &end); },
+            [&] { return LocateViewsNow(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO, 4); });
+        return run.layer_result;
+    };
+    const XrResult framed = QuadFrame(app, game, targets, 3, options);
+    Check(framed == XR_SUCCESS, name + ": the frame " + std::to_string(framed));
+    Check(run.hooked, name + ": xrEndFrame came to the device's lock before the layer's locks");
+    Check(run.game_result == XR_SUCCESS, name + ": the game thread's xrLocateViews " + std::to_string(run.game_result));
+    Check(Peer::QuadFrames().first == composed + 1, name + ": the frame was composed on Direct3D 11");
+    const std::array<XrSwapchain, 2> outputs = Peer::CompositorOutputs();
+    const std::vector<ShownFrame> shown = Shown(shown_before);
+    Check(shown.size() == 1 && shown[0].views.size() == 2 && shown[0].views[0].swapchain == outputs[0] &&
+              shown[0].views[1].swapchain == outputs[1],
+          name + ": the runtime shows the composed frame");
+    Check(QuadFrame(app, game, targets, 4) == XR_SUCCESS && Peer::QuadFrames().first == composed + 2,
+          name + ": a frame after");
+    CheckValidation(game, name);
+    StopApp(app);
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// 4d. A release landing between xrEndFrame's staging (StageReleases) and its
+// locks: the hand-over runs its Direct3D 11 half under the layer's locks
+// (Released). The game thread makes that release while holding the device's
+// lock, then xrLocateViews.
+void TestUnstagedReleaseUnderHeldContext(Game& game) {
+    const std::string name = "unstaged-release-context-held";
+    BeginCase(name, game);
+    ComPtr<ID3D11Multithread> multithread = ProtectedContext(game, name);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          name + ": a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target late = MakeTarget(app, ColorInfo(), "an image released late");
+    const std::array<Eye, 2> eyes{{{&left, 0}, {&right, 0}}};
+    Check(Frame(app, game, {&left, &right}, {FrameColor(1, 0), FrameColor(1, 1)}, eyes) == XR_SUCCESS,
+          name + ": a first frame");
+    // Acquired and rendered before; released by the game thread, holding the
+    // device's lock, once xrEndFrame's staging is done.
+    Draw(game, late.images[Acquire(app, late)], FrameColor(2, 0));
+    // The bridge's waits for the context on the frame's thread after its
+    // staging: the late release's hand-over.
+    std::atomic<DWORD> frame_thread{0};
+    std::atomic<bool> staged{false};
+    std::atomic<int> unstaged_holds{0};
+    Peer::Bridge().SetContextWaitHookForTest([&] {
+        if (GetCurrentThreadId() == frame_thread.load() && staged.load()) ++unstaged_holds;
+    });
+    HeldContextRun run;
+    XrResult late_release = XR_ERROR_RUNTIME_FAILURE;
+    const std::size_t shown_before = ShownCount();
+    const XrResult framed = Frame(
+        app, game, {&left, &right}, {FrameColor(3, 0), FrameColor(3, 1)}, eyes, nullptr, nullptr, false, {},
+        [&](const XrFrameEndInfo& end) {
+            run = RunWithHeldContext(
+                name, multithread.Get(),
+                [&] {
+                    frame_thread = GetCurrentThreadId();
+                    return app.api.end_frame(app.session, &end);
+                },
+                [&] { return LocateViewsNow(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2); },
+                [&] {
+                    staged = true;
+                    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                    late_release = app.api.release(late.swapchain, &release);
+                });
+            return run.layer_result;
+        });
+    Peer::Bridge().SetContextWaitHookForTest(nullptr);
+    Check(framed == XR_SUCCESS, name + ": the frame " + std::to_string(framed));
+    Check(run.hooked, name + ": xrEndFrame came to the device's lock before the layer's locks");
+    Check(late_release == XR_SUCCESS, name + ": the late release " + std::to_string(late_release));
+    Check(run.game_result == XR_SUCCESS, name + ": the game thread's xrLocateViews " + std::to_string(run.game_result));
+    Check(unstaged_holds.load() >= 1, name + ": the late release was handed over unstaged, in xrEndFrame");
+    const std::vector<ShownFrame> shown = Shown(shown_before);
+    Check(shown.size() == 1 && shown[0].views.size() == 2 && Near(shown[0].views[0].texel, FrameColor(3, 0)) &&
+              Near(shown[0].views[1].texel, FrameColor(3, 1)),
+          name + ": the frame is shown");
+    Check(Frame(app, game, {&left, &right}, {FrameColor(4, 0), FrameColor(4, 1)}, eyes) == XR_SUCCESS,
+          name + ": a frame after");
+    Render(app, game, late, FrameColor(5, 0));
+    CheckValidation(game, name);
+    StopApp(app);
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// 4e. The game's own Direct3D 11 session, Frame Generation engaged: it
+// captures each released eye image on the game's context, under the
+// layer's lock (and its own). The game releases the left eye on one thread
+// while another holds the device's lock through xrLocateViews.
+void TestNativeCaptureUnderHeldContext(Game& game) {
+    const std::string name = "native-capture-context-held";
+    CaseSettings settings;
+    settings.frame_multiplier = "2x";
+    BeginCase(name, game, settings);
+    SetEnv("VECTORXR_D3D11_BRIDGE", "off");
+    g_runtime.paced = true;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    ComPtr<ID3D11Multithread> multithread = ProtectedContext(game, name);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+              !Peer::Bridge().Active() && g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR,
+          name + ": the game's own Direct3D 11 session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const std::array<Eye, 2> eyes{{{&left, 0}, {&right, 0}}};
+    int frame = 0;
+    do {
+        Check(Frame(app, game, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)}, eyes) == XR_SUCCESS,
+              name + ": a frame before");
+    } while (Peer::FrameGen().generated == 0 && ++frame < 96);
+    Check(Peer::FrameGen().generated > 0, name + ": Frame Generation generates frames");
+
+    // One frame, its left eye released on a thread of its own.
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, name + ": xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, name + ": xrBeginFrame");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = app.space;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) view.type = XR_TYPE_VIEW;
+    std::uint32_t located_count = 0;
+    Check(app.api.locate_views(app.session, &locate, &view_state, 2, &located_count, located.data()) == XR_SUCCESS,
+          name + ": xrLocateViews");
+    const std::uint32_t left_index = Acquire(app, left);
+    const std::uint32_t right_index = Acquire(app, right);
+    Draw(game, left.images[left_index], FrameColor(100, 0));
+    Draw(game, right.images[right_index], FrameColor(100, 1));
+    Release(app, right);
+    g_capture_context = game.context.Get();
+    const HeldContextRun run = RunWithHeldContext(
+        name, multithread.Get(),
+        [&] {
+            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            return app.api.release(left.swapchain, &release);
+        },
+        [&] { return LocateViewsNow(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2); });
+    g_capture_context = nullptr;
+    Check(run.hooked, name + ": the release came to the device's lock before the layer's lock");
+    Check(run.layer_result == XR_SUCCESS, name + ": the release " + std::to_string(run.layer_result));
+    Check(run.game_result == XR_SUCCESS, name + ": the game thread's xrLocateViews " + std::to_string(run.game_result));
+    Check(g_capture_threads.Count(run.layer_thread) == 1, name + ": Frame Generation captured the released image");
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = eyes[eye].target->swapchain;
+        views[eye].subImage.imageRect = {{0, 0},
+                                         {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    Check(app.api.end_frame(app.session, &end) == XR_SUCCESS, name + ": xrEndFrame");
+    Check(Frame(app, game, {&left, &right}, {FrameColor(101, 0), FrameColor(101, 1)}, eyes) == XR_SUCCESS,
+          name + ": a frame after");
+    CheckValidation(game, name);
+    StopApp(app);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    SetEnv("VECTORXR_D3D11_BRIDGE", "");
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// 4f. The game's own Direct3D 11 session, Frame Generation engaged: its
+// xrEndFrame generates on the game's context (inline: no presenter thread on
+// Direct3D 11), holding Frame Generation's GPU lock, which its captures at a
+// release take as well (under the layer's lock). A game thread holds the
+// device's lock through a release of the next frame's left eye meanwhile.
+void TestNativeGenerateUnderHeldContext(Game& game) {
+    const std::string name = "native-generate-context-held";
+    CaseSettings settings;
+    settings.frame_multiplier = "2x";
+    BeginCase(name, game, settings);
+    SetEnv("VECTORXR_D3D11_BRIDGE", "off");
+    g_runtime.paced = true;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    ComPtr<ID3D11Multithread> multithread = ProtectedContext(game, name);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+              !Peer::Bridge().Active() && g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR,
+          name + ": the game's own Direct3D 11 session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const std::array<Eye, 2> eyes{{{&left, 0}, {&right, 0}}};
+    int frame = 0;
+    do {
+        Check(Frame(app, game, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)}, eyes) == XR_SUCCESS,
+              name + ": a frame before");
+    } while (Peer::FrameGen().generated == 0 && ++frame < 96);
+    Check(Peer::FrameGen().generated > 0, name + ": Frame Generation generates frames");
+    const std::uint64_t generated = Peer::FrameGen().generated;
+    HeldContextRun run;
+    XrResult released = XR_ERROR_RUNTIME_FAILURE;
+    const XrResult framed = Frame(
+        app, game, {&left, &right}, {FrameColor(200, 0), FrameColor(200, 1)}, eyes, nullptr, nullptr, false, {},
+        [&](const XrFrameEndInfo& end) {
+            // The next frame's left eye, acquired and rendered ahead.
+            const std::uint32_t next = Acquire(app, left);
+            Draw(game, left.images[next], FrameColor(201, 0));
+            g_capture_context = game.context.Get();
+            // xrEndFrame's own hold first (for the layer's locks), then Frame
+            // Generation's, before its GPU lock.
+            run = RunWithHeldContext(
+                name, multithread.Get(), [&] { return app.api.end_frame(app.session, &end); },
+                [&] {
+                    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                    released = app.api.release(left.swapchain, &release);
+                    return released;
+                },
+                {}, 2);
+            g_capture_context = nullptr;
+            return run.layer_result;
+        });
+    Check(framed == XR_SUCCESS, name + ": the frame " + std::to_string(framed));
+    Check(run.hooked, name + ": Frame Generation came to the device's lock before its GPU lock");
+    Check(released == XR_SUCCESS, name + ": the game thread's release " + std::to_string(released));
+    Check(g_execute_threads.Count(run.layer_thread) >= 1 && Peer::FrameGen().generated > generated,
+          name + ": the frame's xrEndFrame generated frames");
+    // The next frame: its right eye, and an end without layers.
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, name + ": xrWaitFrame after");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, name + ": xrBeginFrame after");
+    Render(app, game, right, FrameColor(201, 1));
+    XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};
+    empty.displayTime = state.predictedDisplayTime;
+    empty.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    Check(app.api.end_frame(app.session, &empty) == XR_SUCCESS, name + ": an empty frame after");
+    Check(Frame(app, game, {&left, &right}, {FrameColor(202, 0), FrameColor(202, 1)}, eyes) == XR_SUCCESS,
+          name + ": a frame after");
+    CheckValidation(game, name);
+    StopApp(app);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    SetEnv("VECTORXR_D3D11_BRIDGE", "");
     multithread->SetMultithreadProtected(FALSE);
     Check(GameRuns(game), "the game's device works");
     EndCase(game);
@@ -6855,6 +7300,18 @@ int main(int argc, char** argv) {
     const char* only = std::getenv("BRIDGE_TEST_ONLY");
     if (bridged && only && std::string(only) == "lock-order") {
         TestContextHeldAcrossRelease(game);
+        TestQuadViewsUnderHeldContext(game);
+        TestUnstagedReleaseUnderHeldContext(game);
+        TestNativeCaptureUnderHeldContext(game);
+        TestNativeGenerateUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "native-generate-context-held") {
+        TestNativeGenerateUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "quad-views-context-held") {
+        TestQuadViewsUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "unstaged-release-context-held") {
+        TestUnstagedReleaseUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "native-capture-context-held") {
+        TestNativeCaptureUnderHeldContext(game);
     } else if (bridged && only && std::string(only) == "depth-rects") {
         TestDepthRects(game, false);
         TestDepthRects(game, true);
@@ -6880,6 +7337,10 @@ int main(int argc, char** argv) {
         TestStatusFile(game);
         TestReleaseOnAnotherThread(game);
         TestContextHeldAcrossRelease(game);
+        TestQuadViewsUnderHeldContext(game);
+        TestUnstagedReleaseUnderHeldContext(game);
+        TestNativeCaptureUnderHeldContext(game);
+        TestNativeGenerateUnderHeldContext(game);
         TestPrivateDepthSession(game);
         TestDepthRects(game, false);
         TestDepthRects(game, true);
