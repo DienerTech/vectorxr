@@ -1,14 +1,17 @@
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include "depthxr/osd_renderer.h"
 #include "depthxr/logger.h"
 #include "depthxr/osd_strings.h"
 #include <openxr/openxr_platform.h>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <thread>
 
 using namespace depthxr;
 namespace {
@@ -985,6 +988,80 @@ int main(int argc, char** argv) {
         // the next falls due on the set interval all the same.
         Check(hz>=18 && hz<=22,"The OSD lost its 20 Hz refresh rate to frame timing");
         file.close(); std::error_code ignored; std::filesystem::remove(log,ignored);
+    }
+    {
+        // Lock order: a game thread holds the device's lock
+        // (ID3D11Multithread::Enter, protection on) through a call that waits
+        // for the renderer's lock (in the layer: xrReleaseSwapchainImage waits
+        // for its lock, held by the status poll while it reads Status), while
+        // the frame's thread draws the panel, whose upload needs the device's
+        // lock. The upload must wait for it holding none of the renderer's.
+        // Driven by events: the game thread enters the lock, the frame's
+        // thread calls Append (an upload pending), and the game thread reads
+        // Status once Append is about to take the device's lock (its test
+        // hook), or after 2 s. Waiting for the device's lock under the
+        // renderer's deadlocks: the case then fails after 10 s.
+        OsdRenderer renderer; unsupported=false; timeouts=0; renderer.Initialize(session,device,4,dispatch);
+        auto settings=OsdSettings{}; settings.enabled=true; settings.show_clock=false; settings.update_hz=20;
+        renderer.Prepare(settings,Snapshot(),false,false);
+        XrCompositionLayerProjection game{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO}; frame.layerCount=1; frame.layers=&original;
+        Check(WaitVisible(renderer,frame),"Lock order: the panel was not shown");
+        // The next refresh acquires its image and finds it busy: its upload
+        // waits for the next Append.
+        timeouts=1000000;
+        const int acquired=acquires;
+        Check(PumpUntil(renderer,frame,[&]{return acquires>acquired;}),"Lock order: no refresh acquired an image");
+        timeouts=0;
+        const int released=releases;
+        ID3D11Multithread* multithread{};
+        Check(SUCCEEDED(context->QueryInterface(__uuidof(ID3D11Multithread),reinterpret_cast<void**>(&multithread))),
+              "Lock order: the context has no ID3D11Multithread");
+        multithread->SetMultithreadProtected(TRUE);
+        const auto await=[](HANDLE event,const char* what) {
+            if (WaitForSingleObject(event,10000)!=WAIT_OBJECT_0) {
+                std::cerr<<"FAILED: OSD lock order: "<<what<<" within 10 s: deadlocked (the upload waits for the "
+                           "device's lock holding the renderer's, which the game thread waits for)\n"<<std::flush;
+                TerminateProcess(GetCurrentProcess(),1);
+            }
+        };
+        const HANDLE entered=CreateEventW(nullptr,TRUE,FALSE,nullptr), waiting=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+        const HANDLE read=CreateEventW(nullptr,TRUE,FALSE,nullptr), appended=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+        std::atomic<DWORD> frame_thread{0};
+        std::atomic<bool> hooked{false};
+        renderer.SetContextWaitHookForTest([&] {
+            if (GetCurrentThreadId()==frame_thread.load() && !hooked.exchange(true)) SetEvent(waiting);
+        });
+        OsdStatus status;
+        std::thread game_thread([&] {
+            multithread->Enter();
+            SetEvent(entered);
+            WaitForSingleObject(waiting,2000);
+            // Time for the frame's thread to take the renderer's lock, would it
+            // wait for the device's under it.
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            status=renderer.Status();
+            SetEvent(read);
+            multithread->Leave();
+        });
+        await(entered,"the game thread did not enter the device's lock");
+        const XrCompositionLayerBaseHeader* layer=nullptr;
+        std::thread frame_thread_([&] {
+            frame_thread=GetCurrentThreadId();
+            layer=renderer.Append(frame,true);
+            SetEvent(appended);
+        });
+        await(read,"the game thread's Status did not return");
+        await(appended,"the frame's Append did not return");
+        game_thread.join(); frame_thread_.join();
+        renderer.SetContextWaitHookForTest(nullptr);
+        for(const HANDLE event:{entered,waiting,read,appended}) CloseHandle(event);
+        multithread->SetMultithreadProtected(FALSE); multithread->Release();
+        Check(hooked,"Lock order: Append did not take the device's lock before the renderer's");
+        Check(layer && releases==released+1,"Lock order: the pending refresh was not uploaded and released");
+        Check(status.available,"Lock order: Status read nothing");
+        renderer.Shutdown();
     }
     { OsdMetric metric; for(int i=0;i<100;++i)metric.Add(i<95?.11:20);Check(metric.count==100&&std::abs(metric.P95Upper()-.15)<.001&&metric.maximum==20,"OSD bounded metric histogram incorrect"); }
     context->Release(); device->Release();

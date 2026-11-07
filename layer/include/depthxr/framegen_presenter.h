@@ -26,6 +26,8 @@
 
 namespace depthxr {
 
+class GameContextLock;
+
 class Logger;
 
 // Downstream calls the presenter makes for the frames it submits. `submit`
@@ -457,6 +459,12 @@ class FrameGenPresenter {
     // Settings can turn a running session off (frames pass through) and back
     // on; only starting Frame Generation needs a new session.
     void SetConfigured(bool enabled);
+    // The game's Direct3D 11 device's lock, in the game's own Direct3D 11
+    // session (none otherwise): the backend's work on the game's immediate
+    // context waits for it before the presenter's locks (GameContextLock).
+    // Captures at a release are made under the layer's locks, which take it
+    // first themselves. Outlives the session it is set for.
+    void SetGameContextLock(GameContextLock* lock);
     // Steady renderable frames and session age required before engaging.
     void SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age);
     // How long the video memory budget must have room for another set of
@@ -2501,6 +2509,7 @@ class FrameGenPresenter {
     EngineWindow engine_window_;
     // Timed: teardown never waits on them for long (LockForTeardown).
     std::timed_mutex submit_mutex_;      // presenter-thread submissions vs output swapchain calls
+    std::atomic<GameContextLock*> game_context_lock_{nullptr}; // SetGameContextLock
     std::timed_mutex gpu_mutex_;         // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)
     double gpu_ms_{-1.0};                // last generation GPU time, read without the backend
     // The GPU did not finish this session's Frame Generation work before

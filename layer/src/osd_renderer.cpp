@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <vulkan/vulkan_core.h>
 #include "depthxr/osd_renderer.h"
+#include "depthxr/game_context_lock.h"
 #include "depthxr/logger.h"
 #include "depthxr/osd_strings.h"
 #include <openxr/openxr_platform.h>
@@ -474,6 +475,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     return output;
 }
 
+OsdRenderer::OsdRenderer() : context_lock_(std::make_unique<GameContextLock>()) {}
 OsdRenderer::~OsdRenderer() { Shutdown(); }
 void OsdRenderer::RasterWorker() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -533,7 +535,7 @@ void OsdRenderer::ShutdownLocked() {
     if(graphics_) graphics_->Reset();
     if (swapchain_ && api_.destroy) api_.destroy(swapchain_);
     if (space_ && api_.destroy_space) api_.destroy_space(space_);
-    WriteDiagnostics(logger_,CollectDiagnosticsLocked(true)); graphics_.reset();
+    WriteDiagnostics(logger_,CollectDiagnosticsLocked(true)); graphics_.reset(); context_lock_->Set(nullptr);
     if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
     swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; session_=XR_NULL_HANDLE;
     anchor_failed_=false; anchor_logged_=false;
@@ -568,6 +570,7 @@ void OsdRenderer::InitializeGraphics(XrSession session,const void* chain,std::ui
     session_=session;max_layers_=max_layers;api_=api;logger_=logger;identity_=std::move(identity);world_anchored_=false;
     measurements_={};events_.clear();dropped_events_=0;report_start_=Clock::now();cadence_last_={};cadence_mode_=3;
     std::string error;graphics_=CreateOsdGraphics(chain,error);
+    context_lock_->Set(graphics_?graphics_->D3D11Device():nullptr);
     status_.available=graphics_!=nullptr;status_.message=graphics_?"Disabled":error.empty()?"OSD graphics binding unavailable":error;
     Event(false,"initialize api="+std::string(graphics_?graphics_->Name():"Unsupported")+" maxLayers="+std::to_string(max_layers_)+" status="+status_.message);
 }
@@ -692,9 +695,22 @@ bool OsdRenderer::CreateResources() {
     Event(false,"resources ready api="+std::string(graphics_->Name())+" format="+std::to_string(format)+" texture=960x768 usage=transfer-dst|color initializationCpuMs="+std::to_string(Milliseconds(initialization_start)));
     return true;
 }
+void OsdRenderer::SetContextWaitHookForTest(std::function<void()> hook) { context_lock_->SetWaitHookForTest(std::move(hook)); }
 const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& info, bool should_render) {
     const auto entry=Clock::now();
-    std::scoped_lock lock(mutex_);
+    // Direct3D 11: the upload below runs on the game's immediate context,
+    // under mutex_. A game thread may hold the device's lock through an
+    // OpenXR call that waits for mutex_ (through the layer's own lock, which
+    // the status poll holds while it reads Status), so while the panel is
+    // drawn the device's lock comes first, holding none (GameContextLock).
+    GameContextHold context_hold;
+    std::unique_lock lock(mutex_);
+    if (context_lock_->Active() && settings_.enabled && visible_ && graphics_ && session_ && !failed_ && should_render &&
+        info.layerCount>0) {
+        lock.unlock();
+        context_hold=context_lock_->Hold();
+        lock.lock();
+    }
     auto& stats=measurements_[Mode()];
     MetricTimer append_timer(stats.append,entry);
     status_.visible=false;

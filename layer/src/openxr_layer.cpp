@@ -24,6 +24,7 @@
 #include "depthxr/crt_failure_report.h"
 #include "depthxr/effects.h"
 #include "depthxr/framegen_plan.h"
+#include "depthxr/game_context_lock.h"
 #include "depthxr/input_devices.h"
 #include "depthxr/process_exit.h"
 #include "depthxr/process_info.h"
@@ -2082,6 +2083,8 @@ OpenXrLayer& OpenXrLayer::Instance() {
     return *owner.layer;
 }
 
+OpenXrLayer::OpenXrLayer() : game_context_(std::make_unique<GameContextLock>()) {}
+
 OpenXrLayer::~OpenXrLayer() {
     // Safety net for an unload without xrDestroyInstance: join the watcher
     // before members are destroyed so a still-joinable std::thread can't trip
@@ -3162,6 +3165,13 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                                           FindStructInChain(create_info->next, XR_TYPE_GRAPHICS_BINDING_D3D11_KHR))
                                     : nullptr;
     graphics_api_ = d3d11_binding && d3d11_binding->device ? "D3D11" : "Other";
+    // The game's device's lock, taken before the layer's locks wherever its
+    // immediate context is used under them (bridged or not); Frame
+    // Generation's backend uses that context only in the game's own
+    // Direct3D 11 sessions (a bridged session's is Direct3D 12).
+    game_context_->Set(d3d11_binding ? d3d11_binding->device : nullptr);
+    framegen_.SetGameContextLock(d3d11_binding && d3d11_binding->device && !d3d11_bridge_.Active() ? game_context_.get()
+                                                                                                  : nullptr);
     if (d3d11_binding && d3d11_binding->device) {
         d3d11_quadviews_compositor_.device = d3d11_binding->device;
         d3d11_quadviews_compositor_.device->AddRef();
@@ -4708,8 +4718,10 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
     {
         watch.Step("releasing the swapchain's deferred releases");
         // The Direct3D 11 bridge's work on the game's context, before mutex_
-        // (D3D11Bridge::StageReleases).
+        // (D3D11Bridge::StageReleases); a release it did not stage runs under
+        // mutex_, the device's lock taken first (GameContextLock).
         d3d11_bridge_.StageReleases(swapchain);
+        const GameContextHold context_hold = game_context_->Hold();
         std::scoped_lock lock(mutex_);
         auto it = tracked_swapchains_.find(swapchain);
         if (it != tracked_swapchains_.end()) {
@@ -4857,6 +4869,9 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
         // hold the context's lock through an OpenXR call that takes them:
         // D3D11Bridge::StageReleases).
         d3d11_bridge_.StageReleases(swapchain);
+        // A release landing after it is handed over under the locks below:
+        // the device's lock first (GameContextLock).
+        const GameContextHold context_hold = game_context_->Hold();
         // The releases go on without mutex_ (ForwardHandedOverReleases).
         std::unique_lock handover(bridge_handover_mutex_);
         std::unique_lock lock(mutex_);
@@ -4946,6 +4961,7 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
         // ForwardHandedOverReleases). The Direct3D 11 bridge's work on the
         // game's context first, as at an acquire.
         d3d11_bridge_.StageReleases(swapchain);
+        const GameContextHold context_hold = game_context_->Hold();
         std::unique_lock handover(bridge_handover_mutex_);
         std::unique_lock lock(mutex_);
         if (const auto it = tracked_swapchains_.find(swapchain);
@@ -4996,6 +5012,13 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
     const auto trace_call = turbo_trace_.Watch("app.releaseImage");
     const BridgeCallTimer timed(d3d11_bridge_.Active() ? &bridge_call_timing_[2] : nullptr);
     NoteThread(ThreadCensus::Call::ReleaseSwapchainImage);
+    // In the game's own Direct3D 11 session, Frame Generation captures the
+    // released image on the game's context under mutex_: the device's lock
+    // first (GameContextLock). A bridged release only counts the release.
+    GameContextHold context_hold;
+    if (!d3d11_bridge_.Active()) {
+        context_hold = game_context_->Hold();
+    }
     {
         std::scoped_lock lock(mutex_);
         const auto bridged = tracked_swapchains_.find(swapchain);
@@ -5053,6 +5076,8 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
             }
         }
     }
+    // Nothing below uses the game's context (the runtime's release may wait).
+    context_hold.Release();
 
     const bool diag = TurboSequencedDebugTick();
     if (diag) {
@@ -7396,7 +7421,17 @@ bool OpenXrLayer::NoteUpstreamTurboFrame() {
 
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                       const XrFrameEndInfo* frame_end_info,
-                                      std::unique_lock<std::mutex>& config_lock) {
+                                      std::unique_lock<std::mutex>& config_lock,
+                                      GameContextHold* context_hold) {
+    // EndFrame's hold of the game's context goes with config_lock: nothing
+    // after uses the context under the layer's locks, and the runtime's
+    // xrEndFrame (Frame Generation's frames, the OSD) may wait.
+    const auto unlock_config = [&] {
+        config_lock.unlock();
+        if (context_hold) {
+            context_hold->Release();
+        }
+    };
     // When the app's xrEndFrame returns (NoteUpstreamTurboFrame: a layer
     // above waits right after); this is its tail.
     struct EndReturned {
@@ -7452,7 +7487,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         if (timing_enabled) {
             pacing_start = std::chrono::steady_clock::now();
         }
-        config_lock.unlock();
+        unlock_config();
         const XrResult result = TraceRuntimeEndFrame(session, frame_end_info);
         if (XR_FAILED(result) && end_frame_error_log_budget_ > 0) {
             --end_frame_error_log_budget_;
@@ -7658,7 +7693,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     // block a full frame interval), the deferred begin, and the runtime end.
     // Release the config/render lock so locate calls from other app threads
     // keep flowing — holding it here caused visible judder at locked fps.
-    config_lock.unlock();
+    unlock_config();
 
     const auto pacing_start = std::chrono::steady_clock::now();
 
@@ -9761,6 +9796,13 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     // context's lock (ID3D11Multithread::Enter) through an OpenXR call that
     // takes them (D3D11Bridge::StageReleases).
     d3d11_bridge_.StageReleases(XR_NULL_HANDLE);
+    // Everything else this call does on the game's Direct3D 11 context under
+    // the locks below (a release StageReleases did not stage, Quadviews'
+    // composition and its own swapchains, Frame Generation's captures in the
+    // game's own session) waits for the device's lock first, holding none of
+    // them (GameContextLock). Let go with mutex_, before the runtime's
+    // xrEndFrame (ForwardEndFrame).
+    GameContextHold context_hold = game_context_->Hold();
     std::unique_lock handover(bridge_handover_mutex_, std::defer_lock);
     if (d3d11_bridge_.Active() || vulkan_bridge_.Active()) {
         handover.lock();
@@ -10014,7 +10056,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             framegen_.AbandonFrame(frame_end_info->displayTime);
             return release_result;
         }
-        return ForwardEndFrame(session, frame_end_info, lock);
+        return ForwardEndFrame(session, frame_end_info, lock, &context_hold);
     }
 
     const bool quadviews_projection_split_active =
@@ -10332,7 +10374,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             return release_result;
         }
         log_depth_runtime_submission(*frame_end_info, "passthrough");
-        return ForwardEndFrame(session, frame_end_info, lock);
+        return ForwardEndFrame(session, frame_end_info, lock, &context_hold);
     }
 
     std::vector<ResolvedPivotSpaceDelta>& resolved_pivot_space_deltas =
@@ -10772,7 +10814,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     } else {
         log_depth_runtime_submission(adjusted_frame_end_info, "rewritten");
     }
-    return ForwardEndFrame(session, &adjusted_frame_end_info, lock);
+    return ForwardEndFrame(session, &adjusted_frame_end_info, lock, &context_hold);
 }
 
 XrResult OpenXrLayer::GetReferenceSpaceBoundsRect(XrSession session,
@@ -17202,6 +17244,9 @@ void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
     SafeRelease(d3d11_quadviews_compositor_.layer_context_state);
     SafeRelease(d3d11_quadviews_compositor_.context1);
     SafeRelease(d3d11_quadviews_compositor_.context);
+    // The session's device goes with it.
+    game_context_->Set(nullptr);
+    framegen_.SetGameContextLock(nullptr);
     SafeRelease(d3d11_quadviews_compositor_.device);
     d3d11_quadviews_compositor_.initialized = false;
     d3d11_quadviews_compositor_.failed = false;

@@ -55,6 +55,7 @@ public:
         if(FAILED(hr)){error=Result("D3D11 device removed",hr);return OsdUpload::Failed;} return OsdUpload::Complete;
     }
     void Reset() override { images.clear(); image_rows.clear(); zeros.clear(); }
+    ID3D11Device* D3D11Device() const override { return device.Get(); }
 };
 
 class D3D12Graphics final : public OsdGraphics {
