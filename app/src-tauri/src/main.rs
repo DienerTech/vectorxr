@@ -916,6 +916,10 @@ fn default_framegen_diagnostic_view() -> String {
     "off".into()
 }
 
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -948,6 +952,9 @@ struct FrameGenSettings {
     // Edge fill: margins past the game's field of view (written only when on).
     #[serde(default, skip_serializing_if = "is_false")]
     edge_fill: bool,
+    // Use the game's depth (written only when off; absent means on).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    use_game_depth: bool,
 }
 
 fn default_framegen_interpolate_flow() -> String { "auto".to_owned() }
@@ -964,6 +971,7 @@ impl Default for FrameGenSettings {
             motion_limit_percent: default_framegen_motion_limit_percent(),
             extend_head_prediction: false,
             edge_fill: false,
+            use_game_depth: true,
         }
     }
 }
@@ -3423,6 +3431,7 @@ mod tests {
         assert_eq!(defaults.defaults.motion_limit_percent, 10);
         assert!(!defaults.defaults.extend_head_prediction);
         assert!(!defaults.defaults.edge_fill);
+        assert!(defaults.defaults.use_game_depth);
         assert!(defaults.profiles.is_empty());
 
         // Older layers reject unknown keys (current ones ignore them with a
@@ -3441,13 +3450,16 @@ mod tests {
                     "synthesisMode": "interpolate", "flowQuality": "performance", "motionEstimation": "shader", "interpolateFlow": "shader",
                     "frameMultiplier": "3x", "artifactSuppression": 0, "motionLimitPercent": 25,
                     "extendHeadPrediction": true,
-                    "edgeFill": true
+                    "edgeFill": true,
+                    "useGameDepth": false
                 }
             }]
         });
         let config: super::FrameGenModuleConfig = serde_json::from_value(input.clone()).unwrap();
         assert!(config.profiles[0].settings.extend_head_prediction);
         assert!(config.profiles[0].settings.edge_fill);
+        assert!(!config.profiles[0].settings.use_game_depth);
+        assert!(config.defaults.use_game_depth);
         assert_eq!(serde_json::to_value(config).unwrap(), input);
 
         // Settings saved without a frame multiplier load as Dynamic and save it.
