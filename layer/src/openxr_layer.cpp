@@ -1884,6 +1884,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.framegen.motion_limit_percent == rhs.framegen.motion_limit_percent &&
            lhs.framegen.extend_head_prediction == rhs.framegen.extend_head_prediction &&
            lhs.framegen.edge_fill == rhs.framegen.edge_fill &&
+           lhs.framegen.use_game_depth == rhs.framegen.use_game_depth &&
            lhs.framegen.diagnostic_view == rhs.framegen.diagnostic_view &&
            SameInputBindings(lhs.framegen.toggle_bindings, rhs.framegen.toggle_bindings);
 }
@@ -2890,6 +2891,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     std::string vulkan_unbridged;
     bool vulkan_queried_d3d12 = false; // the Vulkan bridge asked for Direct3D 12's graphics requirements
     bool framegen_wanted = false;
+    bool use_game_depth = true; // the profile's, for the bridges
     {
         {
             std::scoped_lock lock(mutex_);
@@ -2897,6 +2899,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             const ResolvedRuntimeConfig resolved = ResolveRuntimeConfig(config_, current_exe_name_);
             // OpenXR Toolkit below keeps it off (RefreshResolvedSettings).
             framegen_wanted = resolved.core.enabled && resolved.framegen.enabled && !openxr_toolkit_below_;
+            use_game_depth = resolved.framegen.use_game_depth;
         }
         framegen_queue_.Reset();
         d3d11_bridge_.End();
@@ -2916,6 +2919,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                 } else {
                     std::string reason;
                     d3d11_bridge_.SetLog([this](const std::string& message) { logger_.Error(message); });
+                    d3d11_bridge_.SetKeepDepthPrivate(!use_game_depth);
                     if (const XrSessionCreateInfo* bridged = d3d11_bridge_.Begin(
                             instance, create_info, next_get_instance_proc_addr_, reason, bridge_description)) {
                         game_info = bridged;
@@ -2950,6 +2954,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                     std::string reason;
                     vulkan_bridge_.SetLog([this](const std::string& message) { logger_.Error(message); });
                     vulkan_bridge_.SetInfoLog([this](const std::string& message) { logger_.Info(message); });
+                    vulkan_bridge_.SetKeepDepthPrivate(!use_game_depth);
                     const XrSessionCreateInfo* bridged = vulkan_bridge_.Begin(
                         instance, create_info, next_get_instance_proc_addr_, game, reason, bridge_description);
                     vulkan_queried_d3d12 = vulkan_bridge_.QueriedD3D12Requirements();
@@ -9980,7 +9985,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         if (left_out.kept_private && vulkan_bridge_.Active() && !vulkan_bridge_depth_logged_) {
             vulkan_bridge_depth_logged_ = true;
             logger_.Info("Frame Generation's Vulkan bridge keeps the game's depth to itself (multisampled, the "
-                         "runtime's depth images are not depth targets, or VECTORXR_VULKAN_BRIDGE_DEPTH=private: "
+                         "runtime's depth images are not depth targets, Frame Generation's Use game depth is off, or "
+                         "VECTORXR_VULKAN_BRIDGE_DEPTH=private: "
                          "its swapchain line says which): it is left out of the frames the runtime and Frame Generation get.");
         }
         if (!left_out.outside.empty() && !depth_rect_logged_) {
@@ -15795,6 +15801,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", framegenMotionLimitPercent=" << settings.framegen.motion_limit_percent
            << ", framegenExtendHeadPrediction=" << settings.framegen.extend_head_prediction
            << ", framegenEdgeFill=" << settings.framegen.edge_fill
+           << ", framegenUseGameDepth=" << settings.framegen.use_game_depth
            << ", framegenDiagnosticView=" << ToString(settings.framegen.diagnostic_view)
            << ", framegenToggleBindings=" << BindingListLabel(settings.framegen.toggle_bindings);
     logger_.Debug(stream.str());

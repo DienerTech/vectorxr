@@ -132,19 +132,30 @@ const advancedAtDefaults = computed(() =>
   props.settings.flowQuality === advancedDefaults.flowQuality &&
   props.settings.artifactSuppression === advancedDefaults.artifactSuppression &&
   props.settings.motionLimitPercent === advancedDefaults.motionLimitPercent &&
-  !props.settings.extendHeadPrediction)
+  !props.settings.extendHeadPrediction &&
+  props.settings.useGameDepth !== false)
 const advancedSummary = computed(() =>
   t(props.settings.extendHeadPrediction ? 'framegen.settings.advanced.summaryHeadPrediction' : 'framegen.settings.advanced.summary', {
     flow: flowQuality.value.summary,
     suppression: props.settings.artifactSuppression,
     motionLimit: props.settings.motionLimitPercent,
-  }))
+  }) + (props.settings.useGameDepth === false ? ' · ' + t('framegen.settings.gameDepth.summaryOff') : ''))
+
+// Stored only when off, like the layer reads it: absent means on.
+const useGameDepth = computed({
+  get: () => props.settings.useGameDepth !== false,
+  set: (on: boolean) => {
+    if (on) delete props.settings.useGameDepth
+    else props.settings.useGameDepth = false
+  },
+})
 
 function resetAdvanced() {
   props.settings.flowQuality = advancedDefaults.flowQuality
   props.settings.artifactSuppression = advancedDefaults.artifactSuppression
   props.settings.motionLimitPercent = advancedDefaults.motionLimitPercent
   delete props.settings.extendHeadPrediction
+  delete props.settings.useGameDepth
 }
 </script>
 
@@ -286,6 +297,23 @@ function resetAdvanced() {
           </span>
           <span class="mt-2 block text-xs leading-5 text-muted">
             {{ t('framegen.settings.motionLimit.description') }}
+          </span>
+        </label>
+
+        <label class="flex cursor-pointer items-start gap-3 rounded-[1rem] border p-4 surface-panel lg:col-span-3">
+          <input
+            v-model="useGameDepth"
+            class="mt-1 h-4 w-4 shrink-0 accent-depthxr-copper"
+            type="checkbox"
+          />
+          <span class="min-w-0">
+            <span class="flex flex-wrap items-center gap-2">
+              <span class="eyebrow text-xs uppercase tracking-[0.18em]">{{ t('framegen.settings.gameDepth.heading') }}</span>
+              <span class="restart-required-mark" :title="t('framegen.settings.gameDepth.restart')">&#8635;</span>
+            </span>
+            <span class="mt-2 block text-xs leading-5 text-muted">
+              {{ t('framegen.settings.gameDepth.description') }}
+            </span>
           </span>
         </label>
 

@@ -1726,6 +1726,11 @@
           "type": "boolean",
           "default": false,
           "description": "Frames Frame Generation writes reach a few degrees past the game's field of view (3 degrees left and right, 1.5 up and down), the extra margin repeating the frame's edge. On a fast head turn the runtime then shows a smeared edge on the side you turn toward instead of a black band. Costs some GPU time and video memory for the wider images. Direct3D 12 games and Direct3D 11 or Vulkan games through the bridge; it can be changed while the game runs."
+        },
+        "useGameDepth": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use the depth the game provides. Turn off if a game stutters, hangs or shows depth artifacts with Frame Generation: Frame Generation then works without depth, and Direct3D 11 and Vulkan games through the bridge keep their depth to themselves (the runtime gets none from them), as before 0.20.1. Written only when off. The bridges read it when the game's VR session starts."
         }
       }
     },

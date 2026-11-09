@@ -229,6 +229,12 @@
       "valueLabel": "Motion limit value in percent of view width",
       "description": "The farthest a generated frame may move the image, as a share of view width. Faster motion shows the real image."
     },
+    "gameDepth": {
+      "heading": "Use game depth",
+      "description": "Uses the depth the game provides to keep near objects steady. Turn off if a game stutters, hangs or shows depth artifacts with Frame Generation; Frame Generation then works without depth.",
+      "restart": "Takes effect when the game restarts",
+      "summaryOff": "Without game depth"
+    },
     "headPrediction": {
       "heading": "Extend head prediction",
       "description": "Frame Generation has the game render up to ~150 ms ahead, and some runtimes, such as Pimax's, predict your head only ~20 ms of that. This carries your head's turn over the rest, for less black at the edge you turn toward. Turn it on before starting the game."

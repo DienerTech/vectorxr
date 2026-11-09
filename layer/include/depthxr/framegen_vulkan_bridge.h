@@ -147,6 +147,9 @@ class VulkanBridge {
     // queue just after the copy, and logs both (nonzero texels, least and
     // most). Off, nothing of it is made or submitted.
     void SetDepthProbe(bool on);
+    // Before Begin: keep every depth swapchain private (Frame Generation's
+    // Use game depth off), as VECTORXR_VULKAN_BRIDGE_DEPTH=private does.
+    void SetKeepDepthPrivate(bool keep);
     // Whether the bridge checks when the game's depth arrives (above): while
     // Frame Generation finds the game's depth the same all over (empty, or
     // written after the frame's end), and while the bridge takes it late.
@@ -257,6 +260,7 @@ class VulkanBridge {
     std::function<void(const std::string&)> log_;
     std::function<void(const std::string&)> info_log_;
     bool queried_d3d12_requirements_{false};
+    bool keep_depth_private_{false};
 };
 
 } // namespace depthxr

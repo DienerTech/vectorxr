@@ -60,6 +60,9 @@ class D3D11Bridge {
 
     // Where retirements that leaked, skipped copies and second threads are reported.
     void SetLog(std::function<void(const std::string&)> log);
+    // Before Begin: keep every depth swapchain private (Frame Generation's
+    // Use game depth off), as VECTORXR_D3D11_BRIDGE_DEPTH=private does.
+    void SetKeepDepthPrivate(bool keep);
 
     // Before xrCreateSession, for a session whose first structure is a
     // Direct3D 11 binding: makes a Direct3D 12 device on the game's adapter
@@ -181,6 +184,7 @@ class D3D11Bridge {
     std::unique_ptr<Impl> impl_;
     std::function<void(const std::string&)> log_;
     bool queried_d3d12_requirements_{false};
+    bool keep_depth_private_{false};
 };
 
 } // namespace depthxr

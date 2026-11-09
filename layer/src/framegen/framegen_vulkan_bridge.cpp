@@ -564,6 +564,7 @@ struct VulkanBridge::Impl {
         kPrivate,  // depth stays private and out of submitted frames ("private")
     };
     DepthTiming depth_timing{DepthTiming::kAuto};
+    std::string depth_private_reason{"VECTORXR_VULKAN_BRIDGE_DEPTH=private"}; // why kPrivate
     std::chrono::milliseconds late_check_interval{kLateCheckInterval}; // VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS
     bool check_wanted{false}; // WantDepthTimingCheck
     bool check_always{false}; // VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK=always
@@ -2443,6 +2444,10 @@ const XrSessionCreateInfo* VulkanBridge::Begin(XrInstance instance, const XrSess
                              : value == "end-frame" ? Impl::DepthTiming::kEndFrame
                                                     : Impl::DepthTiming::kAuto;
     }
+    if (keep_depth_private_ && impl->depth_timing != Impl::DepthTiming::kPrivate) {
+        impl->depth_timing = Impl::DepthTiming::kPrivate;
+        impl->depth_private_reason = "Frame Generation's Use game depth is off";
+    }
     if (const char* check = std::getenv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK"); check && std::string(check) == "always") {
         impl->check_always = true;
     }
@@ -2762,6 +2767,10 @@ void VulkanBridge::WantDepthTimingCheck(bool want) {
     impl_->check_wanted = want;
 }
 
+void VulkanBridge::SetKeepDepthPrivate(bool keep) {
+    keep_depth_private_ = keep;
+}
+
 void VulkanBridge::SetDepthProbe(bool on) {
 
     if (!impl_) {
@@ -2835,7 +2844,7 @@ bool VulkanBridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateIn
         // The switch to rule the bridge's depth out (logged once a session,
         // in the session's line).
         chain.plan.mode = Impl::Mode::kPrivate;
-        chain.private_reason = "VECTORXR_VULKAN_BRIDGE_DEPTH=private";
+        chain.private_reason = impl.depth_private_reason;
     } else if (chain.plan.mode == Impl::Mode::kTwinDepth) {
         for (const XrSwapchainImageD3D12KHR& image : runtime_images) {
             if (image.texture && (image.texture->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0) {

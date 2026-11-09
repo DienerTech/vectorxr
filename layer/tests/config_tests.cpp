@@ -1583,6 +1583,18 @@ void TestFrameGenProfileResolution() {
            "A profile's edgeFill was not read: " + filled.error);
     Expect(!depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "edgeFill": "yes" } })json")).ok,
            "A non-boolean edgeFill was accepted");
+    // The game's depth is used unless a profile (or the defaults) turns it off.
+    Expect(inherited.document.framegen.defaults.use_game_depth &&
+               depthxr::ResolveFrameGenSettings(inherited.document, "DCS.exe").use_game_depth,
+           "Use game depth should be on by default");
+    const depthxr::ParseResult no_depth = depthxr::ParseConfig(FrameGenConfigJson(
+        R"json({ "enabled": false, "profiles": [ { "name": "MSFS", "applicationIds": ["app-msfs"], "settings": { "useGameDepth": false } } ] })json"));
+    Expect(no_depth.ok && no_depth.warnings.empty() &&
+               !depthxr::ResolveFrameGenSettings(no_depth.document, "FlightSimulator2024.exe").use_game_depth &&
+               depthxr::ResolveFrameGenSettings(no_depth.document, "DCS.exe").use_game_depth,
+           "A profile's useGameDepth was not read: " + no_depth.error);
+    Expect(!depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "useGameDepth": "no" } })json")).ok,
+           "A non-boolean useGameDepth was accepted");
 }
 
 // Frame Generation's A/B toggle takes a list too, and its legacy binding.

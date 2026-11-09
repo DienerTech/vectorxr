@@ -229,6 +229,12 @@
       "valueLabel": "Valeur de la limite de mouvement en pourcentage de la largeur de vue",
       "description": "Le déplacement maximal qu'une image générée peut appliquer à l'image, en proportion de la largeur de vue. Un mouvement plus rapide affiche l'image réelle."
     },
+    "gameDepth": {
+      "heading": "Utiliser la profondeur du jeu",
+      "description": "Utilise la profondeur fournie par le jeu pour garder les objets proches stables. Désactivez-la si un jeu saccade, se bloque ou présente des artefacts de profondeur avec Frame Generation ; Frame Generation fonctionne alors sans profondeur.",
+      "restart": "S’applique au redémarrage du jeu",
+      "summaryOff": "Sans profondeur du jeu"
+    },
     "headPrediction": {
       "heading": "Étendre la prédiction de la tête",
       "description": "Frame Generation fait rendre le jeu jusqu'à ~150 ms à l'avance, et certains runtimes, comme celui de Pimax, ne prédisent votre tête que sur ~20 ms de cette durée. Cette option prolonge la rotation de votre tête sur le reste, pour moins de noir sur le bord vers lequel vous tournez. Activez-la avant de démarrer le jeu."

@@ -706,6 +706,11 @@ export interface FrameGenSettings {
   // when on, like extendHeadPrediction; not in the app's pages until it has
   // flown (set in settings.json), but kept when the app saves.
   edgeFill?: boolean
+  // Use the game's depth. Present only when off (absent means on, here and
+  // in the layer). Off, Frame Generation works without depth and the bridges
+  // keep a Direct3D 11 or Vulkan game's depth to themselves; the bridges read
+  // it when the game's VR session starts.
+  useGameDepth?: boolean
 }
 
 export interface FrameGenProfileConfig {
@@ -778,6 +783,7 @@ export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSett
     // the defaults (new profiles copy the defaults' value when created).
     ...(source.extendHeadPrediction === true ? { extendHeadPrediction: true } : {}),
     ...(source.edgeFill === true ? { edgeFill: true } : {}),
+    ...(source.useGameDepth === false ? { useGameDepth: false } : {}),
   }
 }
 

@@ -368,6 +368,7 @@ struct D3D11Bridge::Impl {
     ComPtr<ID3D11Fence> done11;
     // Depth reaches the runtime's images unless VECTORXR_D3D11_BRIDGE_DEPTH=private.
     bool mirror_depth{true};
+    std::string depth_private_reason; // why mirror_depth is off
 
     // The depth passes, made with the first depth swapchain mirrored (each
     // with `pipeline_mutex`; a draw's pipeline only for its target format).
@@ -1264,6 +1265,10 @@ void D3D11Bridge::SetLog(std::function<void(const std::string&)> log) {
     }
 }
 
+void D3D11Bridge::SetKeepDepthPrivate(bool keep) {
+    keep_depth_private_ = keep;
+}
+
 const XrSessionCreateInfo* D3D11Bridge::Begin(XrInstance instance, const XrSessionCreateInfo* info,
                                               PFN_xrGetInstanceProcAddr get_instance_proc_addr,
                                               std::string& reason, std::string& description) {
@@ -1445,6 +1450,10 @@ const XrSessionCreateInfo* D3D11Bridge::Begin(XrInstance instance, const XrSessi
     // before the bridge mirrored it (left out of submitted frames).
     if (const char* depth = std::getenv("VECTORXR_D3D11_BRIDGE_DEPTH"); depth && std::string(depth) == "private") {
         impl->mirror_depth = false;
+        impl->depth_private_reason = "VECTORXR_D3D11_BRIDGE_DEPTH=private";
+    } else if (keep_depth_private_) {
+        impl->mirror_depth = false;
+        impl->depth_private_reason = "Frame Generation's Use game depth is off";
     }
 
     impl->binding.next = game.next;
@@ -1461,7 +1470,7 @@ const XrSessionCreateInfo* D3D11Bridge::Begin(XrInstance instance, const XrSessi
            << ", sharedResourceCompatibilityTier=" << static_cast<int>(options4.SharedResourceCompatibilityTier)
            << ", d3d11SharedResourceTier=" << static_cast<int>(options5.SharedResourceTier)
            << ", multithreadProtected=" << (impl->multithread_protected ? "yes" : "no")
-           << ", depth=" << (impl->mirror_depth ? "mirrored" : "private (VECTORXR_D3D11_BRIDGE_DEPTH=private)")
+           << ", depth=" << (impl->mirror_depth ? std::string("mirrored") : "private (" + impl->depth_private_reason + ")")
            << ", videoMemory=" << impl->VideoMemory() << (impl->debug_layer ? ", debugLayer=on" : "");
     description = stream.str();
     impl_ = std::move(impl);
@@ -1596,7 +1605,7 @@ bool D3D11Bridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateInf
     // Depth the bridge cannot mirror stays the game's own (with why).
     if (depth && !impl_->mirror_depth) {
         chain.mode = Impl::Mode::kPrivate;
-        chain.private_reason = "VECTORXR_D3D11_BRIDGE_DEPTH=private";
+        chain.private_reason = impl_->depth_private_reason;
     } else if (depth && chain.sample_count > 1) {
         chain.mode = Impl::Mode::kPrivate;
         chain.private_reason = "multisampled";
@@ -1646,7 +1655,7 @@ bool D3D11Bridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateInf
         impl_->multithread->SetMultithreadProtected(TRUE);
     }
     const bool now_protected = protect && impl_->multithread->GetMultithreadProtected() != FALSE;
-    if (chain.mode == Impl::Mode::kPrivate && chain.private_reason.rfind("VECTORXR_", 0) != 0 && impl_->log) {
+    if (chain.mode == Impl::Mode::kPrivate && chain.private_reason != impl_->depth_private_reason && impl_->log) {
         impl_->log("Direct3D 11 bridge: depth swapchain " + Hex(reinterpret_cast<std::uintptr_t>(swapchain)) +
                    " stays the game's own (its depth is left out of submitted frames): " + chain.private_reason + ".");
     }

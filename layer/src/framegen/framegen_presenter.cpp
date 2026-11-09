@@ -2979,7 +2979,8 @@ void FrameGenPresenter::RecordCaptureTargetsLocked(const XrCompositionLayerProje
         color.rect = sub.imageRect;
         color.view = i;
         capture_targets_.push_back(color);
-        if (const auto* depth = DepthInfo(projection.views[i])) {
+        const auto* depth = settings_.use_game_depth ? DepthInfo(projection.views[i]) : nullptr;
+        if (depth) {
             CaptureTarget target;
             target.swapchain = depth->subImage.swapchain;
             target.array_index = depth->subImage.imageArrayIndex;
@@ -6384,7 +6385,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             if (i < depth_decoded_.size()) {
                 decoded = std::exchange(depth_decoded_[i], std::nullopt);
             }
-            if (const auto* depth = DepthInfo(view)) {
+            if (const auto* depth = settings_.use_game_depth ? DepthInfo(view) : nullptr) {
                 const auto depth_record = swapchains_.find(depth->subImage.swapchain);
                 submission.request.depth =
                     depth_record != swapchains_.end() && depth_record->second.depth_capturable;

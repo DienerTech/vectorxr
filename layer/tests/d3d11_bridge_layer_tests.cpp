@@ -2869,6 +2869,7 @@ struct CaseSettings {
     // Auto was the default, so they keep it unless they choose another.
     std::string frame_multiplier{"auto"};
     std::string synthesis_mode;   // Frame Generation's (its default when empty)
+    bool use_game_depth{true};    // Frame Generation's useGameDepth (written only when off)
 };
 
 // A fresh stand-in runtime, a log of the case's own, and the test's settings.
@@ -2907,15 +2908,19 @@ void BeginCase(const std::string& name, const Game& game, const CaseSettings& ca
     }
     settings << R"("turbo": {"enabled": false}, "framegen": {"enabled": )"
              << (case_settings.framegen ? "true" : "false");
-    if (!case_settings.frame_multiplier.empty() || !case_settings.synthesis_mode.empty()) {
+    std::vector<std::string> defaults;
+    if (!case_settings.frame_multiplier.empty()) {
+        defaults.push_back(R"("frameMultiplier": ")" + case_settings.frame_multiplier + R"(")");
+    }
+    if (!case_settings.synthesis_mode.empty()) {
+        defaults.push_back(R"("synthesisMode": ")" + case_settings.synthesis_mode + R"(")");
+    }
+    if (!case_settings.use_game_depth) {
+        defaults.push_back(R"("useGameDepth": false)");
+    }
+    if (!defaults.empty()) {
         settings << R"(, "defaults": {)";
-        if (!case_settings.frame_multiplier.empty()) {
-            settings << R"("frameMultiplier": ")" << case_settings.frame_multiplier << R"(")"
-                     << (case_settings.synthesis_mode.empty() ? "" : ", ");
-        }
-        if (!case_settings.synthesis_mode.empty()) {
-            settings << R"("synthesisMode": ")" << case_settings.synthesis_mode << R"(")";
-        }
+        for (std::size_t i = 0; i < defaults.size(); ++i) settings << (i ? ", " : "") << defaults[i];
         settings << "}";
     }
     settings << "}}}\n";
@@ -3891,12 +3896,18 @@ void TestNativeGenerateUnderHeldContext(Game& game) {
     EndCase(game);
 }
 
-// 4b. VECTORXR_D3D11_BRIDGE_DEPTH=private: depth stays the game's own, as
-// before the bridge mirrored it. Its swapchain's calls reach the runtime; its
-// depth never reaches submitted frames, the rest of each view's chain does.
-void TestPrivateDepthSession(Game& game) {
-    BeginCase("private-depth", game);
-    SetEnv("VECTORXR_D3D11_BRIDGE_DEPTH", "private");
+// 4b. VECTORXR_D3D11_BRIDGE_DEPTH=private, or Frame Generation's Use game
+// depth off (by_profile): depth stays the game's own, as before the bridge
+// mirrored it. Its swapchain's calls reach the runtime; its depth never
+// reaches submitted frames, the rest of each view's chain does, and the game's
+// multithread protection is left as it was.
+void TestPrivateDepthSession(Game& game, bool by_profile) {
+    CaseSettings case_settings;
+    case_settings.use_game_depth = !by_profile;
+    BeginCase(by_profile ? "private-depth-profile" : "private-depth", game, case_settings);
+    const std::string switch_name =
+        by_profile ? "Frame Generation's Use game depth is off" : "VECTORXR_D3D11_BRIDGE_DEPTH=private";
+    if (!by_profile) SetEnv("VECTORXR_D3D11_BRIDGE_DEPTH", "private");
     App app = StartApp();
     SessionCreate create(game.device.Get(), app.system);
     Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
@@ -3906,8 +3917,15 @@ void TestPrivateDepthSession(Game& game) {
     Target right = MakeTarget(app, ColorInfo(), "the right eye");
     Target depth = MakeTarget(app, DepthInfo(2), "depth");
     Check(Peer::Bridge().Bridged(depth.swapchain) && Peer::Bridge().Unmirrored(depth.swapchain) &&
-              Contains(Peer::Bridge().Describe(depth.swapchain), "VECTORXR_D3D11_BRIDGE_DEPTH=private"),
+              Contains(Peer::Bridge().Describe(depth.swapchain), switch_name),
           "the depth swapchain is the game's own: " + Peer::Bridge().Describe(depth.swapchain));
+    if (by_profile) {
+        ComPtr<ID3D11Multithread> multithread;
+        Check(SUCCEEDED(game.context.As(&multithread)) && !multithread->GetMultithreadProtected(),
+              "private depth (profile): the game's multithread protection stays off");
+        Check(!Contains(Peer::Log(), "stays the game's own (its depth is left out of submitted frames)"),
+              "private depth (profile): no error line per depth swapchain for the user's own choice");
+    }
     constexpr int kFrames = 6;
     for (int frame = 0; frame < kFrames; ++frame) {
         const std::vector<Color> colors{FrameColor(frame + 30, 0), FrameColor(frame + 30, 1)};
@@ -3937,7 +3955,7 @@ void TestPrivateDepthSession(Game& game) {
     Check(SummaryValue(Peer::Bridge().Summary(), "depthCopies") == 0, "no depth copies: " + Peer::Bridge().Summary());
     CheckValidation(game, "private depth");
     StopApp(app);
-    SetEnv("VECTORXR_D3D11_BRIDGE_DEPTH", "");
+    if (!by_profile) SetEnv("VECTORXR_D3D11_BRIDGE_DEPTH", "");
     EndCase(game);
 }
 
@@ -7346,7 +7364,8 @@ int main(int argc, char** argv) {
         TestUnstagedReleaseUnderHeldContext(game);
         TestNativeCaptureUnderHeldContext(game);
         TestNativeGenerateUnderHeldContext(game);
-        TestPrivateDepthSession(game);
+        TestPrivateDepthSession(game, false);
+        TestPrivateDepthSession(game, true);
         TestDepthRects(game, false);
         TestDepthRects(game, true);
         TestDepthRects(game, false, false);

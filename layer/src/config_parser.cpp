@@ -2464,6 +2464,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
         "motionLimitPercent",
         "extendHeadPrediction",
         "edgeFill",
+        "useGameDepth",
     };
     NoteUnknownKeys(object, allowed);
 
@@ -2532,6 +2533,13 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
     }
     if (edge_fill) {
         out.edge_fill = *edge_fill;
+    }
+    std::optional<bool> use_game_depth;
+    if (!ReadOptionalBool(object, "useGameDepth", use_game_depth, error)) {
+        return false;
+    }
+    if (use_game_depth) {
+        out.use_game_depth = *use_game_depth;
     }
     return ReadOptionalBoundedInt(object, "artifactSuppression", field, 0, 100, out.artifact_suppression, error) &&
         ReadOptionalBoundedInt(object, "motionLimitPercent", field, 2, 25, out.motion_limit_percent, error);

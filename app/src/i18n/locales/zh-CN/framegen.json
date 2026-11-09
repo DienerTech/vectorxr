@@ -229,6 +229,12 @@
       "valueLabel": "运动限制值（占视图宽度的百分比）",
       "description": "生成帧可以移动图像的最大距离，以视图宽度的比例表示。更快的运动会显示真实图像。"
     },
+    "gameDepth": {
+      "heading": "使用游戏深度",
+      "description": "使用游戏提供的深度，让近处物体保持稳定。如果开启 Frame Generation 后游戏卡顿、卡死或出现深度伪影，请关闭此项；Frame Generation 将在没有深度的情况下工作。",
+      "restart": "重启游戏后生效",
+      "summaryOff": "不使用游戏深度"
+    },
     "headPrediction": {
       "heading": "延长头部预测",
       "description": "Frame Generation 会让游戏提前最多约 150 ms 进行渲染，而某些运行时（例如 Pimax 的运行时）只预测其中约 20 ms 的头部运动。此选项会将您的头部转动延续到剩余时间，从而减少您转向一侧边缘的黑边。请在启动游戏之前开启。"

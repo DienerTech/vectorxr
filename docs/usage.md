@@ -767,6 +767,14 @@ stand still for a refresh and then jump.
 When a game sends depth to the headset, Frame Generation uses it automatically in Direct3D 12
 games, in Direct3D 11 games through the Direct3D 11 bridge, and in Vulkan games through the
 Vulkan bridge.
+
+If a game stutters, hangs or shows depth artifacts with Frame Generation, turn off **Use game
+depth** under the advanced settings of that game's Frame Generation profile (or of the default
+profile), then restart the game. Frame Generation then works without depth, and Direct3D 11 and
+Vulkan games through the bridges keep their depth to themselves, as before 0.20.1: the bridge
+makes no copy of it, and the runtime gets none from them. Direct3D 12 games still send their
+depth to the runtime; only Frame Generation leaves it out.
+
 MSFS 2024 only fills the depth it sends while its **Motion reprojection** setting is **Depth**;
 with it off, the depth is empty and Frame Generation does without. With depth, head movement is
 compensated exactly, so cockpit instruments, panels and text stay still in generated frames

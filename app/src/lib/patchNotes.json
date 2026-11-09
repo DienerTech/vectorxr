@@ -8,7 +8,8 @@
       {
         "html": "<strong>Frame Generation</strong>",
         "items": [
-          "<strong>Depth for Direct3D 11 games.</strong> Frame Generation can now use the depth that Direct3D 11 games provide, including UEVR titles, for steadier generated frames. If a game has trouble with it, see Game depth in the usage guide.",
+          "<strong>Depth for Direct3D 11 games.</strong> Frame Generation can now use the depth that Direct3D 11 games provide, including UEVR titles, for steadier generated frames.",
+        "<strong>Use game depth option.</strong> If a game stutters, hangs or shows depth artifacts with Frame Generation, turn off <strong>Use game depth</strong> in the profile's advanced settings and restart the game. Frame Generation then works without depth.",
           "<strong>No more stalls on PimaxXR.</strong> With Frame Generation engaged, PimaxXR could hold up the game's own rendering, and the game's frame rate dropped sharply. Frame Generation now works around it.",
           "<strong>Smoother output on PimaxXR 0.4.4 and earlier,</strong> which could skip a refresh when no new frame was ready.",
           "<strong>Frame Generation stays off when OpenXR Toolkit is below VectorXR,</strong> because Toolkit can't handle the extra frames there. The OSD and the OpenXR Layers page now say when this applies; move OpenXR Toolkit above VectorXR there to use both.",

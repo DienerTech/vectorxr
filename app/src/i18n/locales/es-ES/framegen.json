@@ -229,6 +229,12 @@
       "valueLabel": "Valor del límite de movimiento en porcentaje del ancho de la vista",
       "description": "Lo máximo que un fotograma generado puede desplazar la imagen, como proporción del ancho de la vista. Un movimiento más rápido muestra la imagen real."
     },
+    "gameDepth": {
+      "heading": "Usar la profundidad del juego",
+      "description": "Usa la profundidad que proporciona el juego para mantener estables los objetos cercanos. Desactívalo si un juego da tirones, se bloquea o muestra artefactos de profundidad con Frame Generation; Frame Generation funcionará entonces sin profundidad.",
+      "restart": "Se aplica al reiniciar el juego",
+      "summaryOff": "Sin profundidad del juego"
+    },
     "headPrediction": {
       "heading": "Ampliar la predicción de cabeza",
       "description": "Frame Generation hace que el juego renderice hasta ~150 ms por adelantado, y algunos entornos de ejecución, como el de Pimax, solo predicen tu cabeza unos ~20 ms de ese tiempo. Esto prolonga el giro de tu cabeza durante el resto, para que haya menos negro en el borde hacia el que giras. Actívalo antes de iniciar el juego."

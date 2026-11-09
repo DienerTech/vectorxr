@@ -367,6 +367,9 @@ function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): s
   if (settings.edgeFill !== undefined && typeof settings.edgeFill !== 'boolean') {
     errors.push(t('validation.field.trueOrFalse', { field: prefix + 'edgeFill' }))
   }
+  if (settings.useGameDepth !== undefined && typeof settings.useGameDepth !== 'boolean') {
+    errors.push(t('validation.field.trueOrFalse', { field: prefix + 'useGameDepth' }))
+  }
 
   const bounded = [
     ['artifactSuppression', settings.artifactSuppression, 0, 100],
