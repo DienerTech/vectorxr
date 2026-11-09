@@ -2805,6 +2805,17 @@ void TestDeviceLost(Game& game) {
     Check(GameRuns(game), "the game's Direct3D 11 device runs on");
 }
 
+// Whether the game's adapter renders on the processor (WARP, or the Basic
+// Render Driver of a machine without a GPU).
+bool SoftwareAdapter(const Game& game) {
+    ComPtr<IDXGIFactory4> factory;
+    ComPtr<IDXGIAdapter1> adapter;
+    DXGI_ADAPTER_DESC1 desc{};
+    return FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
+           FAILED(factory->EnumAdapterByLuid(game.luid, IID_PPV_ARGS(&adapter))) || FAILED(adapter->GetDesc1(&desc)) ||
+           test_adapter::SoftwareDxgiAdapter(desc);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2824,6 +2835,11 @@ int main(int argc, char** argv) {
     Game game;
     if (!MakeGame(hardware, game)) {
         std::cout << "skipped: no Direct3D 11 device\n";
+        return kSkip;
+    }
+    if (hardware && SoftwareAdapter(game)) {
+        // A hosted CI runner's Basic Render Driver: the WARP run covers it.
+        std::cout << "skipped: `hw` needs a hardware adapter (the default adapter renders on the processor)\n";
         return kSkip;
     }
     TestBegin(game);
