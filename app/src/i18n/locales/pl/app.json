@@ -152,6 +152,7 @@
     "priority": "Kolejność priorytetów — gdy profile nakładają się na jedną aplikację, wyższy profil przejmuje wszystkie wspólne przypisania.",
     "moveUp": "Przenieś profil w górę (wyższy priorytet)",
     "moveDown": "Przenieś profil w dół (niższy priorytet)",
+    "duplicateTitle": "Skopiuj ten profil wraz z ustawieniami i przypisaniami do nowego profilu poniżej.",
     "enabledTitle": "Ten profil stosuje niestandardowe ustawienia {module} do przypisanych mu aplikacji.",
     "disabledTitle": "Ten profil jest ignorowany w czasie działania.",
     "on": "Profil wł.",

@@ -16,7 +16,8 @@
     "noCustomProfiles": "还没有自定义配置文件。添加一个配置文件即可将 Pivot 旋转绑定到特定应用程序。",
     "profileNumber": "配置文件 {number}",
     "nudgeSetDefaultName": "微调组",
-    "nudgeSetCopyName": "{name} 副本"
+    "nudgeSetCopyName": "{name} 副本",
+    "profileCopyName": "{name} 副本"
   },
   "warnings": {
     "noActivationTitle": "没有运动辅助激活",

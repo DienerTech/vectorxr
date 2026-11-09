@@ -16,7 +16,7 @@ import {
 import { errorText } from '../lib/errors'
 import { t } from '../i18n/index.ts'
 import { createTaskQueue } from '../lib/taskQueue'
-import { cloneConfig, createApplication, createFrameGenProfile, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig, defaultProfileName, isDefaultProfileName } from '../lib/model'
+import { cloneConfig, createApplication, createFrameGenProfile, createProfile, createPivotProfile, createQuadViewsProfile, duplicatePivotProfile as clonePivotProfile, createTurboProfile, defaultConfig, defaultProfileName, isDefaultProfileName } from '../lib/model'
 import type { AppTab, ModuleId, RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
@@ -332,6 +332,17 @@ export function useConfigStore() {
     )
   }
 
+  // The copy lands right below its source, so it starts one step lower in
+  // priority order than the profile it came from.
+  function duplicatePivotProfile(index: number) {
+    const profiles = state.config.modules.pivotxr.profiles
+    const source = profiles[index]
+    if (!source) {
+      return
+    }
+    profiles.splice(index + 1, 0, clonePivotProfile(source))
+  }
+
   function removePivotProfile(index: number) {
     state.config.modules.pivotxr.profiles.splice(index, 1)
   }
@@ -535,6 +546,7 @@ export function useConfigStore() {
     removeProfile,
     syncProfileName,
     addPivotProfile,
+    duplicatePivotProfile,
     removePivotProfile,
     movePivotProfile,
     syncPivotProfileName,

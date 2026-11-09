@@ -16,7 +16,8 @@
     "noCustomProfiles": "尚無自訂設定檔。新增設定檔即可將 Pivot 旋轉繫結到特定應用程式。",
     "profileNumber": "設定檔 {number}",
     "nudgeSetDefaultName": "微調組",
-    "nudgeSetCopyName": "{name} 複本"
+    "nudgeSetCopyName": "{name} 複本",
+    "profileCopyName": "{name} 複本"
   },
   "warnings": {
     "noActivationTitle": "沒有動態輔助啟用方式",

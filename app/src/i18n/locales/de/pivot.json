@@ -16,7 +16,8 @@
     "noCustomProfiles": "Noch keine eigenen Profile. Fügen Sie ein Profil hinzu, um die Pivot-Drehung an eine bestimmte Anwendung zu binden.",
     "profileNumber": "Profil {number}",
     "nudgeSetDefaultName": "Nudge-Satz",
-    "nudgeSetCopyName": "{name} Kopie"
+    "nudgeSetCopyName": "{name} Kopie",
+    "profileCopyName": "{name} Kopie"
   },
   "warnings": {
     "noActivationTitle": "Keine Aktivierung für Motion Assist",

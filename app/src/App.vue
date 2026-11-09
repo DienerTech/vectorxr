@@ -634,6 +634,7 @@ async function confirmResetConfig() {
           :config="store.state.config"
           :applications="store.state.config.applications"
           @add-pivot-profile="store.addPivotProfile"
+          @duplicate-pivot-profile="store.duplicatePivotProfile"
           @remove-pivot-profile="store.removePivotProfile"
           @move-pivot-profile="store.movePivotProfile"
           @sync-pivot-profile-name="store.syncPivotProfileName"

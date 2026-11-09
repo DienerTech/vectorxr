@@ -1237,6 +1237,16 @@ export function createPivotProfile(
   }
 }
 
+// A deep copy with fresh ids, so the copy's bindings and Quick Views are keyed
+// apart from the source. The nudge set stays shared, like any other profile.
+export function duplicatePivotProfile(source: PivotXRProfileConfig): PivotXRProfileConfig {
+  const copy = JSON.parse(JSON.stringify(source)) as PivotXRProfileConfig
+  copy.id = newPivotProfileId()
+  copy.name = t('pivot.tab.profileCopyName', { name: source.name })
+  copy.viewControls.quickViews = copy.viewControls.quickViews.map((view) => ({ ...view, id: newPivotQuickViewId() }))
+  return copy
+}
+
 export function createQuadViewsProfile(defaultSettings: QuadViewsSettings, applicationIds: string[] = []): QuadViewsProfileConfig {
   return {
     name: defaultProfileName(),

@@ -144,6 +144,7 @@
     "priority": "Ordre de priorité — lorsque des profils se chevauchent sur une application, le profil le plus haut détient toute affectation qu'ils partagent.",
     "moveUp": "Monter le profil (priorité plus élevée)",
     "moveDown": "Descendre le profil (priorité plus basse)",
+    "duplicateTitle": "Copier ce profil, avec ses réglages et ses assignations, dans un nouveau profil en dessous.",
     "enabledTitle": "Ce profil applique des paramètres {module} personnalisés aux applications qui lui sont attribuées.",
     "disabledTitle": "Ce profil est ignoré à l'exécution.",
     "on": "Profil activé",
