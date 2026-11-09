@@ -12372,7 +12372,15 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     if (quadviews_session_active_.value_or(false) &&
         (!has_active_primary_view_configuration_ ||
          IsQuadViewConfiguration(active_primary_view_configuration_type_))) add(OsdText::ModuleQuadviews);
-    const FrameGenOsdText framegen=framegen_.OsdDescription();
+    FrameGenOsdText framegen=framegen_.OsdDescription();
+    // Asked for but kept off for OpenXR Toolkit below VectorXR: a plain
+    // "Disabled" would read as the user's own setting.
+    if (framegen_off_for_toolkit_.load(std::memory_order_acquire)) {
+        framegen=FrameGenOsdText{};
+        framegen.badge="OFF";
+        framegen.row=framegen.compact="Off  /  Layer conflict with OpenXR Toolkit";
+        framegen.detail="Move OpenXR Toolkit above VectorXR in the VectorXR app";
+    }
     snapshot.framegen=framegen.row;
     snapshot.compact_framegen=framegen.compact;
     snapshot.framegen_detail=framegen.detail;
@@ -12543,6 +12551,9 @@ void OpenXrLayer::RefreshResolvedSettings() {
     // is not safe from two threads. Frame Generation's frames (several per
     // game frame, from its own thread) would make it release the game's
     // images without its work, and race the game's swapchain calls.
+    framegen_off_for_toolkit_.store(openxr_toolkit_below_ && resolved_settings_.core.enabled &&
+                                        resolved_settings_.framegen.enabled,
+                                    std::memory_order_release);
     if (openxr_toolkit_below_ && resolved_settings_.framegen.enabled) {
         resolved_settings_.framegen.enabled = false;
         if (!openxr_toolkit_framegen_logged_) {

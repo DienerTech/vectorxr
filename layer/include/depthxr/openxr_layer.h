@@ -1961,6 +1961,9 @@ class OpenXrLayer {
     // stays off.
     bool openxr_toolkit_below_{false};
     bool openxr_toolkit_framegen_logged_{false};
+    // Frame Generation was asked for but is kept off for that reason; the
+    // OSD says so instead of a plain Off (read on the OSD's thread).
+    std::atomic<bool> framegen_off_for_toolkit_{false};
     // The layers below VectorXR (names, nearest first) for this instance:
     // with Frame Generation they get every frame it shows, from its thread,
     // and (Direct3D 12) its queue as the session's. The session's frames the

@@ -102,6 +102,7 @@ class D3D11BridgeLayerTestPeer {
         return layer.instance_ == XR_NULL_HANDLE && layer.active_session_ == XR_NULL_HANDLE &&
                !layer.d3d11_bridge_.Active() && !layer.framegen_queue_.Active() && !layer.framegen_.Started();
     }
+    static OsdSnapshot Osd() { return OpenXrLayer::Instance().BuildOsdSnapshot(); }
     // The layer's log so far: an error reaches the file at once, with
     // everything logged before it.
     static std::string Log() {
@@ -6867,6 +6868,10 @@ void TestToolkitBelowKeepsFrameGenOff(Game& game) {
     Check(Contains(log, "OpenXR Toolkit is loaded below VectorXR.") &&
               Contains(log, "Frame Generation is off for this game: OpenXR Toolkit is loaded below VectorXR"),
           name + ": the log says why Frame Generation is off");
+    const depthxr::OsdSnapshot osd = Peer::Osd();
+    Check(osd.framegen == "Off  /  Layer conflict with OpenXR Toolkit" &&
+              osd.compact_framegen == osd.framegen && Contains(osd.framegen_detail, "Move OpenXR Toolkit above VectorXR"),
+          name + ": the OSD says Frame Generation is off for OpenXR Toolkit, not just Disabled (" + osd.framegen + ")");
     StopApp(app);
     g_layer_below = nullptr;
     EndCase(game);

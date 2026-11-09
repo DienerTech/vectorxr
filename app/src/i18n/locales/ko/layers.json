@@ -20,7 +20,9 @@
     "turboLabel": "Turbo 충돌:",
     "toolkitTurbo": "VectorXR Turbo를 사용하는 동안 OpenXR Toolkit이 사용 설정되어 있습니다. 두 프레임 페이싱 레이어는 서로 충돌합니다. OXRTK의 Turbo Mode가 켜져 있으면 OXRTK 또는 VectorXR 중 한쪽에서만 끄고, 둘 다 켜 두지 마십시오.",
     "quadviewsOffLabel": "Quadviews 꺼짐:",
-    "toolkitQuad": "OpenXR Toolkit이 VectorXR보다 위에 있습니다({slices}). OpenXR Toolkit은 쿼드 뷰를 지원하지 않으므로 VectorXR은 OpenXR Toolkit이 실행되는 모든 게임에서 Quadviews를 꺼 둡니다. Quadviews를 사용하려면 OpenXR Toolkit을 사용 안 함으로 설정하거나 해당 게임에서 끄십시오."
+    "toolkitQuad": "OpenXR Toolkit이 VectorXR보다 위에 있습니다({slices}). OpenXR Toolkit은 쿼드 뷰를 지원하지 않으므로 VectorXR은 OpenXR Toolkit이 실행되는 모든 게임에서 Quadviews를 꺼 둡니다. Quadviews를 사용하려면 OpenXR Toolkit을 사용 안 함으로 설정하거나 해당 게임에서 끄십시오.",
+    "frameGenOffLabel": "Frame Generation 꺼짐:",
+    "toolkitFrameGen": "OpenXR Toolkit이 VectorXR 아래에 있습니다({slices}). 이 위치에서는 Frame Generation의 추가 프레임을 처리할 수 없으므로, VectorXR은 OpenXR Toolkit이 실행되는 모든 게임에서 Frame Generation을 끕니다. Frame Generation을 사용하려면 OpenXR Toolkit을 VectorXR 위로 옮기거나 해당 게임에서 끄세요."
   },
   "status": {
     "unlocked": "이 앱 세션에서 시스템 전체 OpenXR 레이어 쓰기가 잠금 해제되었습니다.",

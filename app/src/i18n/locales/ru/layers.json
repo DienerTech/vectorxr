@@ -23,7 +23,9 @@
     "turboLabel": "Конфликт Turbo:",
     "toolkitTurbo": "OpenXR Toolkit включён, пока используется Turbo VectorXR. Два слоя управления темпом кадров мешают друг другу: если в OXRTK включён режим Turbo Mode, отключите его там или в VectorXR, но не оба одновременно.",
     "quadviewsOffLabel": "Quadviews выключен:",
-    "toolkitQuad": "OpenXR Toolkit находится выше VectorXR ({slices}). Он не поддерживает quad views, поэтому VectorXR держит Quadviews выключенным во всех играх, в которых работает OpenXR Toolkit. Чтобы использовать Quadviews, отключите OpenXR Toolkit или выключите его для этих игр."
+    "toolkitQuad": "OpenXR Toolkit находится выше VectorXR ({slices}). Он не поддерживает quad views, поэтому VectorXR держит Quadviews выключенным во всех играх, в которых работает OpenXR Toolkit. Чтобы использовать Quadviews, отключите OpenXR Toolkit или выключите его для этих игр.",
+    "frameGenOffLabel": "Frame Generation выключен:",
+    "toolkitFrameGen": "OpenXR Toolkit находится ниже VectorXR ({slices}). В этом положении он не справляется с дополнительными кадрами Frame Generation, поэтому VectorXR оставляет Frame Generation выключенным во всех играх, где работает OpenXR Toolkit. Чтобы использовать Frame Generation, переместите OpenXR Toolkit выше VectorXR или отключите его для этих игр."
   },
   "status": {
     "unlocked": "Запись слоёв OpenXR для всего компьютера разблокирована на этот сеанс приложения.",

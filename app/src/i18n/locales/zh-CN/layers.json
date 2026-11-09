@@ -20,7 +20,9 @@
     "turboLabel": "Turbo 冲突：",
     "toolkitTurbo": "正在使用 VectorXR Turbo 时启用了 OpenXR Toolkit。两个帧节奏控制层会相互冲突——如果 OXRTK 的 Turbo 模式已开启，请在它或 VectorXR 中禁用其中一个，切勿同时开启。",
     "quadviewsOffLabel": "Quadviews 已关闭：",
-    "toolkitQuad": "OpenXR Toolkit 位于 VectorXR 之上（{slices}）。它不支持四视图，因此对于运行 OpenXR Toolkit 的所有游戏，VectorXR 都会保持 Quadviews 关闭。要使用 Quadviews，请禁用 OpenXR Toolkit，或为这些游戏关闭它。"
+    "toolkitQuad": "OpenXR Toolkit 位于 VectorXR 之上（{slices}）。它不支持四视图，因此对于运行 OpenXR Toolkit 的所有游戏，VectorXR 都会保持 Quadviews 关闭。要使用 Quadviews，请禁用 OpenXR Toolkit，或为这些游戏关闭它。",
+    "frameGenOffLabel": "Frame Generation 已关闭：",
+    "toolkitFrameGen": "OpenXR Toolkit 位于 VectorXR 之下（{slices}）。在此位置它无法处理 Frame Generation 的额外帧，因此在运行 OpenXR Toolkit 的所有游戏中，VectorXR 都会保持 Frame Generation 关闭。要使用 Frame Generation，请将 OpenXR Toolkit 移到 VectorXR 之上，或在这些游戏中将其关闭。"
   },
   "status": {
     "unlocked": "已为本次应用会话解锁计算机全局 OpenXR 层的写入。",

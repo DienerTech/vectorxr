@@ -21,7 +21,9 @@
     "turboLabel": "Conflit Turbo :",
     "toolkitTurbo": "OpenXR Toolkit est activé alors que Turbo de VectorXR est utilisé. Deux couches de cadencement des images se contrarient — si le mode Turbo d'OXRTK est activé, désactivez-le là-bas ou dans VectorXR, jamais les deux.",
     "quadviewsOffLabel": "Quadviews désactivé :",
-    "toolkitQuad": "OpenXR Toolkit se trouve au-dessus de VectorXR ({slices}). Il ne prend pas en charge les quad views ; VectorXR garde donc Quadviews désactivé pour chaque jeu dans lequel OpenXR Toolkit s'exécute. Désactivez OpenXR Toolkit, ou désactivez-le pour ces jeux, pour utiliser Quadviews."
+    "toolkitQuad": "OpenXR Toolkit se trouve au-dessus de VectorXR ({slices}). Il ne prend pas en charge les quad views ; VectorXR garde donc Quadviews désactivé pour chaque jeu dans lequel OpenXR Toolkit s'exécute. Désactivez OpenXR Toolkit, ou désactivez-le pour ces jeux, pour utiliser Quadviews.",
+    "frameGenOffLabel": "Frame Generation désactivé :",
+    "toolkitFrameGen": "OpenXR Toolkit est sous VectorXR ({slices}). À cet endroit, il ne peut pas gérer les images supplémentaires de Frame Generation : VectorXR laisse donc Frame Generation désactivé dans tous les jeux où OpenXR Toolkit s’exécute. Placez OpenXR Toolkit au-dessus de VectorXR, ou désactivez-le pour ces jeux, pour utiliser Frame Generation."
   },
   "status": {
     "unlocked": "Les écritures de couches OpenXR à l'échelle de la machine sont déverrouillées pour cette session de l'application.",
