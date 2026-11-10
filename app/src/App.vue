@@ -43,6 +43,11 @@ const turboInUse = computed(
     store.state.config.modules.turbo.enabled ||
     store.state.config.modules.turbo.profiles.some((profile) => profile.enabled),
 )
+const frameGenInUse = computed(
+  () =>
+    store.state.config.modules.framegen.enabled ||
+    store.state.config.modules.framegen.profiles.some((profile) => profile.enabled),
+)
 const quadviewsInUse = computed(
   () =>
     store.state.config.modules.quadviews.enabled ||
@@ -596,6 +601,7 @@ async function confirmResetConfig() {
           :machine-writes-unlocked="openXrMachineWritesUnlocked"
           :turbo-in-use="turboInUse"
           :quadviews-in-use="quadviewsInUse"
+          :frame-gen-in-use="frameGenInUse"
           @refresh="refreshOpenXrLayers(true)"
           @machine-writes-unlocked="openXrMachineWritesUnlocked = $event"
           @snapshot-updated="openXrLayerSnapshot = $event; refreshOpenXrLayers(true)"
@@ -634,6 +640,7 @@ async function confirmResetConfig() {
           :config="store.state.config"
           :applications="store.state.config.applications"
           @add-pivot-profile="store.addPivotProfile"
+          @duplicate-pivot-profile="store.duplicatePivotProfile"
           @remove-pivot-profile="store.removePivotProfile"
           @move-pivot-profile="store.movePivotProfile"
           @sync-pivot-profile-name="store.syncPivotProfileName"

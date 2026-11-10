@@ -144,6 +144,7 @@
     "priority": "Orden de prioridad: cuando los perfiles coinciden en una aplicación, el perfil superior se queda con las asignaciones que compartan.",
     "moveUp": "Subir perfil (mayor prioridad)",
     "moveDown": "Bajar perfil (menor prioridad)",
+    "duplicateTitle": "Copia este perfil, con sus ajustes y asignaciones, en un perfil nuevo debajo.",
     "enabledTitle": "Este perfil aplica una configuración personalizada de {module} a sus aplicaciones asignadas.",
     "disabledTitle": "Este perfil se ignora en tiempo de ejecución.",
     "on": "Perfil activado",

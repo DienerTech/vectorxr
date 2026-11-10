@@ -229,6 +229,12 @@
       "valueLabel": "Wartość limitu ruchu w procentach szerokości widoku",
       "description": "Największe przesunięcie obrazu przez generowaną klatkę jako część szerokości widoku. Szybszy ruch pokazuje rzeczywisty obraz."
     },
+    "gameDepth": {
+      "heading": "Używaj głębi z gry",
+      "description": "Używa głębi dostarczanej przez grę, aby bliskie obiekty pozostawały stabilne. Wyłącz, jeśli gra z Frame Generation zacina się, zawiesza lub pokazuje artefakty głębi; Frame Generation działa wtedy bez głębi.",
+      "restart": "Działa po ponownym uruchomieniu gry",
+      "summaryOff": "Bez głębi z gry"
+    },
     "headPrediction": {
       "heading": "Rozszerz predykcję głowy",
       "description": "Frame Generation sprawia, że gra renderuje nawet ~150 ms do przodu, a niektóre środowiska uruchomieniowe, np. Pimax, przewidują ruch głowy tylko dla ~20 ms z tego czasu. Ta opcja przenosi obrót głowy na resztę, aby było mniej czerni na krawędzi, w którą się obracasz. Włącz ją przed uruchomieniem gry."

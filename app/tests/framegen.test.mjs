@@ -43,6 +43,16 @@ test('invalid imported values normalize safely: enums fall back, integers clamp'
   assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({ extendHeadPrediction: 'yes' }), false)
   // A profile saved without it is off, as the layer reads it, whatever the defaults say.
   assert.equal('extendHeadPrediction' in normalizeFrameGenSettings({}, { ...defaultFrameGenSettings(), extendHeadPrediction: true }), false)
+  // Edge fill likewise: kept when on, absent otherwise, never inherited.
+  assert.deepEqual(normalizeFrameGenSettings({ edgeFill: true }), { ...defaultFrameGenSettings(), edgeFill: true })
+  assert.equal('edgeFill' in normalizeFrameGenSettings({ edgeFill: false }), false)
+  assert.equal('edgeFill' in normalizeFrameGenSettings({ edgeFill: 1 }), false)
+  assert.equal('edgeFill' in normalizeFrameGenSettings({}, { ...defaultFrameGenSettings(), edgeFill: true }), false)
+  // useGameDepth is stored only when off; absent means on.
+  assert.deepEqual(normalizeFrameGenSettings({ useGameDepth: false }), { ...defaultFrameGenSettings(), useGameDepth: false })
+  assert.equal('useGameDepth' in normalizeFrameGenSettings({ useGameDepth: true }), false)
+  assert.equal('useGameDepth' in normalizeFrameGenSettings({ useGameDepth: 0 }), false)
+  assert.equal('useGameDepth' in normalizeFrameGenSettings({}, { ...defaultFrameGenSettings(), useGameDepth: false }), false)
   assert.deepEqual(normalizeFrameGenSettings({ artifactSuppression: -5, motionLimitPercent: 99 }), { ...defaultFrameGenSettings(), artifactSuppression: 0, motionLimitPercent: 25 })
   assert.equal(normalizeFrameGenSettings({ artifactSuppression: 33.6 }).artifactSuppression, 34)
   assert.equal(normalizeFrameGenSettings({ motionLimitPercent: Infinity }).motionLimitPercent, 10)

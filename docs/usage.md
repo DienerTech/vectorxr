@@ -765,7 +765,16 @@ stand still for a refresh and then jump.
 #### Game depth
 
 When a game sends depth to the headset, Frame Generation uses it automatically in Direct3D 12
-games, and in Vulkan games through the Vulkan bridge.
+games, in Direct3D 11 games through the Direct3D 11 bridge, and in Vulkan games through the
+Vulkan bridge.
+
+If a game stutters, hangs or shows depth artifacts with Frame Generation, turn off **Use game
+depth** under the advanced settings of that game's Frame Generation profile (or of the default
+profile), then restart the game. Frame Generation then works without depth, and Direct3D 11 and
+Vulkan games through the bridges keep their depth to themselves, as before 0.20.1: the bridge
+makes no copy of it, and the runtime gets none from them. Direct3D 12 games still send their
+depth to the runtime; only Frame Generation leaves it out.
+
 MSFS 2024 only fills the depth it sends while its **Motion reprojection** setting is **Depth**;
 with it off, the depth is empty and Frame Generation does without. With depth, head movement is
 compensated exactly, so cockpit instruments, panels and text stay still in generated frames
@@ -774,10 +783,39 @@ cockpit from where your eyes will be when each frame is displayed: they keep mov
 between the game's last two frames. Most headset runtimes only correct head rotation between
 frames, so without this, near cockpit detail would jump at the game's frame rate whenever your
 head moved. Depth also lets generated frames resample nearby content with a sharper (cubic)
-filter, so cockpit detail stays crisper. Direct3D 11 games such as DCS keep their depth to
-themselves through the Direct3D 11 bridge, so they use head rotation only for now, and Star
-Citizen's depth currently arrives empty. When a game supplies useful depth for only one eye,
-Frame Generation can use it for the other eye too.
+filter, so cockpit detail stays crisper. Direct3D 11 games that send depth, such as iRacing,
+and Unreal Engine games through UEVR with its **Enable Depth-based Latency Reduction** option
+on, have it copied from the game's private depth images into the headset runtime's at each
+release, so the runtime gets it as well (about 0.1 to 0.2 ms of the game's GPU time on an
+RTX 5090 at headset resolutions). DCS sends no depth, so it uses head rotation only. When a
+game supplies useful depth for only one eye, Frame Generation can use it for the other eye too.
+
+Star Citizen currently writes its depth after it has handed the image over for the frame, so the
+depth is still empty when the frame ends (CIG plans to fix this). While Frame Generation finds a
+Vulkan game's depth empty, the Vulkan bridge checks its depth image about once a second at the
+frame's end and again just before the game's next frame. When depth turns up only at the second check, twice in a row, the bridge takes it
+from there: each frame then carries the depth of the frame before. Frame Generation checks that
+depth against the other eye like any other, and uses it only when it lines the eyes up. The log
+says when this starts (**the game writes its depth after its frame's end**) and when it stops
+again, as soon as the depth is there at the frame's end. Taking depth this way costs one more
+copy of each depth image per frame, and one more depth image of memory per depth swapchain
+(about 110 MB for each eye at Star Citizen's 5424x5356). `VECTORXR_VULKAN_BRIDGE_DEPTH=end-frame`
+only takes a Vulkan game's depth at the frame's end, and `VECTORXR_VULKAN_BRIDGE_DEPTH=private`
+keeps every Vulkan game's depth to itself, out of the frames Frame Generation and the runtime get.
+
+
+The bridge keeps a Direct3D 11 game's depth to itself, as before, when it cannot copy it: depth
+images with more than one sample, or a runtime that does not make its depth images depth
+targets. The log says so for each such depth swapchain, and the game's depth then reaches
+neither Frame Generation nor the runtime. `VECTORXR_D3D11_BRIDGE_DEPTH=private` keeps every
+Direct3D 11 game's depth to itself, if copying it ever causes a problem in a game. While the
+bridge copies a game's depth, it turns the game's Direct3D 11 multithread protection on (if the
+game has not), so no other thread of the game's renders in the middle of a copy.
+
+Depth whose rectangle lies outside its depth image, as UEVR sends with an upscaler or a screen
+percentage that makes its depth image smaller than its color image, is left out of the frame for
+both eyes, in every kind of game: some runtimes (PimaxXR, Virtual Desktop) refuse a whole frame
+for it. The log says so once a session. The color goes on as before.
 
 Games do not always describe their depth correctly, so Frame Generation first checks it against
 the other eye: depth that is right lines the two eyes' images up. It starts using depth once
@@ -860,7 +898,9 @@ at 6864x6908 per eye and 0.2 GB at 3000x3000. In all, plan for about 3 to 4 GB o
 6864x6908 per eye, and under 1 GB at 3000x3000. Direct3D 11 and Vulkan games (DCS, Star Citizen)
 also keep a shared copy of each of the game's swapchain images for the bridge, about as much again
 as the output images (the bridge logs it as `twinMiB`): plan for about 4 to 5 GB for them at
-6864x6908 per eye.
+6864x6908 per eye. A Direct3D 11 game that sends depth adds a shared copy of each depth image
+too: 2 bytes per pixel for 16-bit depth, 4 for the others (iRacing's 6904x3184 16-bit depth:
+about 130 MB for three images).
 
 Outside quad views, the log says how many real frames are kept (**Frame Generation keeps the
 last 5 real frames to generate from**, or 3 with the reason; quad views sessions always keep five), and the **Frame Generation process video memory** lines
@@ -994,7 +1034,7 @@ engages, or sooner once the game's own frames show the runtime giving them every
 #### Current limits
 
 - Frame Generation does not use game motion vectors yet; motion is estimated from color
-  images, with the game's depth (Direct3D 12, and Vulkan through the bridge) used to remove head
+  images, with the game's depth (Direct3D 12, and Direct3D 11 and Vulkan through the bridges) used to remove head
   movement and sharpen nearby detail.
 - There is no HUD masking yet. Text, HUDs, and gauges baked into the 3D image can shimmer on
   generated frames.

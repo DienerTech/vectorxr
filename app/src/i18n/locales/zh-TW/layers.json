@@ -20,7 +20,9 @@
     "turboLabel": "Turbo 衝突：",
     "toolkitTurbo": "使用 VectorXR Turbo 時，OpenXR Toolkit 處於啟用狀態。兩個影格節奏層會互相干擾：如果 OXRTK 的 Turbo Mode 已開啟，請在該處或在 VectorXR 中停用其中一個，切勿兩者同時開啟。",
     "quadviewsOffLabel": "Quadviews 已關閉：",
-    "toolkitQuad": "OpenXR Toolkit 位於 VectorXR 之上（{slices}）。它不支援四視圖，因此在所有執行 OpenXR Toolkit 的遊戲中，VectorXR 都會讓 Quadviews 保持關閉。若要使用 Quadviews，請停用 OpenXR Toolkit，或針對那些遊戲將其關閉。"
+    "toolkitQuad": "OpenXR Toolkit 位於 VectorXR 之上（{slices}）。它不支援四視圖，因此在所有執行 OpenXR Toolkit 的遊戲中，VectorXR 都會讓 Quadviews 保持關閉。若要使用 Quadviews，請停用 OpenXR Toolkit，或針對那些遊戲將其關閉。",
+    "frameGenOffLabel": "Frame Generation 已關閉：",
+    "toolkitFrameGen": "OpenXR Toolkit 位於 VectorXR 之下（{slices}）。在此位置它無法處理 Frame Generation 的額外影格，因此在執行 OpenXR Toolkit 的所有遊戲中，VectorXR 都會保持 Frame Generation 關閉。若要使用 Frame Generation，請將 OpenXR Toolkit 移到 VectorXR 之上，或在這些遊戲中將其關閉。"
   },
   "status": {
     "unlocked": "已為此應用程式工作階段解除鎖定全機 OpenXR 層寫入。",

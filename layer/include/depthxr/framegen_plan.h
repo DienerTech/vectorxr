@@ -511,6 +511,50 @@ struct FrameGenFov {
     float down{0.0f};
 };
 
+// Edge fill (FrameGenSettings::edge_fill): the runtime turns each frame it is
+// given to where the head is when it shows it, and where it turns past the
+// frame's edge it has nothing to show (black on the leading edge of a fast
+// turn, widest for generated frames, which keep their real frame's pose).
+// Output images are made wider than the frame by a margin each side, the
+// margin filled with the frame's nearest edge (FrameGenImage::content), and
+// submitted with the field of view widened to match: the runtime then turns
+// a smeared edge into view instead of black. Margins in pixels.
+struct FrameGenEdgeMargins {
+    std::uint32_t left{0};
+    std::uint32_t right{0};
+    std::uint32_t up{0};
+    std::uint32_t down{0};
+    bool Any() const { return left || right || up || down; }
+    bool operator==(const FrameGenEdgeMargins& other) const {
+        return left == other.left && right == other.right && up == other.up && down == other.down;
+    }
+    bool operator!=(const FrameGenEdgeMargins& other) const { return !(*this == other); }
+};
+
+// The margin each side the fill adds by default: degrees beyond each edge
+// (VECTORXR_FRAMEGEN_EDGE_FILL=h[,v] in the research file changes them).
+inline constexpr float kFrameGenEdgeFillHorizontalDegrees = 3.0f;
+inline constexpr float kFrameGenEdgeFillVerticalDegrees = 1.5f;
+// Output images are never made wider or taller than this (Direct3D 12's
+// largest texture); margins shrink alike to fit.
+inline constexpr std::uint32_t kFrameGenEdgeFillMaxExtent = 16384;
+
+// The margins widening a frame of `extent` with field of view `fov` by
+// `horizontal_degrees` beyond its left and right edges and
+// `vertical_degrees` beyond its top and bottom, at the frame's own pixel
+// spacing (the image stays one projection, its tangents spaced alike): no
+// edge goes past 85 degrees off the view axis, no margin is wider than half
+// the frame, and the image fits kFrameGenEdgeFillMaxExtent. None for a field
+// of view that is not one (right not right of left, up not above down).
+FrameGenEdgeMargins FrameGenEdgeFillMargins(const FrameGenFov& fov, FrameGenExtent extent, float horizontal_degrees,
+                                            float vertical_degrees);
+// The widened image's field of view: the frame's, its tangents carried on
+// across each margin at the frame's spacing (what the margins' pixels show).
+FrameGenFov FrameGenEdgeFillFov(const FrameGenFov& fov, FrameGenExtent extent, const FrameGenEdgeMargins& margins);
+// Parses VECTORXR_FRAMEGEN_EDGE_FILL: "h" or "h,v" degrees (0-15 each; one
+// value for both). Nullopt for anything else.
+std::optional<std::array<float, 2>> ParseFrameGenEdgeFillDegrees(const std::string& value);
+
 // The quad views diagnostic overlay over one composed eye, drawn last, as the
 // layer's Direct3D 11 compositor draws it (QuadViewsD3D11ShaderSource): the
 // periphery, blend band and inset tinted, the inset's outline and the band's

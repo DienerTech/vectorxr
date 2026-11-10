@@ -229,6 +229,12 @@
       "valueLabel": "動態限制值，以視野寬度的百分比表示",
       "description": "生成影格可移動影像的最大距離，以視野寬度的比例表示。更快的動態會顯示真實影像。"
     },
+    "gameDepth": {
+      "heading": "使用遊戲深度",
+      "description": "使用遊戲提供的深度，讓近處物體保持穩定。如果開啟 Frame Generation 後遊戲卡頓、當住或出現深度瑕疵，請關閉此項；Frame Generation 將在沒有深度的情況下運作。",
+      "restart": "重新啟動遊戲後生效",
+      "summaryOff": "不使用遊戲深度"
+    },
     "headPrediction": {
       "heading": "延伸頭部預測",
       "description": "Frame Generation 會讓遊戲最多提前約 150 ms 渲染，而某些執行階段（例如 Pimax 的）只會預測其中約 20 ms 的頭部動作。此選項會將您頭部的轉動延續到剩餘的時間，讓您轉向的那一側邊緣出現較少黑邊。請在啟動遊戲前開啟。"

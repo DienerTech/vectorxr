@@ -16,7 +16,8 @@
     "noCustomProfiles": "No custom profiles yet. Add a profile to bind Pivot rotation to a specific application.",
     "profileNumber": "Profile {number}",
     "nudgeSetDefaultName": "Nudge Set",
-    "nudgeSetCopyName": "{name} Copy"
+    "nudgeSetCopyName": "{name} Copy",
+    "profileCopyName": "{name} Copy"
   },
   "warnings": {
     "noActivationTitle": "No Motion Assist activation",

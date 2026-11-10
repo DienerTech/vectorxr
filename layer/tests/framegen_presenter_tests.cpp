@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <cmath>
 #include <limits>
 #include <cstdlib>
@@ -330,6 +331,12 @@ struct GpuLog {
     };
     std::mutex syntheses_mutex;
     std::vector<Synthesis> syntheses;
+    // The output images each Synthesize was given (under syntheses_mutex).
+    std::vector<std::vector<FrameGenImage>> synthesis_outputs;
+    // Edge fill (SupportsEdgeFill): the backend fills output images' margins.
+    bool edge_fill{false};
+    // EdgesFilled: false as when the backend copies frames in (margins not drawn).
+    std::atomic<bool> edges_filled{true};
     std::atomic<int> synthesis_failures{0};
     // SynthesizeStale: supported, written, and asked of a motion frame that
     // was not the frame's previous one or not measured yet.
@@ -436,6 +443,8 @@ class FakeGpu final : public FrameGenGpu {
   public:
     explicit FakeGpu(GpuLog* log) : log_(log) {}
     const char* Name() const override { return "Fake"; }
+    bool SupportsEdgeFill() const override { return log_->edge_fill; }
+    bool EdgesFilled() const override { return log_->edges_filled; }
     std::string HardwareFlowStatus() const override {
         return log_->hardware_available ? "active" : "fake GPU has no optical flow hardware";
     }
@@ -715,6 +724,7 @@ class FakeGpu final : public FrameGenGpu {
         {
             std::scoped_lock lock(log_->syntheses_mutex);
             log_->syntheses.push_back({frame, mode, fraction, now});
+            log_->synthesis_outputs.push_back(outputs);
         }
         // Seen from the eye's position at the frame's time, as the presenter
         // places the views (where depth is used).
@@ -1154,6 +1164,18 @@ struct Runtime {
     // Every Nth wait misses a refresh: it is released a refresh later than
     // asked for (paced runtimes only; 0: none).
     std::atomic<int> miss_every{0};
+    // Throttle::kPeriod reports the throttled period one wait late, as
+    // PimaxXR does with Pimax's Smart Smoothing (its frame duration is
+    // updated in xrBeginFrame, the next xrWaitFrame reports it; pimax-openxr
+    // frame.cpp): the first held wait still reports the refresh period, the
+    // first wait after the hold ends still twice it.
+    bool period_one_late{false}; // set before the first wait
+    bool period_throttled{false}; // under g_xr_mutex: what the next wait reports
+    // The next waits (paced runtimes only) report a display time 1 ns after
+    // the last, still blocking a refresh each: PimaxXR clamps a prediction of
+    // PVR's that did not advance (pimax-openxr frame.cpp xrWaitFrame).
+    std::atomic<int> clamp_next{0};
+    std::atomic<int> clamped_waits{0};
     // ...and reports twice the period for that wait, as SteamVR with Pimax's
     // driver does after its compositor misses a refresh.
     std::atomic<bool> miss_reports_multiple{false};
@@ -1232,6 +1254,9 @@ struct Runtime {
     std::vector<XrTime> submitted_times;
     std::vector<std::chrono::steady_clock::time_point> submitted_at;
     std::vector<std::vector<XrSwapchain>> submitted_swapchains;
+    // Each submission's first layer's projection views as submitted (their
+    // `next` pointers are not followed).
+    std::vector<std::vector<XrCompositionLayerProjectionView>> submitted_views;
     std::vector<bool> submitted_depth;
     std::vector<float> submitted_left_x; // the first projection view's position
 
@@ -1315,15 +1340,25 @@ struct Runtime {
                     if (const XrDuration lag = lag_next.exchange(0)) {
                         display = std::max(clock_floor + kClockCreep, display - lag);
                     }
+                    if (clamp_next > 0 && clock_floor > 0) {
+                        --clamp_next;
+                        ++clamped_waits;
+                        display = clock_floor + 1;
+                    }
                     if (display <= clock_floor || (stall_clock && clock_floor > 0)) {
                         display = clock_floor + kClockCreep;
                         ++crept_waits;
                     }
                     clock_floor = display;
                 }
-                return report(display, throttling && throttle == Throttle::kPeriod ? throttle_refreshes * period
-                                       : miss && miss_reports_multiple   ? 2 * period
-                                                                         : period);
+                bool reported_throttled = throttling;
+                if (period_one_late) {
+                    std::scoped_lock lock(g_xr_mutex);
+                    reported_throttled = std::exchange(period_throttled, throttling);
+                }
+                return report(display, reported_throttled && throttle == Throttle::kPeriod ? throttle_refreshes * period
+                                       : miss && miss_reports_multiple                  ? 2 * period
+                                                                                        : period);
             }
             return report(next_display.fetch_add(period), period);
         };
@@ -1407,6 +1442,12 @@ struct Runtime {
                 left_x = projection->viewCount ? projection->views[0].pose.position.x : 0.0f;
             }
             submitted_swapchains.push_back(swapchains);
+            if (info->layerCount) {
+                const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+                submitted_views.emplace_back(projection->views, projection->views + projection->viewCount);
+            } else {
+                submitted_views.emplace_back();
+            }
             submitted_depth.push_back(depth);
             submitted_left_x.push_back(left_x);
             log.push_back({info->displayTime, swapchains, info->layerCount, releases});
@@ -1786,6 +1827,191 @@ void TestOutputsKeptAcrossMultipliers() {
     for (int i = 0; i < 6; ++i) app.Frame();
     Check(g_creates == 4, "outputs: stepping down and back up reallocates nothing");
     Check(!runtime.ordering_violation && !g_release_violation, "outputs: calls stayed ordered");
+}
+
+// Edge fill: the views of a submission shown from output images widened by
+// `margins` (the game's views: ±0.8 rad, 1600 x 1600): each image whole, its
+// field of view the game's carried on across the margins at the game's
+// pixel spacing, and no depth.
+bool ShowsFilled(const std::vector<XrCompositionLayerProjectionView>& views, const FrameGenEdgeMargins& margins) {
+    const double spacing = (std::tan(0.8) - std::tan(-0.8)) / 1600.0;
+    for (const XrCompositionLayerProjectionView& view : views) {
+        const XrRect2Di& rect = view.subImage.imageRect;
+        const double tl = std::tan(double(view.fov.angleLeft)), tr = std::tan(double(view.fov.angleRight));
+        const double tu = std::tan(double(view.fov.angleUp)), td = std::tan(double(view.fov.angleDown));
+        if (rect.offset.x != 0 || rect.offset.y != 0 ||
+            rect.extent.width != static_cast<std::int32_t>(1600 + margins.left + margins.right) ||
+            rect.extent.height != static_cast<std::int32_t>(1600 + margins.up + margins.down) ||
+            std::abs((tr - tl) / rect.extent.width - spacing) > 1e-6 * spacing * 10 ||
+            std::abs((tu - td) / rect.extent.height - spacing) > 1e-6 * spacing * 10 ||
+            std::abs(tl - (std::tan(-0.8) - margins.left * spacing)) > 1e-5 ||
+            std::abs(tu - (std::tan(0.8) + margins.up * spacing)) > 1e-5 || view.next) {
+            return false;
+        }
+    }
+    return !views.empty();
+}
+
+// The margins an output image gets for the test app's views: as asked
+// (FrameGenEdgeFillMargins), each rounded up to whole 32-pixel tiles.
+FrameGenEdgeMargins TestAppMargins() {
+    FrameGenEdgeMargins margins =
+        FrameGenEdgeFillMargins({-0.8f, 0.8f, 0.8f, -0.8f}, {1600, 1600}, kFrameGenEdgeFillHorizontalDegrees,
+                                kFrameGenEdgeFillVerticalDegrees);
+    for (std::uint32_t* margin : {&margins.left, &margins.right, &margins.up, &margins.down}) {
+        *margin = (*margin + 31) / 32 * 32;
+    }
+    return margins;
+}
+
+// Edge fill's margins: degrees past each edge at the frame's own pixel
+// spacing (the outer edge of a wide view needs far more pixels than its inner
+// one), the widened field of view exactly what the margins' pixels show,
+// within half the frame and the largest image; the research switch's values.
+void TestEdgeFillMargins() {
+    // A Pimax Crystal Super left eye (round 1): 63.5 degrees out, 51.5 in,
+    // 58.7 up and down, 6240 x 6280.
+    constexpr double kDegree = 3.14159265358979323846 / 180.0;
+    const FrameGenFov pimax{static_cast<float>(-63.5 * kDegree), static_cast<float>(51.5 * kDegree),
+                            static_cast<float>(58.7 * kDegree), static_cast<float>(-58.7 * kDegree)};
+    const FrameGenExtent extent{6240, 6280};
+    const FrameGenEdgeMargins margins = FrameGenEdgeFillMargins(pimax, extent, 3.0f, 1.5f);
+    Check(margins.left > 2 * margins.right && margins.up == margins.down && margins.up > 0,
+          "edge fill margins: the outer edge needs the widest margin (" + std::to_string(margins.left) + "/" +
+              std::to_string(margins.right) + "/" + std::to_string(margins.up) + ")");
+    const FrameGenFov widened = FrameGenEdgeFillFov(pimax, extent, margins);
+    Check(widened.left <= pimax.left - 3.0f * kDegree + 1e-4 && widened.left > pimax.left - 3.3f * kDegree &&
+              widened.right >= pimax.right + 3.0f * kDegree - 1e-4 && widened.up >= pimax.up + 1.5f * kDegree - 1e-4 &&
+              widened.down <= pimax.down - 1.5f * kDegree + 1e-4,
+          "edge fill margins: each edge reaches its degrees, no more than a pixel past them");
+    const double spacing = (std::tan(double(pimax.right)) - std::tan(double(pimax.left))) / extent.width;
+    const double widened_spacing = (std::tan(double(widened.right)) - std::tan(double(widened.left))) /
+                                   (extent.width + margins.left + margins.right);
+    Check(std::abs(widened_spacing / spacing - 1.0) < 1e-5, "edge fill margins: the margins keep the frame's pixel spacing");
+    Check(!FrameGenEdgeFillMargins(pimax, extent, 0.0f, 0.0f).Any(), "edge fill margins: none for no degrees");
+    Check(!FrameGenEdgeFillMargins({0.5f, -0.5f, 0.5f, -0.5f}, extent, 3.0f, 3.0f).Any(),
+          "edge fill margins: none for a field of view that is not one");
+    const FrameGenEdgeMargins capped = FrameGenEdgeFillMargins(pimax, {16000, 16000}, 15.0f, 15.0f);
+    Check(16000 + capped.left + capped.right <= kFrameGenEdgeFillMaxExtent &&
+              16000 + capped.up + capped.down <= kFrameGenEdgeFillMaxExtent,
+          "edge fill margins: the image fits the largest texture");
+    const FrameGenEdgeMargins halved = FrameGenEdgeFillMargins({-1.4f, 1.4f, 1.4f, -1.4f}, {100, 100}, 15.0f, 15.0f);
+    Check(halved.left <= 50 && halved.up <= 50, "edge fill margins: no wider than half the frame");
+    Check(ParseFrameGenEdgeFillDegrees("4") == std::array<float, 2>{4.0f, 4.0f} &&
+              ParseFrameGenEdgeFillDegrees("4,2.5") == std::array<float, 2>{4.0f, 2.5f} &&
+              !ParseFrameGenEdgeFillDegrees("") && !ParseFrameGenEdgeFillDegrees("20") &&
+              !ParseFrameGenEdgeFillDegrees("-1,2") && !ParseFrameGenEdgeFillDegrees("on"),
+          "edge fill margins: the research switch's values");
+}
+
+// Edge fill on the frames written inline (Interpolate at 2x): generated
+// frames go out in output images wider than the game's by a margin each
+// side, the frame placed at the margins' corner (FrameGenImage::content),
+// submitted with the field of view widened to match and without the game's
+// depth; the game's own frames are as it submitted them. Without a backend
+// that fills margins, or turned off live, the outputs are the game's size.
+void TestEdgeFill() {
+    const FrameGenEdgeMargins asked =
+        FrameGenEdgeFillMargins({-0.8f, 0.8f, 0.8f, -0.8f}, {1600, 1600}, kFrameGenEdgeFillHorizontalDegrees,
+                                kFrameGenEdgeFillVerticalDegrees);
+    // 3 degrees past tan 1.03 at 1600 px across tangents 2.06: ~88 px; 1.5
+    // degrees vertically ~43 px.
+    Check(asked.left == asked.right && asked.up == asked.down && asked.left >= 80 && asked.left <= 96 &&
+              asked.up >= 38 && asked.up <= 48,
+          "edge fill: margins for the test view (" + std::to_string(asked.left) + ", " + std::to_string(asked.up) + ")");
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    settings.edge_fill = true;
+    {
+        // A backend that cannot fill margins: outputs at the frame's size.
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+        presenter.Configure(settings);
+        App app(presenter, runtime);
+        for (int i = 0; i < 6; ++i) app.Frame();
+        Check(g_creates == 2 && g_create_sizes[0] == std::make_pair(1600u, 1600u),
+              "edge fill: without the backend's support the outputs are the frame's size");
+        Check(!gpu.last.empty() && gpu.last[0].outputs[0].content.x == 0 && gpu.last[0].outputs[0].content.y == 0,
+              "edge fill: without the backend's support the frame fills its output");
+    }
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.edge_fill = true;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    presenter.Configure(settings);
+    App app(presenter, runtime);
+    for (int i = 0; i < 6; ++i) app.Frame();
+    const FrameGenEdgeMargins margins = TestAppMargins();
+    Check(g_creates == 2 && g_create_sizes[0].first == 1600 + margins.left + margins.right &&
+              g_create_sizes[0].second == 1600 + margins.up + margins.down,
+          "edge fill: each eye's output is the frame and its margins (" + std::to_string(g_create_sizes[0].first) + "x" +
+              std::to_string(g_create_sizes[0].second) + ")");
+    Check(!gpu.last.empty() && gpu.last[0].outputs[0].content.x == static_cast<std::int32_t>(margins.left) &&
+              gpu.last[0].outputs[0].content.y == static_cast<std::int32_t>(margins.up) &&
+              gpu.last[0].outputs[0].rect.extent.width == static_cast<std::int32_t>(g_create_sizes[0].first) &&
+              gpu.last[1].outputs[0].content.x == static_cast<std::int32_t>(margins.left),
+          "edge fill: the backend is told where the frame lies in its output");
+    std::size_t generated = 0, real = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = 0; i < runtime.submitted_views.size(); ++i) {
+            const auto& views = runtime.submitted_views[i];
+            if (views.empty()) continue;
+            if (IsAppImage(runtime.submitted_swapchains[i])) {
+                ++real;
+                Check(views[0].fov.angleLeft == -0.8f && views[0].subImage.imageRect.extent.width == 1600,
+                      "edge fill: the game's own frames keep its field of view");
+            } else {
+                ++generated;
+                Check(ShowsFilled(views, margins) && !runtime.submitted_depth[i],
+                      "edge fill: a generated frame is shown widened across its margins, without depth");
+            }
+        }
+    }
+    Check(generated >= 2 && real >= 2, "edge fill: generated and real frames were shown");
+    // A frame the backend copied in (its margin not drawn: the copy fallback)
+    // is shown from its own region with the game's field of view: what the
+    // margin holds never reaches the runtime.
+    gpu.edges_filled = false;
+    std::size_t before = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        before = runtime.submitted_views.size();
+    }
+    for (int i = 0; i < 4; ++i) app.Frame();
+    std::size_t unfilled = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = before; i < runtime.submitted_views.size(); ++i) {
+            const auto& views = runtime.submitted_views[i];
+            if (views.empty() || IsAppImage(runtime.submitted_swapchains[i])) continue;
+            ++unfilled;
+            for (const XrCompositionLayerProjectionView& view : views) {
+                const XrRect2Di& rect = view.subImage.imageRect;
+                Check(rect.offset.x == static_cast<std::int32_t>(margins.left) &&
+                          rect.offset.y == static_cast<std::int32_t>(margins.up) && rect.extent.width == 1600 &&
+                          rect.extent.height == 1600 && view.fov.angleLeft == -0.8f && view.fov.angleRight == 0.8f &&
+                          view.fov.angleUp == 0.8f && view.fov.angleDown == -0.8f,
+                      "edge fill: a frame copied in is shown from its own region with the game's field of view");
+            }
+        }
+    }
+    Check(unfilled >= 2, "edge fill: frames copied in were shown");
+    gpu.edges_filled = true;
+    // Off while running: the next frames' outputs are the frame's size again.
+    settings.edge_fill = false;
+    presenter.Configure(settings);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    Check(g_creates == 4 && g_create_sizes[2] == std::make_pair(1600u, 1600u),
+          "edge fill: turned off, the outputs are made anew at the frame's size (" + std::to_string(g_creates) + ")");
+    Check(gpu.last[0].outputs[0].content.x == 0 && gpu.last[0].outputs[0].rect.extent.width == 1600,
+          "edge fill: turned off, the frame fills its output");
+    Check(!runtime.ordering_violation && !g_release_violation, "edge fill: calls stayed ordered");
 }
 
 void TestSubmissionSpacing() {
@@ -2217,6 +2443,42 @@ struct HorizonLog {
                 line.find("threaded=1") != std::string::npos) {
                 lines.push_back(line);
             }
+        }
+        return lines;
+    }
+};
+
+// A session log of its own in the temporary folder (not beside this
+// executable: on a worktree whose build is the installed layer that is the
+// active layer folder), read back once the presenter has stopped.
+struct SessionLog {
+    std::filesystem::path directory;
+    std::unique_ptr<Logger> logger{std::make_unique<Logger>()};
+    std::filesystem::path path; // the log, once Lines closed it
+
+    explicit SessionLog(const std::string& name)
+        : directory(std::filesystem::temp_directory_path() /
+                    ("vectorxr-presenter-test-log-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+        logger->Initialize(directory / "session.log");
+    }
+    ~SessionLog() {
+        logger.reset();
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
+    }
+    // The lines holding `text` (closes the log: call once the presenter has
+    // stopped). Later calls read the closed log again.
+    std::vector<std::string> Lines(const std::string& text) {
+        if (logger) {
+            path = logger->ActiveLogPath();
+            logger.reset(); // flushed
+        }
+        std::ifstream file(path);
+        std::vector<std::string> lines;
+        for (std::string line; std::getline(file, line);) {
+            if (line.find(text) != std::string::npos) lines.push_back(line);
         }
         return lines;
     }
@@ -2817,6 +3079,48 @@ void TestThreadedMsfsTiming() {
     CheckOrderedTimes(runtime.Snapshot(), "msfs timing");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "msfs timing: calls stayed ordered");
+}
+
+// OpenXR Toolkit's prediction dampening above VectorXR: the game is handed
+// now + d * (time - now) and ends its frames for that, which OpenXR Toolkit
+// never restores (its layer.cpp xrWaitFrame/xrEndFrame), so frames end for an
+// earlier time than VectorXR gave (here a period of the game's earlier). That is not a game convention to compensate (as MSFS's
+// period later is): engaged frames keep being told their slot's time. The
+// game is told the same times as one ending at the time it was given, while
+// MSFS's frames (a period later) are still told a period earlier.
+void TestDampenedEndsAreNotCompensated() {
+    const auto told_lead = [](int end_offset_periods) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+        App app(presenter, runtime);
+        app.end_offset_periods = end_offset_periods;
+        RunPipelined(app, 600ms, 8ms, 10ms);
+        Check(presenter.Status().threaded, "dampened ends: presents from its own thread");
+        std::vector<XrDuration> leads;
+        RunPipelined(app, 1200ms, 8ms, 10ms, [&](int, const XrFrameState& state) {
+            std::scoped_lock lock(g_xr_mutex);
+            if (!runtime.submitted_times.empty()) leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
+        });
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, "dampened ends: calls stayed ordered");
+        std::sort(leads.begin(), leads.end());
+        Check(!leads.empty(), "dampened ends: frames ended");
+        return leads[leads.size() / 2];
+    };
+    const XrDuration as_given = told_lead(0);
+    const XrDuration dampened = told_lead(-1);
+    const XrDuration msfs = told_lead(1);
+    const auto periods = [](XrDuration duration) { return std::to_string(static_cast<double>(duration) / kPeriod); };
+    Check(std::abs(dampened - as_given) < kPeriod / 2,
+          "dampened ends: frames ending earlier than given are told the same times (" + periods(dampened) + " against " +
+              periods(as_given) + " periods ahead)");
+    // At 2x the game's period is two refreshes.
+    Check(std::abs(as_given - msfs - 2 * kPeriod) < kPeriod / 2,
+          "dampened ends: frames ending a period later are still told a period earlier (" + periods(msfs) +
+              " against " + periods(as_given) + " periods ahead)");
 }
 
 void TestThreadedPauseRetryMsfsTiming() {
@@ -3596,6 +3900,107 @@ void TestJitExtrapolation() {
     CheckOrderedTimes(log, "jit extrapolation");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "jit extrapolation: calls stayed ordered");
+}
+
+// Edge fill just in time (Extrapolate at 3x): every frame the presenter
+// thread writes, real frames' exact copies too, goes to an output widened
+// by the margins, the frame at their corner, and is shown with the field of
+// view widened to match, never with the game's depth.
+void TestJitEdgeFill() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.edge_fill = true;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k3, app, runtime, owned);
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::k3;
+    settings.edge_fill = true;
+    presenter.Configure(settings);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < 700ms) {
+        const XrFrameState state = app->Wait();
+        app->Begin();
+        std::this_thread::sleep_for(4ms);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "jit edge fill: end");
+    }
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.state == FrameGenState::kActive, "jit edge fill: presents from its own thread");
+    const FrameGenEdgeMargins margins = TestAppMargins();
+    std::size_t outputs = 0, misplaced = 0;
+    {
+        std::scoped_lock lock(gpu.syntheses_mutex);
+        for (const auto& images : gpu.synthesis_outputs) {
+            for (const FrameGenImage& image : images) {
+                ++outputs;
+                misplaced += image.content.x != static_cast<std::int32_t>(margins.left) ||
+                                     image.content.y != static_cast<std::int32_t>(margins.up) ||
+                                     image.rect.extent.width != static_cast<std::int32_t>(1600 + margins.left + margins.right)
+                                 ? 1
+                                 : 0;
+            }
+        }
+    }
+    Check(outputs > 20 && misplaced == 0, "jit edge fill: every frame written is placed inside its margins (" +
+                                              std::to_string(misplaced) + " of " + std::to_string(outputs) + " not)");
+    std::size_t shown = 0, plain = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = first + 10; i < runtime.submitted_views.size(); ++i) {
+            if (runtime.submitted_views[i].empty()) continue;
+            ++shown;
+            plain += ShowsFilled(runtime.submitted_views[i], margins) && !runtime.submitted_depth[i] ? 0 : 1;
+        }
+    }
+    Check(shown > 20 && plain == 0, "jit edge fill: every refresh is shown widened across the margins (" +
+                                        std::to_string(plain) + " of " + std::to_string(shown) + " not)");
+    int creates = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        creates = g_creates;
+    }
+    Check(creates == 2, "jit edge fill: one output per eye, made once (" + std::to_string(creates) + ")");
+    // Frames the backend copied in: shown from their own region, unwidened.
+    gpu.edges_filled = false;
+    std::size_t copied_from = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        copied_from = runtime.submitted_views.size();
+    }
+    const auto copied_start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - copied_start < 300ms) {
+        const XrFrameState state = app->Wait();
+        app->Begin();
+        std::this_thread::sleep_for(4ms);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "jit edge fill: end");
+    }
+    std::size_t copied_shown = 0, widened = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        // A few refreshes in: frames written before the switch may still show.
+        for (std::size_t i = copied_from + 6; i < runtime.submitted_views.size(); ++i) {
+            const auto& views = runtime.submitted_views[i];
+            if (views.empty()) continue;
+            ++copied_shown;
+            const XrRect2Di& rect = views[0].subImage.imageRect;
+            widened += rect.offset.x == static_cast<std::int32_t>(margins.left) && rect.extent.width == 1600 &&
+                               views[0].fov.angleLeft == -0.8f
+                           ? 0
+                           : 1;
+        }
+    }
+    Check(copied_shown > 5 && widened == 0, "jit edge fill: frames copied in are shown from their own region (" +
+                                                std::to_string(widened) + " of " + std::to_string(copied_shown) + " not)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "jit edge fill: calls stayed ordered");
 }
 
 // Interpolate at 3x just in time: the presenter thread shows every refresh,
@@ -6648,6 +7053,7 @@ void TestBenefitGuardBacksOff() {
         StartJit(presenter, gpu, test.mode, FrameGenMultiplier::kDynamic, app, runtime, owned);
         FrameGenDynamicPolicy policy = GuardDynamic();
         test.isolate(policy);
+        policy.game_rate_share = 0.0; // (e): each fault slows the game too (TestBenefitGuardGameSlowedByEngaging)
         presenter.SetDynamicPolicy(policy);
         EngageDynamic(presenter, *app, name);
         RunTicks(*app, 300ms, {1, 2, 2});
@@ -6672,6 +7078,130 @@ void TestBenefitGuardBacksOff() {
     }
 }
 
+// (e) The game itself slowed by engaging: a game passing through at 45 fps
+// that runs at 17 engaged still shows 90 distinct frames a second, the
+// generated ones filling every refresh, so (a)-(d) never fail; the guard
+// passes frames straight through to compare, finds the game faster there,
+// stands down (held as any stand-down), and the game runs at its own rate
+// again. One that keeps most of its rate engaged (45 to 40, Frame
+// Generation's own GPU cost) stays engaged; one whose scene slows it as
+// much passing through is engaged again at once, without a stand-down. DCS
+// on a 4080 SUPER through the Direct3D 11 bridge, 2026-10-22: 44-71 fps
+// passing through, 17 engaged with the GPU half idle, engaged 90 s until
+// Frame Generation was turned off.
+void TestBenefitGuardGameSlowedByEngaging() {
+    struct Case {
+        const char* name;
+        std::chrono::microseconds engaged_work;
+        bool stands_down;
+        bool scene{false}; // the engaged work holds passing through too, once engaged
+    };
+    const auto through_work = std::chrono::microseconds(19'000); // two refreshes: 45 fps passing through
+    const std::vector<Case> cases{
+        {"slowed by engaging", std::chrono::microseconds(58'000), true},
+        {"own cost engaged", std::chrono::microseconds(25'000), false},
+        {"heavier scene", std::chrono::microseconds(58'000), false, true},
+    };
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+        for (const Case& test : cases) {
+            const std::string name = std::string(test.name) +
+                                     (mode == FrameGenSynthesisMode::kInterpolate ? " (interpolate)" : " (extrapolate)");
+            FrameGenPresenter presenter;
+            GpuLog gpu;
+            Runtime runtime;
+            runtime.paced = true;
+            std::unique_ptr<App> owned;
+            App* app = nullptr;
+            StartJit(presenter, gpu, mode, FrameGenMultiplier::kDynamic, app, runtime, owned);
+            FrameGenDynamicPolicy policy = GuardDynamic();
+            policy.hold = 3000ms; // long enough to see the game's rate standing by
+            presenter.SetDynamicPolicy(policy);
+            // The game's frame takes its engaged time while Frame Generation
+            // presents from its thread, as the DCS frames did on its GPU.
+            bool heavier = false;
+            auto frames = [&](std::chrono::milliseconds duration, const std::function<bool()>& until = {}) {
+                const auto start = std::chrono::steady_clock::now();
+                int count = 0;
+                while (std::chrono::steady_clock::now() - start < duration) {
+                    const XrFrameState state = app->Wait();
+                    app->Begin();
+                    heavier = heavier || (test.scene && Engaged(presenter));
+                    SleepPrecise(std::chrono::steady_clock::now() +
+                                 (heavier || Engaged(presenter) ? test.engaged_work : through_work));
+                    app->Release();
+                    Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+                    ++count;
+                    if (until && until()) break;
+                }
+                return count / Seconds(std::chrono::steady_clock::now() - start);
+            };
+            frames(3000ms, [&] { return Engaged(presenter); });
+            Check(Engaged(presenter), name + ": dynamic engages for a game at half the refresh rate");
+            frames(4000ms, [&] {
+                const FrameGenStatus now = presenter.Status();
+                return now.dynamic_stand_downs > 0 || now.dynamic_engagements > 1;
+            });
+            frames(300ms); // engaging again takes a few frames
+            FrameGenStatus status = presenter.Status();
+            if (test.scene) {
+                Check(Engaged(presenter) && status.dynamic_stand_downs == 0 && status.dynamic_engagements == 2,
+                      name + ": engaged again at once, no stand-down (" + status.dynamic_reason + ")");
+            } else if (!test.stands_down) {
+                Check(Engaged(presenter) && status.dynamic_stand_downs == 0 && status.dynamic_engagements == 1,
+                      name + ": stays engaged (" + status.dynamic_reason + ")");
+            } else {
+                Check(status.standby && status.dynamic_stand_downs == 1 &&
+                          status.dynamic_reason.find("engaged against") != std::string::npos,
+                      name + ": stands down on the game's own rate (" + status.dynamic_reason + ")");
+                frames(300ms);
+                const double after = frames(700ms);
+                Check(presenter.Status().standby && after > 35.0,
+                      name + ": the game runs at its own rate again (" + std::to_string(after) + " fps)");
+            }
+            presenter.Stop();
+            Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        }
+    }
+}
+
+// A guard window left out (a pause, a loading frame) is not evidence for
+// GPU-aware pacing either: a GPU stall's frames, captured seconds after
+// their refresh before the game paused, are a hitch, not a game running
+// frames ahead on its GPU (DCS 2026-10-22: a 2.5 s pause with frames
+// "captured 2444.7 ms after their refresh" armed it for the session).
+void TestGpuPacingIgnoresPausedWindows() {
+    SessionLog log("paused-windows");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned,
+             log.logger.get());
+    FrameGenDynamicPolicy policy = GuardDynamic();
+    policy.distinct_margin_fps = -1000.0; // always winning: the pauses stand nothing down
+    presenter.SetDynamicPolicy(policy);
+    presenter.SetSummaryInterval(1000ms); // the summaries' windows are evidence too
+    EngageDynamic(presenter, *app, "paused windows");
+    RunTicks(*app, 900ms, {1, 2, 2});
+    Check(Engaged(presenter) && !presenter.Status().gpu_gating, "paused windows: engaged, not holding waits");
+    for (int i = 0; i < 3; ++i) {
+        gpu.capture_lag = 2400ms; // the GPU stalls...
+        RunTicks(*app, 300ms, {1, 2, 2});
+        gpu.capture_lag = 0us;
+        std::this_thread::sleep_for(2500ms); // ...and the game sends nothing
+        RunTicks(*app, 700ms, {1, 2, 2});
+    }
+    const FrameGenStatus status = presenter.Status();
+    presenter.Stop();
+    const std::vector<std::string> armed = log.Lines("holds the game's waits");
+    Check(!status.gpu_gating && status.gpu_waits == 0 && armed.empty(),
+          "paused windows: pauses never arm GPU-aware pacing (" + std::to_string(status.gpu_waits) + " waits" +
+              (armed.empty() ? std::string() : ": " + armed.front()) + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, "paused windows: calls stayed ordered");
+}
+
 // Real frames on the GPU too late for more than (c)'s share of refreshes do
 // not stand down an engagement showing more distinct frames than the game
 // alone (DCS, flight 2: a hitch's late frames in two 2.5 s windows stood
@@ -6688,6 +7218,9 @@ void TestWinningEngagementSurvivesLateCaptures() {
     policy.distinct_margin_fps = -1000.0; // always winning
     policy.generated_share = 0.0;
     policy.late_analyses_share = 2.0;
+    // (e) off: the fake's fixed capture latency holds the game's waits to it
+    // once GPU-aware pacing arms, which a real GPU's queue would not.
+    policy.game_rate_share = 0.0;
     presenter.SetDynamicPolicy(policy);
     EngageDynamic(presenter, *app, "winning late captures");
     RunTicks(*app, 300ms, {1, 2, 2});
@@ -9339,6 +9872,58 @@ void TestQuadAsIsShowsNewestImage() {
     Check(!runtime.ordering_violation && !g_release_violation, "as is newest: calls stayed ordered");
 }
 
+// A runtime that shows a blank refresh for a frame begun and never ended
+// (PimaxXR 0.4.4: its submission thread completes the PVR frame left out with
+// one disabled layer, then waits a refresh more; pimax-openxr frame.cpp
+// asyncSubmissionThread). Interpolating at 3x, frames the layer composes
+// alternate with claimed frames whose writes fail: a refresh with nothing
+// written finds the frame last shown as it is no longer current (the next
+// one the layer composed is in its images) with a frame to write between
+// them, and was left open (the runtime shows its last frame again, but this
+// one a blank refresh). Told about the runtime, the presenter shows the next
+// frame the layer composed there instead: no frame is left open, and no image
+// is shown with another frame's views. FG_TEST_BLANKS_OFF=1 leaves it
+// untold (the refreshes left open are counted, and the test fails).
+void TestQuadNoOpenFrameOnBlankingRuntime() {
+    const bool told = !std::getenv("FG_TEST_BLANKS_OFF");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k3);
+    presenter.SetRuntimeBlanksOpenFrames(told);
+    presenter.SetQuadDecline(3000ms, 3000ms);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(400ms);
+    Check(presenter.Status().quad, "blanking runtime: composing quad views first");
+    const std::size_t first = runtime.Submissions();
+    const int open_before = runtime.discarded;
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; std::chrono::steady_clock::now() - start < 1500ms; ++i) {
+        // The layer composes every second frame; the claimed frame after
+        // each fails to be written.
+        app.force = i % 4 == 0 || i % 4 == 2 ? std::optional<FrameGenQuadRoute>(FrameGenQuadRoute::kBusy) : std::nullopt;
+        gpu.compose_fail = i % 4 == 1;
+        app.Frame(4000us);
+    }
+    gpu.compose_fail = false;
+    app.force.reset();
+    app.Run(100ms);
+    const FrameGenStatus status = presenter.Status();
+    const int left_open = runtime.discarded - open_before;
+    std::cerr << "  blanking runtime (" << (told ? "told" : "untold") << "): " << left_open << " refreshes left open, "
+              << status.stale_skipped << " stale, " << status.stale_shown_ahead << " shown with a later frame, "
+              << StepsBack(runtime, first) << " steps back, " << runtime.mismatched_images << " mismatched, "
+              << gpu.compose_failures << " failed writes" << std::endl;
+    Check(gpu.compose_failures >= 5, "blanking runtime: writes failed (" + std::to_string(gpu.compose_failures.load()) + ")");
+    Check(left_open == 0, "blanking runtime: no refresh is left open (" + std::to_string(left_open) + ")");
+    Check(runtime.mismatched_images == 0 && runtime.not_stereo == 0 && !runtime.used_destroyed,
+          "blanking runtime: images matching their views, two views each, nothing destroyed");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "blanking runtime: calls stayed ordered");
+}
+
 // A refresh nothing can be written for shows again what was submitted last:
 // after a claimed frame written, then a frame the layer composed shown as it
 // is, a claimed frame whose write fails shows the composed frame again (its
@@ -9755,41 +10340,6 @@ constexpr const char* kHalvingDetail = "Runtime holds frames to half rate: check
 constexpr const char* kHalvingReason = "the runtime holds frames to half rate: check its smoothing";
 constexpr const char* kHalvingStandDown = "the runtime holds frames to half rate";
 
-// A session log of its own in the temporary folder (not beside this
-// executable: on a worktree whose build is the installed layer that is the
-// active layer folder), read back once the presenter has stopped.
-struct SessionLog {
-    std::filesystem::path directory;
-    std::unique_ptr<Logger> logger{std::make_unique<Logger>()};
-    std::filesystem::path path; // the log, once Lines closed it
-
-    explicit SessionLog(const std::string& name)
-        : directory(std::filesystem::temp_directory_path() /
-                    ("vectorxr-presenter-test-log-" + std::to_string(GetCurrentProcessId()) + "-" + name)) {
-        std::error_code ignored;
-        std::filesystem::remove_all(directory, ignored);
-        logger->Initialize(directory / "session.log");
-    }
-    ~SessionLog() {
-        logger.reset();
-        std::error_code ignored;
-        std::filesystem::remove_all(directory, ignored);
-    }
-    // The lines holding `text` (closes the log: call once the presenter has
-    // stopped). Later calls read the closed log again.
-    std::vector<std::string> Lines(const std::string& text) {
-        if (logger) {
-            path = logger->ActiveLogPath();
-            logger.reset(); // flushed
-        }
-        std::ifstream file(path);
-        std::vector<std::string> lines;
-        for (std::string line; std::getline(file, line);) {
-            if (line.find(text) != std::string::npos) lines.push_back(line);
-        }
-        return lines;
-    }
-};
 
 // Research switches from %LOCALAPPDATA%\VectorXR\framegen-research.txt (a
 // folder of this test's own, which the policy tests' process never sees):
@@ -11115,6 +11665,7 @@ void TestRuntimeHalvingStandsDown() {
         bool after_full_rate{false};
         FrameGenMultiplier multiplier{FrameGenMultiplier::kDynamic};
         const char* evidence;
+        bool one_late{false}; // Runtime::period_one_late (PimaxXR's Smart Smoothing)
     };
     const std::vector<Case> cases{
         {"halving waits", Runtime::Throttle::kWaits, 2, true, false, false, FrameGenMultiplier::kDynamic,
@@ -11131,6 +11682,11 @@ void TestRuntimeHalvingStandsDown() {
         {"a third, the period", Runtime::Throttle::kPeriod, 3, false, false, true, FrameGenMultiplier::kDynamic,
          "to every third refresh at 90 Hz for 1 s (its frame waits blocked; it reported a frame period of 33.3 ms, "
          "three times its refresh period)."},
+        {"halving the period a wait late", Runtime::Throttle::kPeriod, 2, false, false, true,
+         FrameGenMultiplier::kDynamic,
+         "to every other refresh at 90 Hz for 1 s (its frame waits blocked; it reported a frame period of 22.2 ms, "
+         "twice its refresh period).",
+         true},
     };
     const double refresh = 1e9 / static_cast<double>(kPeriod);
     for (const Case& test : cases) {
@@ -11141,6 +11697,7 @@ void TestRuntimeHalvingStandsDown() {
         runtime.throttle = test.throttle;
         runtime.throttle_refreshes = test.refreshes;
         runtime.throttled = test.from_start;
+        runtime.period_one_late = test.one_late;
         // Late at full rate (a frame of 1.35 refreshes), and every frame late
         // for a runtime wanting them two refreshes before they are shown.
         std::vector<std::chrono::microseconds> work = kLightWork;
@@ -11201,6 +11758,16 @@ void TestRuntimeHalvingStandsDown() {
         status = presenter.Status();
         Check(!cleared && (dynamic ? status.standby && status.dynamic_engagements == 1 : status.threaded),
               name + ": the report stays while the runtime halves the frame rate, and nothing engages again");
+        if (test.one_late) {
+            // The period reported a wait late, the switch's first held wait
+            // read as a refresh's: no two submissions went to one refresh.
+            std::scoped_lock lock(g_xr_mutex);
+            std::size_t paired = 0;
+            for (std::size_t i = 1; i < runtime.submitted_times.size(); ++i) {
+                paired += runtime.submitted_times[i] - runtime.submitted_times[i - 1] < kPeriod / 2 ? 1 : 0;
+            }
+            Check(paired == 0, name + ": no two submissions for one refresh (" + std::to_string(paired) + ")");
+        }
         presenter.Stop();
         Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
         const std::vector<std::string> lines = log.Lines(kHalvingLogged);
@@ -12511,6 +13078,114 @@ void TestStalledClockWhilePresenting() {
           name + ": the log says the display times stopped advancing");
 }
 
+// OpenXR Toolkit's Turbo above VectorXR (its layer.cpp xrWaitFrame,
+// xrBeginFrame, xrEndFrame): after each xrEndFrame it calls the next layer's
+// xrWaitFrame on a pool thread (std::async), the game's own xrWaitFrame
+// returns a time it makes up without waiting, its xrBeginFrame does nothing,
+// and the next xrEndFrame first waits for that pool wait (1 s at most), then
+// calls xrBeginFrame and xrEndFrame back to back. Frame Generation, fixed 2x
+// and Dynamic, sees each wait from another thread than the one ending, its
+// begin right before its end: it engages and stays engaged, demotes,
+// abandons and pauses nothing, holds no pool wait past OpenXR Toolkit's 1 s,
+// keeps the runtime's calls ordered, and fills the refreshes.
+void TestToolkitTurboAbove() {
+    for (const FrameGenMultiplier multiplier : {FrameGenMultiplier::k2, FrameGenMultiplier::kDynamic}) {
+        const std::string name =
+            std::string("toolkit turbo above, ") + (multiplier == FrameGenMultiplier::k2 ? "2x" : "dynamic");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, multiplier, app, runtime, owned);
+        app->eye_speed = 0.5;
+        std::future<XrFrameState> pending = std::async(std::launch::async, [&] { return app->Wait(); });
+        int late_waits = 0;
+        const auto run = [&](std::chrono::milliseconds duration) {
+            const auto start = std::chrono::steady_clock::now();
+            while (std::chrono::steady_clock::now() - start < duration) {
+                // The game renders its frame (for OpenXR Toolkit's made-up time).
+                SleepPrecise(std::chrono::steady_clock::now() + 18ms);
+                app->Release();
+                if (pending.wait_for(1s) != std::future_status::ready) {
+                    ++late_waits; // OpenXR Toolkit would go on without it
+                    pending.wait();
+                }
+                const XrFrameState state = pending.get();
+                app->Begin();
+                Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
+                pending = std::async(std::launch::async, [&] { return app->Wait(); });
+            }
+        };
+        run(1500ms);
+        const FrameGenStatus engaged = presenter.Status();
+        Check(engaged.threaded && !engaged.standby, name + ": engages");
+        const std::size_t first = runtime.Submissions();
+        const auto start = std::chrono::steady_clock::now();
+        run(2000ms);
+        const double seconds = Seconds(std::chrono::steady_clock::now() - start);
+        const double output = static_cast<double>(runtime.Submissions() - first) / seconds;
+        const FrameGenStatus status = presenter.Status();
+        pending.get();
+        app->Begin();
+        app->End(0, false);
+        presenter.Stop();
+        Check(status.threaded && !status.standby && status.demoted == 0 && status.abandoned == 0 && status.pauses == 0,
+              name + ": stays engaged, nothing demoted, abandoned or paused (demoted " + std::to_string(status.demoted) +
+                  ", abandoned " + std::to_string(status.abandoned) + ", pauses " + std::to_string(status.pauses) + ")");
+        Check(late_waits == 0, name + ": no pool wait held past OpenXR Toolkit's second (" + std::to_string(late_waits) + ")");
+        const double refresh = 1e9 / static_cast<double>(kPeriod);
+        Check(output > 0.9 * refresh, name + ": every refresh gets a frame (" + std::to_string(output) + " fps)");
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// PimaxXR clamps a prediction of PVR's that did not advance to 1 ns after the
+// last (pimax-openxr frame.cpp xrWaitFrame), as after a wait that returned
+// without pacing. Now and then two waits in a row come back so, each still a
+// refresh apart: Frame Generation stays engaged (two waits are no stalled
+// clock), never gives two of the game's frames the same refresh (their times
+// told at least half a refresh apart), and the runtime's submissions keep
+// their order.
+void TestClampedDisplayTimes() {
+    const std::string name = "clamped display times";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    app->eye_speed = 0.5;
+    RunPipelined(*app, 1000ms, 16ms, 26ms, {}, nullptr, 8ms);
+    Check(presenter.Status().threaded && !presenter.Status().standby, name + ": engages");
+    const std::size_t first = runtime.Submissions();
+    std::vector<XrTime> told;
+    bool left = false;
+    RunPipelined(
+        *app, 2500ms, 16ms, 26ms,
+        [&](int frame, const XrFrameState& state) {
+            if (frame % 20 == 10) runtime.clamp_next = 2;
+            told.push_back(state.predictedDisplayTime);
+            left = left || !presenter.Status().threaded;
+        },
+        nullptr, 8ms);
+    const FrameGenStatus status = presenter.Status();
+    Check(runtime.clamped_waits >= 10, name + ": the runtime clamped waits (" +
+                                           std::to_string(runtime.clamped_waits.load()) + ")");
+    Check(!left && status.threaded && !status.standby && !status.runtime_clock_displaced,
+          name + ": stays engaged, the clock not displaced");
+    std::size_t close = 0;
+    for (std::size_t i = 1; i < told.size(); ++i) close += told[i] - told[i - 1] < kPeriod / 2 ? 1 : 0;
+    Check(close == 0, name + ": the game's frames are told times at least half a refresh apart (" +
+                          std::to_string(close) + " of " + std::to_string(told.size()) + " closer)");
+    const auto log = runtime.Snapshot();
+    CheckOrderedTimes(std::vector<Submission>(log.begin() + static_cast<std::ptrdiff_t>(first), log.end()), name);
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // Auto, its multiplier chosen for a slow game, while the runtime's clock is
 // displaced: frames pass straight through, and the multiplier is held (each
 // frame, judged against one refresh, would otherwise step it up to 4x for
@@ -13167,29 +13842,59 @@ void TestSteamVrMissedRefresh() {
         RunPipelined(*app, 900ms, 16ms, 26ms, {}, nullptr, 8ms);
         Check(presenter.Status().threaded && !presenter.Status().standby, name + ": engages");
         // About every 0.4 s, one of the runtime's waits misses a refresh.
+        const FrameGenStatus engaged = presenter.Status();
         runtime.miss_every = 37;
         std::vector<XrDuration> leads;
+        std::vector<std::uint32_t> told; // the presenter's lead as each frame ended
         RunPipelined(
             *app, 3000ms, 16ms, 26ms,
             [&](int, const XrFrameState& state) {
+                const std::uint32_t lead_slots = presenter.Status().lead_slots;
                 std::scoped_lock lock(g_xr_mutex);
-                if (!runtime.submitted_times.empty()) leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
+                if (!runtime.submitted_times.empty()) {
+                    leads.push_back(state.predictedDisplayTime - runtime.submitted_times.back());
+                    told.push_back(lead_slots);
+                }
             },
             nullptr, 8ms);
         const FrameGenStatus status = presenter.Status();
         Check(status.threaded && !status.standby && !status.runtime_halving,
               name + ": stays engaged, the misses too rare to be halving (" + status.dynamic_reason + ")");
-        std::vector<XrDuration> sorted = leads;
+        // Each frame's lead less the presenter's own lead's change: the lead
+        // moving (a probe, or frames late in a hitch of the test's own
+        // threads, which raises it a few refreshes for a while) is the
+        // presenter's choice, not the period's timing this checks. Counted
+        // as they were, 4-7 of about 120 frames went over in 2 of ~70 runs
+        // here, each while the lead had risen (TestSteamVrMissedRefresh, Nov 2).
+        std::vector<std::uint32_t> told_sorted = told;
+        std::sort(told_sorted.begin(), told_sorted.end());
+        const std::int64_t told_median = told_sorted.empty() ? 0 : told_sorted[told_sorted.size() / 2];
+        std::vector<XrDuration> own(leads.size());
+        for (std::size_t i = 0; i < leads.size(); ++i) {
+            own[i] = leads[i] - (static_cast<std::int64_t>(told[i]) - told_median) * kPeriod;
+        }
+        std::vector<XrDuration> sorted = own;
         std::sort(sorted.begin(), sorted.end());
         const XrDuration median = sorted.empty() ? 0 : sorted[sorted.size() / 2];
-        const auto ahead = std::count_if(leads.begin(), leads.end(),
+        const auto ahead = std::count_if(own.begin(), own.end(),
                                          [&](XrDuration lead) { return lead > median + 2 * kPeriod; });
         // Timed by the reported period, 8-20% of the frames ran more than 2
         // refreshes past the median (up to 9); on the refresh grid none do.
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": lead " << engaged.lead_slots << " -> " << status.lead_slots << ", ups "
+                      << status.lead_ups - engaged.lead_ups << ", downs " << status.lead_downs - engaged.lead_downs
+                      << ", " << ahead << " frames over 2 refreshes past the median" << std::endl;
+        }
+        std::string sequence;
+        for (std::size_t i = 0; i < leads.size(); ++i) {
+            sequence += " " + std::to_string((leads[i] + kPeriod / 2) / kPeriod) + "/" + std::to_string(told[i]);
+        }
         Check(!leads.empty() && ahead <= 2,
               name + ": the game's frames stay about as far ahead of the refreshes (" + std::to_string(ahead) + " of " +
                   std::to_string(leads.size()) + " over 2 refreshes past the median of " +
-                  std::to_string(static_cast<double>(median) / kPeriod) + ")");
+                  std::to_string(static_cast<double>(median) / kPeriod) + "; lead " +
+                  std::to_string(status.lead_slots) + ", ups " + std::to_string(status.lead_ups) + ", downs " +
+                  std::to_string(status.lead_downs) + "; leads in refreshes:" + sequence + ")");
         Check(status.distinct_fps > 0.8 * status.output_fps,
               name + ": refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
                   std::to_string(status.output_fps) + " fps)");
@@ -15253,17 +15958,31 @@ void TestInterpolateFlowAcceptanceDelay() {
           "flow delay: switches and recovery are logged with reasons");
 }
 
+// --group <name> runs one group of the tests below (GROUP marks where each
+// begins), so CTest can run the groups side by side; without it, all of them.
+const char* g_group = nullptr;
+bool g_group_active = true;
+int g_tests_run = 0;
+#define GROUP(name) (g_group_active = !g_group || std::string(g_group) == (name))
+
 #define RUN(test)                                                                                \
     do {                                                                                         \
         const char* only = std::getenv("FG_TEST_ONLY");                                          \
+        if (!g_group_active) break;                                                              \
         if (only && std::string(#test).find(only) == std::string::npos) break;                   \
         std::cerr << #test << (g_jit ? " (just in time)" : "") << std::endl;                     \
+        ++g_tests_run;                                                                           \
+        const auto run_started = std::chrono::steady_clock::now();                               \
         test();                                                                                  \
+        std::cerr << "  " #test " took "                                                         \
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - run_started).count() \
+                  << " s" << std::endl;                                                          \
     } while (0)
 
 // Dynamic stand-by and its benefit guard, GPU-aware pacing, pauses and
 // telemetry.
 void RunPolicyTests() {
+    GROUP("policy");
     for (const bool jit : {false, true}) {
         g_jit = jit;
         RUN(TestCaptureOnlyWhileArmed);
@@ -15278,12 +15997,15 @@ void RunPolicyTests() {
     RUN(TestDynamicOwnRate);
     RUN(TestDynamicHysteresis);
     RUN(TestBenefitGuardBacksOff);
+    RUN(TestBenefitGuardGameSlowedByEngaging);
+    RUN(TestGpuPacingIgnoresPausedWindows);
     RUN(TestDynamicProbe);
     RUN(TestExtrapolateDuplicateTargetGuard);
     RUN(TestNoExtrapolationAcrossPauses);
     RUN(TestLeadResetOnRestart);
     RUN(TestLeadStepsDownAfterHitches);
     RUN(TestLeadDoesNotFlap);
+    GROUP("policy_late");
     RUN(TestLeadCeilingKeepsLeadTheRingHolds);
     RUN(TestLeadCeilingRespectsProvenLead);
     RUN(TestLeadCeilingResetsOnRestart);
@@ -15387,7 +16109,13 @@ int main(int argc, char** argv) {
         RunPolicyTests();
         return 0;
     }
-    const HANDLE policy = std::getenv("FG_TEST_SERIAL") ? nullptr : StartPolicyTests();
+    if (argc > 2 && std::string(argv[1]) == "--group") {
+        // One group, in this process: of the tests below or of the policy
+        // tests.
+        g_group = argv[2];
+    }
+    const HANDLE policy = g_group || std::getenv("FG_TEST_SERIAL") ? nullptr : StartPolicyTests();
+    GROUP("pacing");
     RUN(TestCompositionExtensions);
     RUN(TestCompositionUnsupportedChains);
     RUN(TestCompositionRefusalSurvivesRuntimeFailure);
@@ -15399,6 +16127,8 @@ int main(int argc, char** argv) {
     RUN(TestQuadExtrapolation);
     RUN(TestSubmissionSpacing);
     RUN(TestOutputsKeptAcrossMultipliers);
+    RUN(TestEdgeFillMargins);
+    RUN(TestEdgeFill);
     RUN(TestDepthCapture);
     RUN(TestEyePredictionSwitch);
     RUN(TestEngineMotionCensus);
@@ -15422,6 +16152,7 @@ int main(int argc, char** argv) {
     RUN(TestSlowDynamicHorizonJitterReported);
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
+    RUN(TestJitEdgeFill);
     RUN(TestJitEyeShiftReported);
     RUN(TestEyeProbe);
     RUN(TestJitDynamicExtrapolation);
@@ -15435,6 +16166,7 @@ int main(int argc, char** argv) {
     RUN(TestToggleOffLogsNoEngagement);
     // The threaded presenter's lifecycle with frames written together, then
     // just in time.
+    GROUP("lifecycle");
     for (const bool jit : {false, true}) {
         g_jit = jit;
         RUN(TestThreadedToggleAndReset);
@@ -15451,6 +16183,7 @@ int main(int argc, char** argv) {
     }
     g_jit = false;
     RUN(TestThreadedMsfsTiming);
+    RUN(TestDampenedEndsAreNotCompensated);
     RUN(TestThreadedUnsupportedLayerPresentsInline);
     RUN(TestOverlappingWaitIsHeld);
     RUN(TestUnclaimedFrameIsDemoted);
@@ -15508,6 +16241,7 @@ int main(int argc, char** argv) {
     RUN(TestEchoRuntimeClearsHalving);
     RUN(TestEchoHitchKeepsRefresh);
     // Quad views Frame Generation composes itself.
+    GROUP("quad");
     RUN(TestQuadClaimAndCompose);
     RUN(TestQuadSetupThroughComposedFrame);
     RUN(TestQuadFallbackShownAsIs);
@@ -15520,6 +16254,7 @@ int main(int argc, char** argv) {
     RUN(TestQuadClaimNeedsLatestCapture);
     RUN(TestQuadOutputsResized);
     RUN(TestQuadAsIsShowsNewestImage);
+    RUN(TestQuadNoOpenFrameOnBlankingRuntime);
     RUN(TestQuadFailedWriteRepeatsLastShown);
     RUN(TestQuadRetiredOutputsFreed);
     RUN(TestQuadHeadsetOffBreak);
@@ -15530,12 +16265,15 @@ int main(int argc, char** argv) {
     RUN(TestQuadComposeStallOnce);
     // Runtime clocks that misbehave (Varjo's, SteamVR's): last, so the tests
     // above keep the timing they had beside the policy tests.
+    GROUP("clocks");
     RUN(TestVarjoClockJumpDynamic);
     RUN(TestVarjoClockJumpWhilePresenting);
     RUN(TestVarjoTransientThrottle);
     RUN(TestSteamVrLagIsNotDisplaced);
     RUN(TestLowFirstClockSample);
     RUN(TestStalledClockWhilePresenting);
+    RUN(TestClampedDisplayTimes);
+    RUN(TestToolkitTurboAbove);
     RUN(TestAutoHoldsWhileClockDisplaced);
     RUN(TestAutoSettlesAfterClockRecovery);
     RUN(TestAutoLeavesLateCeiling);
@@ -15545,8 +16283,11 @@ int main(int argc, char** argv) {
     }
     RUN(TestAutoGpuBoundProbeReturnsPromptly);
     RUN(TestAutoProbeAllowsLatencyAndShortHitch);
+    GROUP("probe_burst");
     RUN(TestAutoProbeSurvivesTransitionBurst);
     g_jit = false;
+    // The lead against hitches and late frames.
+    GROUP("lead");
     RUN(TestClockLogPairs);
     RUN(TestSteamVrMissedRefresh);
     RUN(TestLeadAfterRepeatedHitches);
@@ -15564,6 +16305,7 @@ int main(int argc, char** argv) {
     }
     g_jit = false;
     // The lead's ceiling from the history ring.
+    GROUP("ceiling");
     RUN(TestRingLeadFloor);
     RUN(TestLeadCeilingFollowsRing);
     RUN(TestLeadCeilingDynamicFollowsSpacing);
@@ -15576,7 +16318,13 @@ int main(int argc, char** argv) {
     RUN(TestLeadCeilingProbeAndTrial);
     RUN(TestLeadCeilingRaisesOnBursts);
     RUN(TestLeadCeilingActsThroughHitches);
-    if (!policy) {
+    if (g_group) {
+        RunPolicyTests();
+        if (g_tests_run == 0 && !std::getenv("FG_TEST_ONLY")) {
+            std::cerr << "FAILED: no tests in group " << g_group << std::endl;
+            return 1;
+        }
+    } else if (!policy) {
         RunPolicyTests();
     } else {
         DWORD code = 1;

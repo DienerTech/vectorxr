@@ -144,6 +144,7 @@
     "priority": "Priority order — when profiles overlap on an application, the higher profile owns any binding they share.",
     "moveUp": "Move profile up (higher priority)",
     "moveDown": "Move profile down (lower priority)",
+    "duplicateTitle": "Copy this profile, with its settings and bindings, into a new profile below it.",
     "enabledTitle": "This profile applies custom {module} settings to its assigned applications.",
     "disabledTitle": "This profile is ignored at runtime.",
     "on": "Profile On",

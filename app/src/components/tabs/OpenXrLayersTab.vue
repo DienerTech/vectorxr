@@ -24,6 +24,7 @@ const props = defineProps<{
   machineWritesUnlocked: boolean
   turboInUse: boolean
   quadviewsInUse: boolean
+  frameGenInUse: boolean
 }>()
 
 const emit = defineEmits<{
@@ -83,6 +84,20 @@ const toolkitQuadSlices = computed(() => {
     const vector = slice.layers.find((layer) => layer.isVectorXr && layer.enabled)
     const toolkit = slice.layers.find((layer) => layer.enabled && layer.layerName.toLowerCase().includes('mbucchia_toolkit'))
     return vector && toolkit && toolkit.order < vector.order
+  }).map((slice) => sliceLabel(slice))
+})
+
+// OpenXR Toolkit below VectorXR can't take Frame Generation's extra frames, so
+// the layer keeps Frame Generation off in that order (unless the Toolkit is
+// bypassed for the game, which the app can't see).
+const toolkitFrameGenSlices = computed(() => {
+  if (!props.frameGenInUse) {
+    return []
+  }
+  return (props.snapshot?.slices ?? []).filter((slice) => {
+    const vector = slice.layers.find((layer) => layer.isVectorXr && layer.enabled)
+    const toolkit = slice.layers.find((layer) => layer.enabled && layer.layerName.toLowerCase().includes('mbucchia_toolkit'))
+    return vector && toolkit && toolkit.order > vector.order
   }).map((slice) => sliceLabel(slice))
 })
 
@@ -484,6 +499,15 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
       >
         <span class="font-medium">{{ t('layers.warnings.quadviewsOffLabel') }}</span>
         {{ t('layers.warnings.toolkitQuad', { slices: formatList(toolkitQuadSlices) }) }}
+      </div>
+
+      <div
+        v-if="toolkitFrameGenSlices.length > 0"
+        class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning"
+        style="border-color: var(--app-border)"
+      >
+        <span class="font-medium">{{ t('layers.warnings.frameGenOffLabel') }}</span>
+        {{ t('layers.warnings.toolkitFrameGen', { slices: formatList(toolkitFrameGenSlices) }) }}
       </div>
 
     </article>

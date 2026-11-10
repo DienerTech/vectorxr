@@ -144,6 +144,7 @@
     "priority": "Ordem de prioridade — quando perfis se sobrepõem em um aplicativo, o perfil mais acima fica com qualquer atribuição que eles compartilhem.",
     "moveUp": "Mover o perfil para cima (prioridade mais alta)",
     "moveDown": "Mover o perfil para baixo (prioridade mais baixa)",
+    "duplicateTitle": "Copia este perfil, com suas configurações e atribuições, para um novo perfil logo abaixo.",
     "enabledTitle": "Este perfil aplica configurações personalizadas de {module} aos aplicativos atribuídos.",
     "disabledTitle": "Este perfil é ignorado durante a execução.",
     "on": "Perfil ligado",

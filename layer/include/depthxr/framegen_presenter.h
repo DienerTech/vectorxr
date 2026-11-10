@@ -26,6 +26,8 @@
 
 namespace depthxr {
 
+class GameContextLock;
+
 class Logger;
 
 // Downstream calls the presenter makes for the frames it submits. `submit`
@@ -158,6 +160,12 @@ struct FrameGenStatus {
     std::uint64_t runtime_clock_displacements{0};
     bool threaded{false};        // presenting from the presenter thread
     FrameGenDepthState depth{FrameGenDepthState::kUnknown};
+    // The last depth check found the game's depth the same all over in both
+    // eyes (no varying cells): sent and readable, but empty or never written
+    // (Star Citizen's, October 2026). The Vulkan bridge then checks when the
+    // game writes it (VulkanBridge::WantDepthTimingCheck).
+    bool depth_uniform{false};
+
     // The game's motion vectors steer the generated frames. Engine motion
     // vectors are research only so far: nothing sets this yet; the OSD and
     // the app say so once it does.
@@ -225,6 +233,9 @@ struct FrameGenStatus {
     // its swapchains by then (the runtime shows a swapchain's newest), and no
     // newer frame shown as it is could take its place.
     std::uint64_t stale_skipped{0};
+    // Such refreshes shown with a later frame as it is instead, past frames
+    // written first (a runtime that blanks frames left open, PimaxXR 0.4.4).
+    std::uint64_t stale_shown_ahead{0};
 };
 
 // What the On-Screen Display and the desktop app say about a Frame Generation
@@ -290,6 +301,7 @@ struct FrameGenDynamicPolicy {
     double generated_share{0.2};     // (b) generated frames per second over the refreshes the game misses
     double unready_share{0.05};      // (c) refreshes whose real frame was not on the GPU yet, at most
     double late_analyses_share{0.5}; // (d) analyses ending after their frames were needed, at most
+    double game_rate_share{0.75};    // (e) the game's own rate engaged, at least this share of its rate before
 };
 
 // Interpolate's hardware-flow fallback. Tests shorten these times; the
@@ -431,6 +443,13 @@ class FrameGenPresenter {
     // session begun on quad views natively (Varjo) has four. Stereo until
     // the layer says otherwise.
     void SetRuntimeViewConfiguration(XrViewConfigurationType type);
+    // The runtime shows a blank refresh for a frame begun and never ended
+    // (PimaxXR 0.4.4 and earlier: its submission thread completes the PVR
+    // frame left out with one disabled layer, then waits a refresh more), so
+    // the presenter thread never leaves one open where anything consistent
+    // can be shown: the frame shown as it is nearest after the last, even
+    // past frames it writes, rather than nothing. Off unless the layer says.
+    void SetRuntimeBlanksOpenFrames(bool blanks);
     // Started with a working GPU backend; such a session keeps frame pacing
     // away from Turbo even while toggled off, so toggling never races Turbo.
     bool OwnsPacing() const;
@@ -440,6 +459,12 @@ class FrameGenPresenter {
     // Settings can turn a running session off (frames pass through) and back
     // on; only starting Frame Generation needs a new session.
     void SetConfigured(bool enabled);
+    // The game's Direct3D 11 device's lock, in the game's own Direct3D 11
+    // session (none otherwise): the backend's work on the game's immediate
+    // context waits for it before the presenter's locks (GameContextLock).
+    // Captures at a release are made under the layer's locks, which take it
+    // first themselves. Outlives the session it is set for.
+    void SetGameContextLock(GameContextLock* lock);
     // Steady renderable frames and session age required before engaging.
     void SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age);
     // How long the video memory budget must have room for another set of
@@ -687,7 +712,8 @@ class FrameGenPresenter {
 
     struct Output {
         XrSwapchain swapchain{XR_NULL_HANDLE};
-        FrameGenExtent extent;
+        FrameGenExtent extent; // the whole image: with edge fill, the frame and its margins
+        FrameGenEdgeMargins margins;
         std::int64_t format{0};
         FrameGenOutputKind requested{FrameGenOutputKind::kSrgb8}; // what the source asked for
         FrameGenOutputKind kind{FrameGenOutputKind::kSrgb8};      // what the swapchain format holds
@@ -864,9 +890,21 @@ class FrameGenPresenter {
 
     // An output image per output index: its extent and what it holds.
     struct OutputSpec {
-        FrameGenExtent extent;
+        FrameGenExtent extent; // the frame's (the image adds `margins`)
         FrameGenOutputKind kind{FrameGenOutputKind::kSrgb8};
+        FrameGenEdgeMargins margins; // edge fill (EdgeMarginsLocked)
     };
+    // Edge fill: the margins of the output image for a frame of `extent`
+    // seen with `fov` (none while the setting is off or the backend cannot
+    // fill them: FrameGenGpu::SupportsEdgeFill).
+    FrameGenEdgeMargins EdgeMarginsLocked(const XrFovf& fov, FrameGenExtent extent) const;
+    // An output image's region and where its frame starts in it.
+    static FrameGenImage OutputImage(const Output& output);
+    // A view shown from `output`: its image, and with edge fill its field of
+    // view widened across the margins; unless the backend did not draw them
+    // (`filled` false: FrameGenGpu::EdgesFilled), then the frame's own region
+    // with the game's field of view.
+    static void ShowOutput(XrCompositionLayerProjectionView& view, const Output& output, bool filled);
 
     bool WantsEngagementLocked() const;
     // Frames are generated or about to be: the game's releases are captured.
@@ -895,7 +933,10 @@ class FrameGenPresenter {
     // refresh period.
     void UpdateDynamicLocked(std::chrono::steady_clock::time_point now, XrDuration period);
     void DynamicEngageLocked(std::chrono::steady_clock::time_point now, double rate, double refresh);
-    void DynamicStandDownLocked(std::chrono::steady_clock::time_point now, const std::string& reason, bool probe);
+    // With check_engaged_fps (the game's rate engaged, (e)), it stands by
+    // without a hold while the game's rate standing by decides.
+    void DynamicStandDownLocked(std::chrono::steady_clock::time_point now, const std::string& reason, bool probe,
+                                std::optional<double> check_engaged_fps = std::nullopt);
     // Turned back on (toggled, configured, retried after a pause): Dynamic
     // stands by again and judges the game's rate afresh.
     void DynamicReenableLocked(std::chrono::steady_clock::time_point now);
@@ -1047,7 +1088,10 @@ class FrameGenPresenter {
         std::uint64_t id{0};
         XrTime time{0};
     };
-    AsIs CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time) const;
+    // `past_written`: frames Frame Generation writes do not end the search
+    // (a runtime that shows a blank refresh for a frame left open: a step
+    // back later beats it).
+    AsIs CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time, bool past_written = false) const;
     // How far each eye moves per unit of generated-frame time from the real
     // frame shown at `newest_time` (FrameGenViewRequest::shift), in that
     // eye's view space: as far as it moved since the previous real frame
@@ -1164,7 +1208,15 @@ class FrameGenPresenter {
     // Arms GPU-aware pacing once a window shows the game's frames reaching
     // the GPU late (real frames uncaptured when needed, or captures ending
     // after their refresh was due).
-    void NoteGpuEvidenceLocked(std::uint64_t real_frames, std::uint64_t late_gpu, std::vector<double> capture_done_ms);
+    struct GpuEvidence {
+        std::uint64_t real_frames{0};
+        std::uint64_t late_gpu{0};
+        std::vector<double> capture_done_ms;
+    };
+    // `window`'s evidence, if `clean` (no pause, loading, unrendered refresh
+    // or restart); with `pending`, it waits there for the next window and is
+    // taken only if that one is clean too.
+    void NoteGpuEvidenceLocked(std::optional<GpuEvidence>* pending, bool clean, GpuEvidence window);
     // Wakes the presenter thread and app threads waiting on slots.
     void WakeSlots();
     // Every runtime frame call goes through these, so the presenter knows the
@@ -1546,6 +1598,7 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point dynamic_engaged_at_{};
     bool dynamic_probing_{false};
     double passthrough_fps_{0.0}; // the game's own rate when Dynamic last engaged
+    std::optional<double> dynamic_rate_check_fps_; // (e): its rate engaged, while standing by checks it
     std::string dynamic_reason_;
     std::uint64_t dynamic_engagements_{0};
     std::uint64_t dynamic_stand_downs_{0};
@@ -1577,6 +1630,9 @@ class FrameGenPresenter {
         std::uint64_t copies_skipped{0};
         std::uint64_t ring_exhausted{0}; // refreshes whose real frame's images newer captures had replaced
         std::uint64_t stale_skipped{0};  // refreshes not submitted: nothing current to show
+        // Refreshes that would have been left open, shown with a later frame
+        // as it is instead (SetRuntimeBlanksOpenFrames).
+        std::uint64_t stale_shown_ahead{0};
         std::uint64_t unrendered{0};     // refreshes the runtime did not render (shouldRender false)
         std::uint64_t late_cpu{0};
         std::uint64_t late_gpu{0};
@@ -1621,6 +1677,10 @@ class FrameGenPresenter {
         // that found it so (NoteRuntimeClockLocked).
         std::uint64_t clock_displacements{0};
         std::uint64_t clock_unsteady_waits{0};
+        // Runtime waits made (RuntimeWait), and of those, ones that blocked
+        // (at least max(1 ms, a tenth of a refresh), as NotePhaseLocked counts).
+        std::uint64_t runtime_waits_timed{0};
+        std::uint64_t runtime_waits_blocked{0};
     };
     // ", quad=..." for summaries over the window since `start` (empty when
     // no frame of the quad compose site ended in it).
@@ -1639,7 +1699,7 @@ class FrameGenPresenter {
         Totals totals;
     };
     GuardWindow guard_;
-    std::array<std::uint32_t, 4> guard_failing_{}; // windows in a row each trigger (a)-(d) failed
+    std::array<std::uint32_t, 5> guard_failing_{}; // windows in a row each trigger (a)-(e) failed
     std::vector<double> guard_capture_done_ms_;
 
     // GPU-aware pacing (VECTORXR_FRAMEGEN_GPU_AHEAD: off, 0, 1, 2 or
@@ -1650,6 +1710,9 @@ class FrameGenPresenter {
     // no capture running meanwhile (a slow GPU is held for, a stuck one not).
     bool gpu_gate_enabled_{true};
     bool gpu_gate_armed_{false};
+    // The last summary window's evidence for GPU-aware pacing, pending the
+    // next window (NoteGpuEvidenceLocked).
+    std::optional<GpuEvidence> summary_evidence_;
     void ArmGpuGateLocked(const std::string& why);
     int gpu_frames_ahead_{1};
     std::uint32_t gpu_timeouts_in_row_{0};
@@ -1904,6 +1967,7 @@ class FrameGenPresenter {
     bool logged_order_guard_{false};
     double display_offset_periods_{0.0};
     std::uint32_t display_offset_samples_{0};
+    std::uint64_t display_offset_earlier_{0}; // frames ended for an earlier time than given (not compensated)
     // For the watchdog logs and PresenterActivity (read without locks).
     std::atomic<const char*> compositor_phase_{"stopped"};
     bool logged_watchdog_{false};
@@ -2077,6 +2141,8 @@ class FrameGenPresenter {
     // The runtime session's view configuration (SetRuntimeViewConfiguration):
     // the one the probe's locates ask for.
     XrViewConfigurationType runtime_view_configuration_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+    bool runtime_blanks_open_frames_{false}; // SetRuntimeBlanksOpenFrames
+    bool logged_open_frame_shown_{false};
     // Probed frames waiting for the real frame after their time: the first
     // eye where the runtime put it and where the frame was shown from, in
     // the space of the real frame it was written from. `ahead`: past that
@@ -2153,7 +2219,26 @@ class FrameGenPresenter {
     std::vector<double> gpu_wait_ms_;
     std::vector<double> end_call_ms_;
     std::vector<double> runtime_end_ms_;
+    // The runtime's xrWaitFrame time (RuntimeWait): beside runtime_end_ms_,
+    // it tells a runtime pacing in xrEndFrame (PimaxXR's "Prefer framerate
+    // over latency": no wait ever blocks) from a late caller.
+    std::vector<double> runtime_wait_ms_;
     std::vector<double> synth_lock_ms_;
+    // A runtime whose xrEndFrame holds each frame until its own slot
+    // (PimaxXR with defer_frame_wait, as its async submission waits there)
+    // holds its swapchain lock all that time, and the game's swapchain calls
+    // wait for it. Its frames are then submitted shortly before the slot
+    // (RuntimeEnd): `runtime_end_block_ms_` is how long its calls made at
+    // once took (smoothed), `runtime_end_return_` the last one's return, and
+    // `runtime_end_margin_ms_` how long before the slot a frame goes.
+    // `runtime_end_hold_ms_`: since the last summary, how long frames waited.
+    double runtime_end_block_ms_{0.0};
+    std::uint32_t runtime_end_block_samples_{0};
+    std::optional<std::chrono::steady_clock::time_point> runtime_end_return_;
+    double runtime_end_margin_ms_{0.0};
+    std::vector<double> runtime_end_hold_ms_;
+    bool runtime_end_hold_{true}; // VECTORXR_FRAMEGEN_END_HOLD (on unless "off")
+    bool logged_runtime_end_hold_{false};
     // Since the last summary, for the game's frames (ThreadedWaitLocked,
     // ThreadedEndJit):
     std::uint64_t told_lead_sum_{0};      // the leads told, summed
@@ -2354,6 +2439,11 @@ class FrameGenPresenter {
     // sub-pixel motion, with VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW=fine, read at
     // Start and at each config reload.
     bool flow_view_fine_{false};
+    // Edge fill (FrameGenSettings::edge_fill): degrees each margin reaches
+    // past the frame's edge, horizontally and vertically; research
+    // VECTORXR_FRAMEGEN_EDGE_FILL=h[,v] changes them, read at Start and at
+    // each config reload.
+    std::array<float, 2> edge_fill_degrees_{kFrameGenEdgeFillHorizontalDegrees, kFrameGenEdgeFillVerticalDegrees};
     // Research (the head-motion shimmer diagnosis, D): where extrapolated
     // frames' eyes go (FrameGenPredictEye; VECTORXR_FRAMEGEN_SYNTH_EYE), read
     // at Start.
@@ -2419,6 +2509,7 @@ class FrameGenPresenter {
     EngineWindow engine_window_;
     // Timed: teardown never waits on them for long (LockForTeardown).
     std::timed_mutex submit_mutex_;      // presenter-thread submissions vs output swapchain calls
+    std::atomic<GameContextLock*> game_context_lock_{nullptr}; // SetGameContextLock
     std::timed_mutex gpu_mutex_;         // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)
     double gpu_ms_{-1.0};                // last generation GPU time, read without the backend
     // The GPU did not finish this session's Frame Generation work before

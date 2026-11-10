@@ -23,7 +23,9 @@
     "turboLabel": "Konflikt Turbo:",
     "toolkitTurbo": "OpenXR Toolkit jest włączony, gdy używany jest VectorXR Turbo. Dwie warstwy taktowania klatek walczą ze sobą — jeśli tryb Turbo Mode w OXRTK jest włączony, wyłącz go tam albo w VectorXR, nigdy w obu.",
     "quadviewsOffLabel": "Quadviews wyłączone:",
-    "toolkitQuad": "OpenXR Toolkit znajduje się powyżej VectorXR ({slices}). Nie obsługuje on quad views, więc VectorXR utrzymuje Quadviews wyłączone w każdej grze, w której działa OpenXR Toolkit. Wyłącz OpenXR Toolkit lub wyłącz go dla tych gier, aby używać Quadviews."
+    "toolkitQuad": "OpenXR Toolkit znajduje się powyżej VectorXR ({slices}). Nie obsługuje on quad views, więc VectorXR utrzymuje Quadviews wyłączone w każdej grze, w której działa OpenXR Toolkit. Wyłącz OpenXR Toolkit lub wyłącz go dla tych gier, aby używać Quadviews.",
+    "frameGenOffLabel": "Frame Generation wyłączone:",
+    "toolkitFrameGen": "OpenXR Toolkit jest poniżej VectorXR ({slices}). W tym miejscu nie obsługuje dodatkowych klatek Frame Generation, więc VectorXR utrzymuje Frame Generation wyłączone w każdej grze, w której działa OpenXR Toolkit. Aby używać Frame Generation, przenieś OpenXR Toolkit nad VectorXR lub wyłącz go dla tych gier."
   },
   "status": {
     "unlocked": "Zapisy warstw OpenXR dla całego komputera są odblokowane na czas tej sesji aplikacji.",

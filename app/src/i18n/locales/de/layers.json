@@ -21,7 +21,9 @@
     "turboLabel": "Turbo-Konflikt:",
     "toolkitTurbo": "OpenXR Toolkit ist aktiviert, während VectorXR Turbo verwendet wird. Zwei Layer zur Bildtaktung behindern sich gegenseitig – wenn der Turbo-Modus von OXRTK eingeschaltet ist, deaktivieren Sie ihn dort oder in VectorXR, niemals beide.",
     "quadviewsOffLabel": "Quadviews aus:",
-    "toolkitQuad": "OpenXR Toolkit steht über VectorXR ({slices}). Es unterstützt keine Quad Views, daher lässt VectorXR Quadviews für jedes Spiel ausgeschaltet, in dem OpenXR Toolkit läuft. Deaktivieren Sie OpenXR Toolkit oder schalten Sie es für diese Spiele aus, um Quadviews zu verwenden."
+    "toolkitQuad": "OpenXR Toolkit steht über VectorXR ({slices}). Es unterstützt keine Quad Views, daher lässt VectorXR Quadviews für jedes Spiel ausgeschaltet, in dem OpenXR Toolkit läuft. Deaktivieren Sie OpenXR Toolkit oder schalten Sie es für diese Spiele aus, um Quadviews zu verwenden.",
+    "frameGenOffLabel": "Frame Generation aus:",
+    "toolkitFrameGen": "OpenXR Toolkit liegt unter VectorXR ({slices}). Dort kann es die zusätzlichen Bilder von Frame Generation nicht verarbeiten, daher lässt VectorXR Frame Generation in jedem Spiel aus, in dem OpenXR Toolkit läuft. Verschiebe OpenXR Toolkit über VectorXR oder schalte es für diese Spiele aus, um Frame Generation zu nutzen."
   },
   "status": {
     "unlocked": "Computerweite Schreibvorgänge für OpenXR-Layer sind für diese App-Sitzung entsperrt.",

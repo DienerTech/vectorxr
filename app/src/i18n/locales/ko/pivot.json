@@ -16,7 +16,8 @@
     "noCustomProfiles": "아직 사용자 지정 프로필이 없습니다. Pivot 회전을 특정 애플리케이션에 바인딩하려면 프로필을 추가하십시오.",
     "profileNumber": "프로필 {number}",
     "nudgeSetDefaultName": "미세 조정 세트",
-    "nudgeSetCopyName": "{name} 복사본"
+    "nudgeSetCopyName": "{name} 복사본",
+    "profileCopyName": "{name} 복사본"
   },
   "warnings": {
     "noActivationTitle": "모션 보조 활성화 없음",

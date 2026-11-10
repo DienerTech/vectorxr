@@ -701,6 +701,16 @@ export interface FrameGenSettings {
   // Present only when on; absent means off here and in the layer, so a
   // profile never inherits it from the defaults.
   extendHeadPrediction?: boolean
+  // Edge fill: frames Frame Generation writes reach a few degrees past the
+  // game's field of view, the margin repeating the frame's edge. Present only
+  // when on, like extendHeadPrediction; not in the app's pages until it has
+  // flown (set in settings.json), but kept when the app saves.
+  edgeFill?: boolean
+  // Use the game's depth. Present only when off (absent means on, here and
+  // in the layer). Off, Frame Generation works without depth and the bridges
+  // keep a Direct3D 11 or Vulkan game's depth to themselves; the bridges read
+  // it when the game's VR session starts.
+  useGameDepth?: boolean
 }
 
 export interface FrameGenProfileConfig {
@@ -772,6 +782,8 @@ export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSett
     // Absent means off, as in the layer: a profile does not inherit it from
     // the defaults (new profiles copy the defaults' value when created).
     ...(source.extendHeadPrediction === true ? { extendHeadPrediction: true } : {}),
+    ...(source.edgeFill === true ? { edgeFill: true } : {}),
+    ...(source.useGameDepth === false ? { useGameDepth: false } : {}),
   }
 }
 
@@ -1229,6 +1241,16 @@ export function createPivotProfile(
     settings: normalizePivotXRSettings(defaultSettings, defaultPivotXRSettings()),
     viewControls: normalizePivotViewControls(defaultViewControls, defaultPivotViewControls()),
   }
+}
+
+// A deep copy with fresh ids, so the copy's bindings and Quick Views are keyed
+// apart from the source. The nudge set stays shared, like any other profile.
+export function duplicatePivotProfile(source: PivotXRProfileConfig): PivotXRProfileConfig {
+  const copy = JSON.parse(JSON.stringify(source)) as PivotXRProfileConfig
+  copy.id = newPivotProfileId()
+  copy.name = t('pivot.tab.profileCopyName', { name: source.name })
+  copy.viewControls.quickViews = copy.viewControls.quickViews.map((view) => ({ ...view, id: newPivotQuickViewId() }))
+  return copy
 }
 
 export function createQuadViewsProfile(defaultSettings: QuadViewsSettings, applicationIds: string[] = []): QuadViewsProfileConfig {

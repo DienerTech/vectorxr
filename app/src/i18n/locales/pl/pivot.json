@@ -16,7 +16,8 @@
     "noCustomProfiles": "Brak profili niestandardowych. Dodaj profil, aby powiązać obrót Pivot z określoną aplikacją.",
     "profileNumber": "Profil {number}",
     "nudgeSetDefaultName": "Zestaw przesunięć",
-    "nudgeSetCopyName": "{name} — kopia"
+    "nudgeSetCopyName": "{name} — kopia",
+    "profileCopyName": "{name} — kopia"
   },
   "warnings": {
     "noActivationTitle": "Brak aktywacji Wspomagania ruchu",

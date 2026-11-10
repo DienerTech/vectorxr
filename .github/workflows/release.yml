@@ -29,14 +29,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Checkout pinned vcpkg registry
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: microsoft/vcpkg
-          ref: aae277acf4e7de287ddb5e208b5316614de6aad7
-          path: .vcpkg
-          persist-credentials: false
-
       - name: Verify tagged commit belongs to master
         if: github.event_name == 'push'
         shell: pwsh
@@ -71,21 +63,8 @@ jobs:
         working-directory: app
         run: npm test
 
-      - name: Install OpenXR loader
-        shell: pwsh
-        run: |
-          $vcpkgRoot = Join-Path $env:GITHUB_WORKSPACE ".vcpkg"
-          & "$vcpkgRoot\bootstrap-vcpkg.bat" -disableMetrics
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to bootstrap the pinned vcpkg registry."
-          }
-
-          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $env:VCPKG_ROOT = $vcpkgRoot
-          & "$vcpkgRoot\vcpkg.exe" install openxr-loader:x64-windows
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install the pinned OpenXR loader dependency."
-          }
+      - name: Layer build dependencies
+        uses: ./.github/actions/layer-dependencies
 
       - name: Build and stage OpenXR layer
         shell: pwsh

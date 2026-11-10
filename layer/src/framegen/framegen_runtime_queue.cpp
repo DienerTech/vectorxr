@@ -26,7 +26,8 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 // A held-back wait reaches the runtime once the release before it has. The
-// runtime shows none of the swapchain's images by then, so it returns at
+// runtime shows none of the swapchain's images by then (of a layer it shows,
+// not the image waited for: it has a newer release, Wait), so it returns at
 // once; bounded all the same, retried at the next call when it is not.
 constexpr XrDuration kHeldBackWaitTimeout = 1'000'000'000;
 constexpr DWORD kReleaseWaitMs = 100;
@@ -47,6 +48,12 @@ struct FrameGenQueueSubstitution::Impl {
     int failures{0};
     // Shown layers are lazy (Prepare), and what that did (ShownLayerCounts).
     bool shown_layers_lazy{false};
+    // VECTORXR_FRAMEGEN_AFTER_WAIT=off: the game's queue does not wait for the
+    // runtime's after its image waits (research).
+    bool after_wait{true};
+    // SetRuntimeQueuesOnlyFirstUse.
+    bool only_first_use{false};
+    std::atomic<std::uint64_t> unordered_waits{0}; // waits it left unordered
     std::atomic<std::uint64_t> shown_releases{0};
     std::atomic<std::uint64_t> shown_cpu_waits{0};
     std::atomic<std::uint64_t> shown_gpu_waits{0};
@@ -68,6 +75,16 @@ struct FrameGenQueueSubstitution::Impl {
         std::uint32_t direct_waits{0}; // waits not held back: an image was shown since
         bool shown_lazily{false};      // the frame showing it last did so lazily (Flush)
         bool runtime_released{false};  // the runtime got a release of it
+        // Which image the runtime shows (a layer it shows lazily, Wait):
+        // the images it handed out and has no release of yet (in its order),
+        // those the application has not waited for, the runtime's releases
+        // so far, and the one (counted so) that last released each image.
+        std::deque<std::uint32_t> runtime_acquired;
+        std::deque<std::uint32_t> unwaited;
+        std::uint64_t forwarded{0};
+        std::vector<std::uint64_t> released_as;
+        // Images whose first wait ordered the game's queue (AfterWait; under `mutex`).
+        std::vector<bool> ordered;
         HANDLE event{nullptr};
         ~Swapchain() {
             if (event) CloseHandle(event);
@@ -137,12 +154,33 @@ struct FrameGenQueueSubstitution::Impl {
             }
             XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             Note(next.release(swapchain, &info), "release");
-            state.runtime_released = true;
+            Released(state);
             state.held_back.pop_front();
             --state.releases;
             if (until == Until::kOldest) break;
         }
         return true;
+    }
+
+    // The runtime got a release (holding `state.calls`): of the image it
+    // handed out earliest.
+    static constexpr std::uint32_t kUnknownImage = ~std::uint32_t{0};
+    static void Released(Swapchain& state) {
+        state.runtime_released = true;
+        ++state.forwarded;
+        if (state.runtime_acquired.empty()) return;
+        const std::uint32_t image = state.runtime_acquired.front();
+        state.runtime_acquired.pop_front();
+        if (image == kUnknownImage) return;
+        if (image >= state.released_as.size()) state.released_as.resize(image + 1);
+        state.released_as[image] = state.forwarded;
+    }
+
+    // Whether `image` is the newest the runtime has of the swapchain (holding
+    // `state.calls`): a frame showing the layer shows it. Unknown: as if so.
+    static bool NewestShown(const Swapchain& state, std::uint32_t image) {
+        return image == kUnknownImage || (image < state.released_as.size() && state.released_as[image] != 0 &&
+                                          state.released_as[image] == state.forwarded);
     }
 
     // Held-back releases whose work has not run (holding `state.calls`).
@@ -154,9 +192,20 @@ struct FrameGenQueueSubstitution::Impl {
     }
 
     // After the runtime handed an image back: anything it queued for the
-    // image runs before the game's rendering into it.
-    void AfterWait() {
+    // image runs before the game's rendering into it. A runtime that queues
+    // work for an image only before its first wait (only_first_use): only
+    // then (and for an image not known).
+    void AfterWait(Swapchain* state, std::uint32_t image) {
+        if (!after_wait) return;
         std::scoped_lock lock(mutex);
+        if (only_first_use && state && image != kUnknownImage) {
+            if (image >= state->ordered.size()) state->ordered.resize(image + 1, false);
+            if (state->ordered[image]) {
+                ++unordered_waits;
+                return;
+            }
+            state->ordered[image] = true;
+        }
         const UINT64 value = ++handed_back_value;
         runtime->Signal(handed_back.Get(), value);
         game->Wait(handed_back.Get(), value);
@@ -227,6 +276,8 @@ const XrSessionCreateInfo* FrameGenQueueSubstitution::Prepare(const XrSessionCre
     impl->log = log_;
     const std::string shown_choice = shown_layers ? shown_layers : "";
     impl->shown_layers_lazy = shown_choice == "lazy" || (shown_layers_lazy && shown_choice != "off");
+    const char* after_wait = std::getenv("VECTORXR_FRAMEGEN_AFTER_WAIT");
+    impl->after_wait = !(after_wait && std::string(after_wait) == "off");
     impl_ = std::move(impl);
     note = "Frame Generation gives the runtime a Direct3D 12 queue of its own: frames it writes reach the runtime "
            "as soon as they are written, not after the game's queued work; the game's images are kept in order "
@@ -243,6 +294,13 @@ void FrameGenQueueSubstitution::SetLog(std::function<void(const std::string&)> l
     if (impl_) {
         std::scoped_lock lock(impl_->mutex);
         impl_->log = log_;
+    }
+}
+
+void FrameGenQueueSubstitution::SetRuntimeQueuesOnlyFirstUse(bool only_first_use) {
+    if (impl_) {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->only_first_use = only_first_use;
     }
 }
 
@@ -290,6 +348,8 @@ XrResult FrameGenQueueSubstitution::Acquire(XrSwapchain swapchain, std::uint32_t
     const XrResult result = next.acquire(swapchain, info, index);
     if (XR_SUCCEEDED(result)) {
         ++state->held;
+        state->runtime_acquired.push_back(index ? *index : Impl::kUnknownImage);
+        state->unwaited.push_back(index ? *index : Impl::kUnknownImage);
     }
     return result;
 }
@@ -299,27 +359,47 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
     if (!impl_) {
         return next.wait(swapchain, info);
     }
-    if (const auto state = impl_->Find(swapchain, false)) {
+    const auto state = impl_->Find(swapchain, false);
+    // The image waited for: the application's oldest acquired.
+    std::uint32_t image = Impl::kUnknownImage;
+    if (state) {
         std::unique_lock calls(state->calls);
+        if (!state->unwaited.empty()) {
+            image = state->unwaited.front();
+            state->unwaited.pop_front();
+        }
         impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
         if (!state->held_back.empty() && lazy && !state->direct_waits) {
             // A release before it is still held back: so is this wait.
             state->held_back.push_back({true, 0});
             calls.unlock();
-            impl_->AfterWait();
+            impl_->AfterWait(state.get(), image);
             return XR_SUCCESS;
         }
         if (state->shown_lazily && state->releases) {
             // A layer the runtime shows: the releases before this wait go
-            // first, once their work has run. Waited for on the CPU without
-            // `calls` (a frame showing the layer meanwhile takes what has
-            // run), on the runtime's queue only when that takes too long.
+            // first, once their work has run, only as far as the runtime
+            // needs: while it has a release of another image newer than the
+            // waited image's last, no frame showing the layer shows that
+            // image, and the wait is held back behind them (as a lazy
+            // swapchain's; the game's queue still waits for the runtime's
+            // work queued so far, AfterWait). Waiting for the newest instead
+            // made the game's next frame wait for its whole last frame's GPU
+            // work: a GPU-bound game's GPU idled through its CPU work (an
+            // OpenKneeboard or game interface quad at 2026-11-01: 32 fps
+            // engaged against 48 passing through). Otherwise (the image is
+            // the newest the runtime has, or unknown) the oldest release (the
+            // newest when the image is unknown) is waited for on the CPU
+            // without `calls` (a frame showing the layer meanwhile takes what
+            // has run), on the runtime's queue only when that takes too long.
+            const auto oldest = std::find_if(state->held_back.begin(), state->held_back.end(),
+                                             [](const Impl::Call& call) { return !call.wait; });
             const auto newest = std::find_if(state->held_back.rbegin(), state->held_back.rend(),
                                              [](const Impl::Call& call) { return !call.wait; });
-            if (newest->value > impl_->released->GetCompletedValue()) {
+            const UINT64 value = image == Impl::kUnknownImage ? newest->value : oldest->value;
+            if (Impl::NewestShown(*state, image) && value > impl_->released->GetCompletedValue()) {
                 ++impl_->shown_cpu_waits;
                 if (!state->event) state->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-                const UINT64 value = newest->value;
                 calls.unlock();
                 // The event may still be set for an earlier value: waited
                 // for until this one has passed.
@@ -333,6 +413,13 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
                     }
                 }
                 calls.lock();
+                impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
+            }
+            if (state->releases && !Impl::NewestShown(*state, image)) {
+                state->held_back.push_back({true, 0});
+                calls.unlock();
+                impl_->AfterWait(state.get(), image);
+                return XR_SUCCESS;
             }
             impl_->shown_gpu_waits += impl_->Pending(*state);
         }
@@ -347,7 +434,11 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
     }
     const XrResult result = next.wait(swapchain, info);
     if (XR_SUCCEEDED(result) && result != XR_TIMEOUT_EXPIRED) {
-        impl_->AfterWait();
+        impl_->AfterWait(state.get(), image);
+    } else if (state && result == XR_TIMEOUT_EXPIRED) {
+        // Waited for again.
+        std::scoped_lock calls(state->calls);
+        state->unwaited.push_front(image);
     }
     return result;
 }
@@ -372,7 +463,7 @@ XrResult FrameGenQueueSubstitution::Release(XrSwapchain swapchain, bool lazy, co
         return XR_ERROR_RUNTIME_FAILURE;
     }
     impl_->runtime->Wait(impl_->released.Get(), value);
-    state->runtime_released = true;
+    Impl::Released(*state);
     return next.release(swapchain, info);
 }
 
@@ -440,6 +531,7 @@ std::string FrameGenQueueSubstitution::Describe() const {
     std::ostringstream text;
     text << "released=" << impl_->released_value << '/' << impl_->released->GetCompletedValue()
          << " handedBack=" << impl_->handed_back_value << '/' << impl_->handed_back->GetCompletedValue();
+    if (impl_->only_first_use) text << " unorderedWaits=" << impl_->unordered_waits.load();
     std::vector<std::pair<XrSwapchain, std::shared_ptr<Impl::Swapchain>>> swapchains(impl_->swapchains.begin(),
                                                                                 impl_->swapchains.end());
     lock.unlock();

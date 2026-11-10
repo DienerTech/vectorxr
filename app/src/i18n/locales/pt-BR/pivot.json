@@ -16,7 +16,8 @@
     "noCustomProfiles": "Nenhum perfil personalizado ainda. Adicione um perfil para vincular a rotação do Pivot a um aplicativo específico.",
     "profileNumber": "Perfil {number}",
     "nudgeSetDefaultName": "Conjunto de deslocamentos",
-    "nudgeSetCopyName": "Cópia de {name}"
+    "nudgeSetCopyName": "Cópia de {name}",
+    "profileCopyName": "Cópia de {name}"
   },
   "warnings": {
     "noActivationTitle": "Nenhuma ativação da Assistência de movimento",

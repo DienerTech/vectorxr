@@ -1,5 +1,57 @@
 [
   {
+    "version": "0.20.1",
+    "date": "2026-11-08",
+    "title": "Depth for Direct3D 11 Games, PimaxXR Fixes, and Duplicate Pivot Profiles",
+    "summary": "A fix release for 0.20.0. Frame Generation can now use depth from Direct3D 11 games, including UEVR titles. Frame Generation no longer stalls games on PimaxXR. Turbo's Auto mode gives async pacing a fairer trial, and eye-tracked foveation is placed better on Pimax. VectorXR works beside OpenXR Toolkit and Quad-Views-Foveated in more setups, and custom Pivot profiles can now be duplicated.",
+    "items": [
+      {
+        "html": "<strong>Frame Generation</strong>",
+        "items": [
+          "<strong>Depth for Direct3D 11 games.</strong> Frame Generation can now use the depth that Direct3D 11 games provide, including UEVR titles, for steadier generated frames.",
+        "<strong>Use game depth option.</strong> If a game stutters, hangs or shows depth artifacts with Frame Generation, turn off <strong>Use game depth</strong> in the profile's advanced settings and restart the game. Frame Generation then works without depth.",
+          "<strong>No more stalls on PimaxXR.</strong> With Frame Generation engaged, PimaxXR could hold up the game's own rendering, and the game's frame rate dropped sharply. Frame Generation now works around it.",
+          "<strong>Smoother output on PimaxXR 0.4.4 and earlier,</strong> which could skip a refresh when no new frame was ready.",
+          "<strong>Frame Generation stays off when OpenXR Toolkit is below VectorXR,</strong> because Toolkit can't handle the extra frames there. The OSD and the OpenXR Layers page now say when this applies; move OpenXR Toolkit above VectorXR there to use both.",
+          "<strong>OpenXR Toolkit's prediction dampening is respected</strong> instead of being undone by Frame Generation.",
+          "<strong>No rejected frames from misplaced depth.</strong> Some games, such as UEVR titles, can describe depth that doesn't fit its image, and PimaxXR and Virtual Desktop then reject the whole frame. VectorXR now leaves that depth out."
+        ]
+      },
+      {
+        "html": "<strong>Turbo</strong>",
+        "items": [
+          "<strong>Auto gives async pacing a fair trial.</strong> A stutter right as a game left its loading screen could make Auto settle on sequenced pacing for good. Auto now rides out early stutters. It also tries async again after a quick failure, a VectorXR or runtime update, or 30 days.",
+          "<strong>More accurate frame timing with sequenced pacing</strong> in games that prepare frames ahead, such as DCS.",
+          "<strong>Turbo stands aside when OpenXR Toolkit's Turbo runs above VectorXR,</strong> instead of both pacing frames."
+        ]
+      },
+      {
+        "html": "<strong>Quadviews and eye tracking</strong>",
+        "items": [
+          "<strong>Better-placed focus areas on Pimax.</strong> On headsets with angled displays, VectorXR's emulated quad views placed each eye's sharp area off to the side. Both eyes now line up on where you're looking.",
+          "<strong>A frozen eye tracker no longer pins the focus area.</strong> If the tracker stops updating, the focus area follows your head until the tracker recovers.",
+          "<strong>Eye-tracked foveation is no longer switched off</strong> in PimaxXR's native quad views.",
+          "<strong>DCS's focus views stay aligned</strong> on PimaxXR's native quad views."
+        ]
+      },
+      {
+        "html": "<strong>Pivot</strong>",
+        "items": [
+          "<strong>Duplicate custom profiles.</strong> A new Duplicate button next to Remove copies a profile with all its settings and bindings, places the copy just below the original, and scrolls to it. Change the copy's applications or bindings so the two profiles don't overlap.",
+          "<strong>Pivot stays centred after a recenter on Pimax.</strong> Recentering in Pimax Play during a session could leave Pivot turning around your old head position.",
+          "<strong>A restarted VR session starts Pivot fresh,</strong> instead of picking up the previous session's origin."
+        ]
+      },
+      {
+        "html": "<strong>Compatibility</strong>",
+        "items": [
+          "<strong>Games start with OpenXR Toolkit or Quad-Views-Foveated on VIVE runtimes.</strong>",
+          "<strong>Stability fixes for PimaxXR</strong> around starting VR again in the same game, and around head tracking."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.20.0",
     "date": "2026-10-29",
     "title": "Faster, Sharper Frame Generation, Turbo on SteamVR, and Eleven Languages",

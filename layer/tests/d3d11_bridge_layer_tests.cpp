@@ -21,11 +21,13 @@
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_gpu.h"
 #include "depthxr/framegen_plan.h"
+#include "depthxr/game_context_lock.h"
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 #include "depthxr/quadviews_sizing.h"
@@ -76,8 +78,15 @@ class D3D11BridgeLayerTestPeer {
     static D3D11Bridge& Bridge() {
         return OpenXrLayer::Instance().d3d11_bridge_;
     }
+    // The game's device's lock, as the layer takes it before its own locks.
+    static GameContextLock& GameContext() {
+        return *OpenXrLayer::Instance().game_context_;
+    }
     static bool QueueSubstituted() {
         return OpenXrLayer::Instance().framegen_queue_.Active();
+    }
+    static std::string QueueState() {
+        return OpenXrLayer::Instance().framegen_queue_.Describe();
     }
     // What keeping shown layers lazy did in the session so far.
     static FrameGenQueueSubstitution::ShownLayerCounts ShownLayers() {
@@ -93,6 +102,7 @@ class D3D11BridgeLayerTestPeer {
         return layer.instance_ == XR_NULL_HANDLE && layer.active_session_ == XR_NULL_HANDLE &&
                !layer.d3d11_bridge_.Active() && !layer.framegen_queue_.Active() && !layer.framegen_.Started();
     }
+    static OsdSnapshot Osd() { return OpenXrLayer::Instance().BuildOsdSnapshot(); }
     // The layer's log so far: an error reaches the file at once, with
     // everything logged before it.
     static std::string Log() {
@@ -115,6 +125,15 @@ class D3D11BridgeLayerTestPeer {
     // session is `minimum_age` old (kept across sessions).
     static void SetFrameGenEngagement(std::uint32_t steady_frames, std::chrono::milliseconds minimum_age) {
         OpenXrLayer::Instance().framegen_.SetEngagementPolicy(steady_frames, minimum_age);
+    }
+    static void SetFrameGenDynamicPolicy(const FrameGenDynamicPolicy& policy) {
+        OpenXrLayer::Instance().framegen_.SetDynamicPolicy(policy);
+    }
+    static std::filesystem::path ActiveLogPath() {
+        return OpenXrLayer::Instance().logger_.ActiveLogPath();
+    }
+    static void SetFrameGenSummaryInterval(std::chrono::milliseconds interval) {
+        OpenXrLayer::Instance().framegen_.SetSummaryInterval(interval);
     }
     // Frame Generation's hotkey: whether it is on afterwards.
     static bool ToggleFrameGen() {
@@ -519,7 +538,11 @@ void Clear(Game& game, ID3D11Texture2D* texture, const Color& color, std::uint32
     game.context->ClearRenderTargetView(target.Get(), rgba);
 }
 
-void ClearDepth(Game& game, ID3D11Texture2D* texture, std::uint32_t slice) {
+// The depth Frame clears its depth target's first slice to (the second to
+// half of it): a test sets it per frame to see each frame's depth arrive.
+float g_frame_depth = 0.5f;
+
+void ClearDepth(Game& game, ID3D11Texture2D* texture, std::uint32_t slice, float value = 0.5f) {
     D3D11_DEPTH_STENCIL_VIEW_DESC view{};
     view.Format = DXGI_FORMAT_D32_FLOAT;
     view.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
@@ -527,7 +550,7 @@ void ClearDepth(Game& game, ID3D11Texture2D* texture, std::uint32_t slice) {
     view.Texture2DArray.ArraySize = 1;
     ComPtr<ID3D11DepthStencilView> target;
     Check(SUCCEEDED(game.device->CreateDepthStencilView(texture, &view, &target)), "a depth view of an image");
-    game.context->ClearDepthStencilView(target.Get(), D3D11_CLEAR_DEPTH, 0.5f, 0);
+    game.context->ClearDepthStencilView(target.Get(), D3D11_CLEAR_DEPTH, value, 0);
 }
 
 // Direct3D 11 still works: an event query after a flush completes.
@@ -610,6 +633,7 @@ struct StandInSwapchain {
     std::deque<std::uint32_t> acquired;            // oldest first
     std::uint32_t next{0};
     std::optional<std::uint32_t> released; // the image released last
+    std::uint32_t current{0}; // StandIn::pimax: PVR's current image, the next once shown (committed)
     int acquires{0};
     int waits{0};
     int releases{0};
@@ -622,8 +646,12 @@ struct ShownView {
     std::uint32_t slice{0};
     XrStructureType next_type{XR_TYPE_UNKNOWN}; // the first structure of the view's chain
     bool depth{false};                          // the chain had XrCompositionLayerDepthInfoKHR
+    XrSwapchain depth_swapchain{XR_NULL_HANDLE}; // ...naming this depth swapchain
+    std::uint32_t depth_slice{0};               // ...and slice
+    XrStructureType after_depth{XR_TYPE_UNKNOWN}; // ...followed by this structure
     std::optional<Color> texel;                 // the centre of the image released last
     std::vector<Color> probed;                  // its texels at StandIn::probes
+    std::optional<float> depth_value;           // the centre of the depth image released last (Direct3D 12)
 };
 
 struct ShownFrame {
@@ -650,8 +678,15 @@ struct StandIn {
     // xrAcquireSwapchainImage hands out the image released last again, as
     // Pimax's runtime does (else each in turn, as Virtual Desktop's does).
     bool same_image{false};
+    // PimaxXR 0.4.4's frame loop and swapchains (g_pimax): its compositor
+    // thread paces the frames, xrEndFrame waits for it, and a swapchain's
+    // images advance only when shown.
+    bool pimax{false};
     // Where each shown view's image is read besides its centre (fractions of its size).
     std::vector<std::array<float, 2>> probes;
+    // xrEndFrame reads nothing back (it never waits for the frame's work, as
+    // a compositor's does not): a GPU-bound game's frames overlap its CPU work.
+    bool unread{false};
     // Direct3D 11 held back behind it: the next readback is checked to wait
     // for the game's rendering, then the gate is opened.
     Gate* hold{nullptr};
@@ -696,6 +731,10 @@ struct StandIn {
     std::vector<XrSwapchain> created;
     std::vector<XrSwapchain> destroyed;
     std::vector<ShownFrame> frames;
+    // Frames xrEndFrame refused for a projection's sub-image outside its
+    // image (SubImageRefusal), and the first one's reason.
+    int refused_frames{0};
+    std::string refusal;
     std::function<void(XrSwapchain)> on_destroy_swapchain;
     std::function<void()> on_destroy_session;
     std::function<void()> on_destroy_instance; // before a session still alive goes with the instance
@@ -710,6 +749,18 @@ struct StandIn {
     std::uint64_t frame_waits{0};
     std::uint64_t frame_begins{0};
     std::uint64_t frame_ends{0};
+    // A frame begun and not ended yet, and how many such frames a begin
+    // discarded (the runtime shows its last frame again; PimaxXR 0.4.4 a
+    // blank refresh, PimaxCompositor::blank_refreshes).
+    bool frame_open{false};
+    std::uint64_t frames_left_open{0};
+    // pimax: the next `pimax_clamp` waits report a display time 1 ns after
+    // the last (PimaxXR clamps a PVR prediction that did not advance), every
+    // `pimax_clamp_every`th wait (0: never). `reported` is the last reported.
+    int pimax_clamp_every{0};
+    int pimax_clamp{0};
+    std::uint64_t pimax_clamped{0};
+    XrTime reported{0};
     std::uintptr_t handles{0x1000};
 
     // The index of the first `call` at or after `from`, or -1.
@@ -726,6 +777,8 @@ StandIn g_runtime;
 // the runtime as the application's thread does. The test reads what the
 // stand-in saw under it too (Shown).
 std::recursive_mutex g_runtime_mutex;
+// With g_runtime_mutex: a frame began (StandIn::pimax's xrWaitFrame waits for it).
+std::condition_variable_any g_frame_begun;
 // Frame loop calls in progress: xrWaitFrame never overlaps another wait, nor
 // xrBeginFrame or xrEndFrame another begin or end, whichever threads make them.
 std::atomic<int> g_waits_in{0};
@@ -786,6 +839,189 @@ void SleepUntil(std::chrono::steady_clock::time_point until) {
     if (timer) CloseHandle(timer);
 }
 
+// PimaxXR 0.4.4's frame loop with async_submission (its default;
+// pimax-openxr frame.cpp, d3d12_interop.cpp). Its submission thread calls
+// pvr_waitToBeginFrame (the next refresh, once the frame before has rendered)
+// then is idle until xrEndFrame hands it the frame for pvr_endFrame.
+// xrWaitFrame waits for it to be idle, giving up 2 ms early ("running
+// start"); xrEndFrame waits for it to be idle with no timeout, then
+// serializes the session's queue to PVR's submission device (a fence
+// signalled on the queue, which that device waits for before composing).
+// The submission device is a queue of the stand-in's own here.
+struct PimaxCompositor {
+    using Clock = std::chrono::steady_clock;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool running{false};
+    bool stop{false};
+    bool idle{false};      // no frame handed over (PimaxXR: m_layersForAsyncSubmission empty)
+    bool handed{false};    // a frame handed over, not yet taken
+    UINT64 serialized{0};  // the session queue's value the frame handed over waits for
+    Clock::time_point began{}; // the last pvr_waitToBeginFrame's return
+    ComPtr<ID3D12Fence> serialize; // signalled on the session's queue at xrEndFrame
+    ComPtr<ID3D12CommandQueue> submission;
+    ComPtr<ID3D12Fence> rendered;
+    UINT64 rendered_value{0};
+    std::thread thread;
+    // What the frame loop's calls waited.
+    double end_wait_ms{0.0};
+    double wait_wait_ms{0.0};
+    std::uint64_t ends{0};
+    std::uint64_t waits{0};
+    // Frames begun and never ended (Gap): each a PVR frame with one disabled
+    // layer, shown as a blank refresh, that waits a refresh of its own.
+    int gaps{0};
+    std::uint64_t blank_refreshes{0};
+    // quirk_sync_gpu_work_in_end_frame ("Wait for GPU work in EndFrame"):
+    // xrEndFrame waits on the CPU for the session queue's work so far, its
+    // locks held (d3d11_native.cpp serializeD3D12Frame's CPU wait).
+    bool sync_gpu_in_end{false};
+    double end_sync_ms{0.0};
+
+    void Start(ID3D12Device* device) {
+        Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&serialize))) &&
+                  SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&rendered))),
+              "PimaxXR's fences");
+        D3D12_COMMAND_QUEUE_DESC desc{};
+        Check(SUCCEEDED(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&submission))), "PVR's submission queue");
+        running = true;
+        thread = std::thread([this] { Run(); });
+    }
+    void Stop() {
+        {
+            std::scoped_lock lock(mutex);
+            if (!running) return;
+            stop = true;
+            idle = true;
+        }
+        cv.notify_all();
+        thread.join();
+        WaitFence(rendered.Get(), rendered_value, 2000);
+        std::scoped_lock lock(mutex);
+        running = stop = idle = handed = defer = sync_gpu_in_end = false;
+        serialize.Reset();
+        submission.Reset();
+        rendered.Reset();
+        serialized = rendered_value = ends = waits = blank_refreshes = 0;
+        gaps = 0;
+        end_wait_ms = wait_wait_ms = end_sync_ms = 0.0;
+    }
+
+    // A frame begun and never ended (xrBeginFrame over it).
+    void Gap() {
+        std::scoped_lock lock(mutex);
+        if (!running) return;
+        ++gaps;
+        ++blank_refreshes;
+    }
+
+    void Run() {
+        const std::chrono::nanoseconds period(kPeriod);
+        Clock::time_point refresh = Clock::now();
+        for (;;) {
+            // Frame IDs left out by frames begun and never ended: each waited
+            // for and completed with a disabled layer first.
+            int gap = 0;
+            {
+                std::scoped_lock lock(mutex);
+                gap = std::exchange(gaps, 0);
+            }
+            for (; gap > 0; --gap) {
+                WaitFence(rendered.Get(), rendered_value, 1000);
+                const auto now = Clock::now();
+                while (refresh <= now) refresh += period;
+                SleepUntil(refresh);
+            }
+            // pvr_waitToBeginFrame: the frame before rendered, then the next refresh.
+            WaitFence(rendered.Get(), rendered_value, 1000);
+            const auto now = Clock::now();
+            while (refresh <= now) refresh += period;
+            SleepUntil(refresh);
+            UINT64 value = 0;
+            {
+                std::unique_lock lock(mutex);
+                began = Clock::now();
+                idle = true;
+                cv.notify_all();
+                cv.wait(lock, [&] { return stop || handed; });
+                if (stop) return;
+                handed = false;
+                value = serialized;
+            }
+            // pvr_endFrame: PVR's submission device composes once the session's queue is serialized.
+            submission->Wait(serialize.Get(), value);
+            submission->Signal(rendered.Get(), ++rendered_value);
+        }
+    }
+
+    // defer_frame_wait (its "Prefer framerate over latency"): xrWaitFrame does not wait.
+    bool defer{false};
+
+    // xrWaitFrame's wait (running start).
+    void Wait() {
+        const auto start = Clock::now();
+        std::unique_lock lock(mutex);
+        if (!running || defer) return;
+        const auto until = began + std::chrono::nanoseconds(kPeriod) - std::chrono::microseconds(2000);
+        cv.wait_until(lock, until, [&] { return idle; });
+        wait_wait_ms += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        ++waits;
+    }
+
+    // xrEndFrame: waits for the thread to be idle, serializes `queue`, hands the frame over.
+    void End(ID3D12CommandQueue* queue) {
+        const auto start = Clock::now();
+        std::unique_lock lock(mutex);
+        if (!running) return;
+        cv.wait(lock, [&] { return idle; });
+        end_wait_ms += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        ++ends;
+        if (stop) return;
+        ++serialized;
+        queue->Signal(serialize.Get(), serialized);
+        if (sync_gpu_in_end) {
+            // On the CPU, its locks held (bounded: a stand-in never waits forever).
+            const auto sync = Clock::now();
+            lock.unlock();
+            WaitFence(serialize.Get(), serialized, 1000);
+            lock.lock();
+            end_sync_ms += std::chrono::duration<double, std::milli>(Clock::now() - sync).count();
+        }
+        idle = false;
+        handed = true;
+        cv.notify_all();
+    }
+};
+PimaxCompositor g_pimax;
+// PimaxXR's m_swapchainsMutex: xrEndFrame holds it across its wait for the
+// submission thread (frame.cpp), and its swapchain calls take it
+// (swapchain.cpp), so a game's swapchain calls wait out the presenter's end.
+std::mutex g_pimax_swapchains;
+std::atomic<std::uint64_t> g_pimax_swapchain_calls{0};
+std::atomic<std::uint64_t> g_pimax_swapchain_wait_us{0};
+std::atomic<std::uint64_t> g_pimax_swapchain_wait_max_us{0};
+std::thread::id g_pimax_game_thread; // the game's calls are the ones timed
+std::unique_lock<std::mutex> PimaxSwapchainsLock(bool timed) {
+    bool pimax = false;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        pimax = g_runtime.pimax;
+    }
+    if (!pimax) return {};
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock lock(g_pimax_swapchains);
+    if (timed && std::this_thread::get_id() == g_pimax_game_thread) {
+        const auto waited = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+        g_pimax_swapchain_wait_us += waited;
+        ++g_pimax_swapchain_calls;
+        std::uint64_t max = g_pimax_swapchain_wait_max_us.load();
+        while (waited > max && !g_pimax_swapchain_wait_max_us.compare_exchange_weak(max, waited)) {
+        }
+    }
+    return lock;
+}
+
 StandInSwapchain* FindSwapchain(XrSwapchain swapchain) {
     const auto it = g_runtime.swapchains.find(swapchain);
     return it == g_runtime.swapchains.end() ? nullptr : &it->second;
@@ -815,6 +1051,7 @@ struct Source {
     ID3D12Resource* image{nullptr};
     std::uint32_t slice{0};
     std::array<float, 2> at{0.5f, 0.5f};
+    bool depth{false}; // a depth image (D32): in the depth-write state while the runtime holds it
 };
 using Sources = std::vector<Source>;
 
@@ -854,14 +1091,17 @@ bool SubmitReadback(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64& fence
                                          IID_PPV_ARGS(&readback.list)))) {
         return false;
     }
-    // Colour images are render targets whenever the runtime holds them.
+    // Colour images are render targets whenever the runtime holds them, depth
+    // images depth targets.
     std::vector<D3D12_RESOURCE_BARRIER> barriers;
     for (const Source& texel : sources) {
         if (std::none_of(barriers.begin(), barriers.end(), [&](const D3D12_RESOURCE_BARRIER& barrier) {
                 return barrier.Transition.pResource == texel.image;
             })) {
-            barriers.push_back(
-                Transition(texel.image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE));
+            barriers.push_back(Transition(texel.image,
+                                          texel.depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                                                      : D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                          D3D12_RESOURCE_STATE_COPY_SOURCE));
         }
     }
     readback.list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
@@ -871,7 +1111,14 @@ bool SubmitReadback(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64& fence
         source.SubresourceIndex = sources[i].slice * image.MipLevels;
         D3D12_TEXTURE_COPY_LOCATION destination{readback.buffer.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
         destination.PlacedFootprint.Offset = kReadbackStride * i;
-        destination.PlacedFootprint.Footprint = {image.Format, 1, 1, 1, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT};
+        DXGI_FORMAT format = image.Format;
+        if (sources[i].depth) {
+            // A depth plane copies through its own format (D32_FLOAT's: R32_TYPELESS).
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT plane{};
+            device->GetCopyableFootprints(&image, source.SubresourceIndex, 1, 0, &plane, nullptr, nullptr, nullptr);
+            format = plane.Footprint.Format;
+        }
+        destination.PlacedFootprint.Footprint = {format, 1, 1, 1, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT};
         const UINT x = TexelAt(sources[i].at[0], static_cast<UINT>(image.Width));
         const UINT y = TexelAt(sources[i].at[1], image.Height);
         const D3D12_BOX box{x, y, 0, x + 1, y + 1, 1};
@@ -1047,8 +1294,15 @@ XrResult XRAPI_CALL RtDestroyInstance(XrInstance instance) {
 }
 
 XrResult XRAPI_CALL RtGetInstanceProperties(XrInstance, XrInstanceProperties* properties) {
-    properties->runtimeVersion = XR_MAKE_VERSION(1, 0, 0);
-    std::strncpy(properties->runtimeName, "VectorXR stand-in runtime", XR_MAX_RUNTIME_NAME_SIZE - 1);
+    bool pimax = false;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        pimax = g_runtime.pimax;
+    }
+    // StandIn::pimax: as PimaxXR 0.4.4 names itself (pimax-openxr instance.cpp).
+    properties->runtimeVersion = pimax ? XR_MAKE_VERSION(0, 4, 4) : XR_MAKE_VERSION(1, 0, 0);
+    std::strncpy(properties->runtimeName, pimax ? "PimaxXR (Unofficial)" : "VectorXR stand-in runtime",
+                 XR_MAX_RUNTIME_NAME_SIZE - 1);
     return XR_SUCCESS;
 }
 
@@ -1262,13 +1516,36 @@ XrResult XRAPI_CALL RtWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*
     }
     std::optional<std::chrono::steady_clock::time_point> until;
     XrTime time = 0;
+    bool pimax = false;
+    {
+        std::unique_lock lock(g_runtime_mutex);
+        pimax = g_runtime.pimax;
+        if (pimax) {
+            // PimaxXR waits, with no timeout, until the frame waited before
+            // has begun (frame.cpp xrWaitFrame, m_frameCondVar): a second
+            // wait from the thread that would begin hangs it for good. A
+            // watchdog fails the case instead.
+            Check(g_frame_begun.wait_for(lock, std::chrono::seconds(2),
+                                         [] { return g_runtime.frame_waits == g_runtime.frame_begins; }),
+                  "xrWaitFrame waited 2 s for the frame waited before it to begin (PimaxXR would hang there)");
+        }
+    }
+    if (pimax) g_pimax.Wait();
     {
         std::scoped_lock lock(g_runtime_mutex);
         StandIn& rt = g_runtime;
         Check(rt.frame_waits == rt.frame_begins, "xrWaitFrame comes only once the frame waited before it began");
         ++rt.frame_waits;
         XrDuration refreshes = 1;
-        if (rt.paced) {
+        if (rt.pimax) {
+            // A refresh on from the last wait's, or as many as went by.
+            const auto now = std::chrono::steady_clock::now();
+            const std::chrono::nanoseconds period(kPeriod);
+            if (rt.refresh != std::chrono::steady_clock::time_point{}) {
+                refreshes = std::max<XrDuration>(1, static_cast<XrDuration>((now - rt.refresh + period / 2) / period));
+            }
+            rt.refresh = now;
+        } else if (rt.paced) {
             // The next refresh, or the first one after a wait that comes late.
             const auto now = std::chrono::steady_clock::now();
             const std::chrono::nanoseconds period(kPeriod);
@@ -1284,6 +1561,17 @@ XrResult XRAPI_CALL RtWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*
         }
         rt.time += kPeriod * refreshes;
         time = rt.time;
+        if (rt.pimax && rt.pimax_clamp_every > 0 && rt.frame_waits % rt.pimax_clamp_every == 0) {
+            rt.pimax_clamp = 2;
+        }
+        if (rt.pimax && rt.pimax_clamp > 0 && rt.reported > 0) {
+            // PVR's prediction did not advance: PimaxXR's clamp (frame.cpp xrWaitFrame).
+            --rt.pimax_clamp;
+            ++rt.pimax_clamped;
+            time = rt.reported + 1;
+        }
+        time = std::max(time, rt.reported + 1);
+        rt.reported = time;
     }
     if (until) SleepUntil(*until);
     state->predictedDisplayTime = time;
@@ -1298,16 +1586,110 @@ XrResult XRAPI_CALL RtBeginFrame(XrSession, const XrFrameBeginInfo*) {
     StandIn& rt = g_runtime;
     Check(rt.frame_begins < rt.frame_waits, "xrBeginFrame begins a frame waited for");
     ++rt.frame_begins;
+    g_frame_begun.notify_all();
+    const bool discarded = rt.frame_open;
+    rt.frame_open = true;
+    if (discarded) {
+        // A begin over an open frame discards it. PimaxXR 0.4.4's submission
+        // thread completes that PVR frame with one disabled layer (a blank
+        // refresh) and waits a refresh more for it (frame.cpp
+        // asyncSubmissionThread, quirk_complete_discarded_frames).
+        ++rt.frames_left_open;
+        if (rt.pimax) g_pimax.Gap();
+        // (PimaxXR says so; the plain stand-in has always reported success.)
+        if (rt.pimax) return XR_FRAME_DISCARDED;
+    }
+    return XR_SUCCESS;
+}
+
+// As PimaxXR's and Virtual Desktop's xrEndFrame check a projection's
+// sub-images (holding g_runtime_mutex): each view's colour and depth rect
+// inside its image (XR_ERROR_SWAPCHAIN_RECT_INVALID), and its depth's slice
+// one of the image's (XR_ERROR_VALIDATION_FAILURE). XR_SUCCESS: none
+// outside. `why` says which.
+XrResult SubImageRefusal(const XrFrameEndInfo& info, std::string& why) {
+    const auto check = [&](const XrSwapchainSubImage& sub, const char* what, bool depth) {
+        const StandInSwapchain* chain = FindSwapchain(sub.swapchain);
+        if (!chain) {
+            why = std::string(what) + " names no swapchain";
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        const XrRect2Di& rect = sub.imageRect;
+        const std::int64_t right = static_cast<std::int64_t>(rect.offset.x) + rect.extent.width;
+        const std::int64_t bottom = static_cast<std::int64_t>(rect.offset.y) + rect.extent.height;
+        std::ostringstream text;
+        text << what << " rect " << rect.offset.x << "," << rect.offset.y << " " << rect.extent.width << "x"
+             << rect.extent.height << " slice " << sub.imageArrayIndex << " on " << chain->info.width << "x"
+             << chain->info.height << " of " << chain->info.arraySize;
+        if (depth && sub.imageArrayIndex >= chain->info.arraySize) {
+            why = text.str();
+            return XR_ERROR_VALIDATION_FAILURE;
+        }
+        if (rect.offset.x < 0 || rect.offset.y < 0 || rect.extent.width <= 0 || rect.extent.height <= 0 ||
+            right > static_cast<std::int64_t>(chain->info.width) ||
+            bottom > static_cast<std::int64_t>(chain->info.height)) {
+            why = text.str();
+            return XR_ERROR_SWAPCHAIN_RECT_INVALID;
+        }
+        return XR_SUCCESS;
+    };
+    for (std::uint32_t i = 0; i < info.layerCount; ++i) {
+        const XrCompositionLayerBaseHeader* base = info.layers[i];
+        if (!base || base->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+        const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(base);
+        for (std::uint32_t v = 0; v < projection.viewCount; ++v) {
+            const XrCompositionLayerProjectionView& view = projection.views[v];
+            if (const XrResult result = check(view.subImage, "colour", false); result != XR_SUCCESS) return result;
+            for (auto* chain = static_cast<const XrBaseInStructure*>(view.next); chain; chain = chain->next) {
+                if (chain->type != XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) continue;
+                const auto& depth = *reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(chain);
+                if (const XrResult result = check(depth.subImage, "depth", true); result != XR_SUCCESS) return result;
+            }
+        }
+    }
     return XR_SUCCESS;
 }
 
 XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     const InCall in(g_begins_ends_in, "xrBeginFrame or xrEndFrame");
+    ComPtr<ID3D12CommandQueue> pimax_queue;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        if (g_runtime.pimax) pimax_queue = g_runtime.queue;
+    }
+    const std::unique_lock pimax_swapchains = PimaxSwapchainsLock(false);
+    if (pimax_queue) g_pimax.End(pimax_queue.Get());
     std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     rt.calls.push_back("xrEndFrame");
+    if (rt.pimax) {
+        // Committing a swapchain shown moves PVR's current image on.
+        std::set<XrSwapchain> committed;
+        for (std::uint32_t i = 0; i < info->layerCount; ++i) {
+            const XrCompositionLayerBaseHeader* base = info->layers[i];
+            if (base && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(base);
+                for (std::uint32_t v = 0; v < projection.viewCount; ++v) {
+                    committed.insert(projection.views[v].subImage.swapchain);
+                }
+            } else if (base && base->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                committed.insert(reinterpret_cast<const XrCompositionLayerQuad*>(base)->subImage.swapchain);
+            }
+        }
+        for (const XrSwapchain swapchain : committed) {
+            if (StandInSwapchain* chain = FindSwapchain(swapchain); chain && chain->Count()) {
+                chain->current = (chain->current + 1) % static_cast<std::uint32_t>(chain->Count());
+            }
+        }
+    }
     Check(rt.frame_ends < rt.frame_begins, "xrEndFrame ends a begun frame");
     ++rt.frame_ends;
+    rt.frame_open = false;
+    std::string why;
+    if (const XrResult refused = SubImageRefusal(*info, why); refused != XR_SUCCESS) {
+        if (rt.refused_frames++ == 0) rt.refusal = why;
+        return refused;
+    }
     ShownFrame frame;
     frame.time = info->displayTime;
     for (std::uint32_t i = 0; i < info->layerCount; ++i) {
@@ -1325,7 +1707,14 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
             const auto* chain = static_cast<const XrBaseInStructure*>(view.next);
             shown.next_type = chain ? chain->type : XR_TYPE_UNKNOWN;
             for (; chain; chain = chain->next) {
-                shown.depth = shown.depth || chain->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR;
+                if (chain->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
+                    const auto& depth = *reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(chain);
+                    shown.depth = true;
+                    shown.depth_swapchain = depth.subImage.swapchain;
+                    shown.depth_slice = depth.subImage.imageArrayIndex;
+                    const auto* after = static_cast<const XrBaseInStructure*>(depth.next);
+                    shown.after_depth = after ? after->type : XR_TYPE_UNKNOWN;
+                }
             }
             frame.views.push_back(shown);
         }
@@ -1338,7 +1727,9 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     std::size_t per_view = 1; // texels read per view: the centre, then the probes (Direct3D 12)
     // Nothing is read on a removed device: its fences read as done at once,
     // and WARP may still be running the readback when it is let go.
-    if (rt.device12 && SUCCEEDED(rt.device12->GetDeviceRemovedReason())) {
+    if (rt.unread) {
+        // A compositor whose xrEndFrame never waits for the frame's work.
+    } else if (rt.device12 && SUCCEEDED(rt.device12->GetDeviceRemovedReason())) {
         Sources sources;
         per_view += rt.probes.size();
         for (const ShownView& view : frame.views) {
@@ -1353,7 +1744,23 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
                 sources.push_back({image, view.slice, probe});
             }
         }
+        // Then each view's depth, as a compositor reprojecting with it reads it.
+        std::vector<std::size_t> depth_views;
+        for (std::size_t i = 0; !sources.empty() && i < frame.views.size(); ++i) {
+            const StandInSwapchain* chain = FindSwapchain(frame.views[i].depth_swapchain);
+            if (chain && chain->released && !chain->images12.empty()) {
+                sources.push_back({chain->images12[*chain->released].Get(), frame.views[i].depth_slice, {0.5f, 0.5f},
+                                   true});
+                depth_views.push_back(i);
+            }
+        }
         read = !sources.empty() && ReadBack12(sources, frame, texels);
+        for (std::size_t i = 0; read && i < depth_views.size(); ++i) {
+            const Color& texel = texels[frame.views.size() * per_view + i];
+            float value = 0.0f;
+            std::memcpy(&value, texel.data(), sizeof(value));
+            frame.views[depth_views[i]].depth_value = value;
+        }
     } else if (rt.device11) {
         std::vector<std::pair<ID3D11Texture2D*, std::uint32_t>> sources;
         for (const ShownView& view : frame.views) {
@@ -1484,6 +1891,7 @@ XrResult XRAPI_CALL RtEnumerateSwapchainImages(XrSwapchain swapchain, std::uint3
 }
 
 XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
+    const std::unique_lock pimax_swapchains = PimaxSwapchainsLock(true);
     std::scoped_lock lock(g_runtime_mutex);
     StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
@@ -1494,7 +1902,12 @@ XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcqui
     }
     if (chain->acquired.size() >= chain->Count()) return XR_ERROR_CALL_ORDER_INVALID;
     // Pimax's runtime hands the image back released last, every frame.
-    *index = g_runtime.same_image && chain->released && chain->acquired.empty() ? *chain->released : chain->next;
+    if (g_runtime.pimax) {
+        // PimaxXR resynchronizes to PVR's current image when nothing is acquired.
+        *index = chain->acquired.empty() ? chain->current : chain->next;
+    } else {
+        *index = g_runtime.same_image && chain->released && chain->acquired.empty() ? *chain->released : chain->next;
+    }
     chain->next = (*index + 1) % static_cast<std::uint32_t>(chain->Count());
     chain->acquired.push_back(*index);
     ++chain->acquires;
@@ -1505,6 +1918,7 @@ XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcqui
 }
 
 XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo*) {
+    const std::unique_lock pimax_swapchains = PimaxSwapchainsLock(true);
     std::scoped_lock lock(g_runtime_mutex);
     StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
@@ -1522,6 +1936,7 @@ XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo
 }
 
 XrResult XRAPI_CALL RtRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo*) {
+    const std::unique_lock pimax_swapchains = PimaxSwapchainsLock(true);
     std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     StandInSwapchain* chain = FindSwapchain(swapchain);
@@ -1611,6 +2026,22 @@ struct FrameGenChain {
 };
 FrameGenChain g_framegen_chain;
 
+// Set: the stand-in's captures and generations call the game's context
+// (Flush), as Direct3D 11's backend does, and note their threads.
+std::atomic<ID3D11DeviceContext*> g_capture_context{nullptr};
+struct CaptureThreads {
+    std::mutex mutex;
+    std::vector<DWORD> threads;
+    void push(DWORD thread) {
+        std::scoped_lock lock(mutex);
+        threads.push_back(thread);
+    }
+    std::size_t Count(DWORD thread) {
+        std::scoped_lock lock(mutex);
+        return static_cast<std::size_t>(std::count(threads.begin(), threads.end(), thread));
+    }
+} g_capture_threads, g_execute_threads;
+
 class StandInGpu final : public depthxr::FrameGenGpu {
   public:
     const char* Name() const override { return "Stand-in"; }
@@ -1626,11 +2057,22 @@ class StandInGpu final : public depthxr::FrameGenGpu {
     void Forget(XrSwapchain) override {}
     bool Capture(std::size_t, const depthxr::FrameGenImage&, const depthxr::FrameGenViewRequest&,
                  depthxr::FrameGenFlowQuality, std::string&) override {
+        // As Direct3D 11's backend copies the released image on the game's
+        // immediate context, under Frame Generation's (and the layer's) locks.
+        if (ID3D11DeviceContext* context = g_capture_context.load()) {
+            g_capture_threads.push(GetCurrentThreadId());
+            context->Flush();
+        }
         return true;
     }
     bool WaitIdle() override { return true; }
     bool Execute(const std::vector<depthxr::FrameGenViewSubmission>& views, const depthxr::FrameGenTuning&,
                  depthxr::FrameGenExecuteResult& result, std::string&) override {
+        // As Direct3D 11's backend generates on the game's immediate context.
+        if (ID3D11DeviceContext* context = g_capture_context.load()) {
+            g_execute_threads.push(GetCurrentThreadId());
+            context->Flush();
+        }
         result.synthesized.assign(views.size(), true);
         return true;
     }
@@ -1927,14 +2369,17 @@ struct Eye {
 // One application frame: each colour target acquired, waited, cleared to its
 // colour and released, in the order given (with `depth`, cleared, when given);
 // then a stereo projection of `eyes`, each view chaining its slice of `depth`
-// (and a structure of the application's after it) when given. With `hold`,
+// (and a structure of the application's after it) when given, as
+// `edit_depth` leaves the views' depth structures. With `hold`,
 // Direct3D 11 waits for the gate from just before the LAST colour target's
 // release on (after the others' releases): that image alone is not written
 // yet, and nothing queued for the releases before it waits for the gate. The
 // stand-in opens the gate once it has seen its readback wait all the same.
 XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, const std::vector<Color>& colors,
                const std::array<Eye, 2>& eyes, const Target* depth = nullptr, Gate* hold = nullptr,
-               bool unknown_after_depth = false) {
+               bool unknown_after_depth = false,
+               const std::function<void(std::array<XrCompositionLayerDepthInfoKHR, 2>&)>& edit_depth = {},
+               const std::function<XrResult(const XrFrameEndInfo&)>& end_frame = {}) {
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState state{XR_TYPE_FRAME_STATE};
     Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "xrWaitFrame");
@@ -1961,8 +2406,8 @@ XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, 
         Draw(game, targets[i]->images[indices[i]], colors[i]);
     }
     if (depth) {
-        ClearDepth(game, depth->images[depth_index], 0);
-        ClearDepth(game, depth->images[depth_index], 1);
+        ClearDepth(game, depth->images[depth_index], 0, g_frame_depth);
+        ClearDepth(game, depth->images[depth_index], 1, g_frame_depth * 0.5f);
     }
     for (std::size_t i = 0; i < targets.size(); ++i) {
         if (hold && i + 1 == targets.size()) {
@@ -2001,6 +2446,9 @@ XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, 
             views[eye].next = &depth_infos[eye];
         }
     }
+    if (depth && edit_depth) {
+        edit_depth(depth_infos);
+    }
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projection.space = app.space;
     projection.viewCount = 2;
@@ -2012,7 +2460,8 @@ XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, 
     end.layerCount = 1;
     end.layers = layers;
     g_runtime.hold = hold;
-    const XrResult result = app.api.end_frame(app.session, &end);
+    // `end_frame`: ends it instead (the frame's images all rendered and released).
+    const XrResult result = end_frame ? end_frame(end) : app.api.end_frame(app.session, &end);
     if (g_runtime.hold) {
         // The stand-in never read the frame back: let the game run on.
         g_runtime.hold->Open();
@@ -2286,6 +2735,8 @@ struct QuadFrameOptions {
     // XR_ERROR_SESSION_LOST ends the frame there (returned as it is); any
     // other failure of theirs fails the test.
     bool session_may_be_lost{false};
+    // Ends the frame instead of xrEndFrame on this thread.
+    std::function<XrResult(const XrFrameEndInfo&)> end_frame;
 };
 
 // One application frame of quad views: the four views located at the frame's
@@ -2355,7 +2806,7 @@ XrResult QuadFrame(App& app, Game& game, const QuadTargets& targets, int frame, 
     end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     end.layerCount = 1;
     end.layers = layers;
-    return app.api.end_frame(app.session, &end);
+    return options.end_frame ? options.end_frame(end) : app.api.end_frame(app.session, &end);
 }
 
 // --- The cases --------------------------------------------------------------
@@ -2418,6 +2869,7 @@ struct CaseSettings {
     // Auto was the default, so they keep it unless they choose another.
     std::string frame_multiplier{"auto"};
     std::string synthesis_mode;   // Frame Generation's (its default when empty)
+    bool use_game_depth{true};    // Frame Generation's useGameDepth (written only when off)
 };
 
 // A fresh stand-in runtime, a log of the case's own, and the test's settings.
@@ -2427,6 +2879,10 @@ void BeginCase(const std::string& name, const Game& game, const CaseSettings& ca
     Check(Peer::Idle(), name + ": nothing is left of the cases before it");
     g_case = name;
     g_device12 = MakeDevice12(game);
+    // Each case's game starts without multithread protection: a case before
+    // it may have left it on (a mirrored depth swapchain turns it on).
+    ComPtr<ID3D11Multithread> multithread;
+    if (SUCCEEDED(game.context.As(&multithread))) multithread->SetMultithreadProtected(FALSE);
     // The runtime's clock runs on across sessions, as a runtime's does.
     const XrTime time = g_runtime.time;
     g_runtime = StandIn{};
@@ -2452,15 +2908,19 @@ void BeginCase(const std::string& name, const Game& game, const CaseSettings& ca
     }
     settings << R"("turbo": {"enabled": false}, "framegen": {"enabled": )"
              << (case_settings.framegen ? "true" : "false");
-    if (!case_settings.frame_multiplier.empty() || !case_settings.synthesis_mode.empty()) {
+    std::vector<std::string> defaults;
+    if (!case_settings.frame_multiplier.empty()) {
+        defaults.push_back(R"("frameMultiplier": ")" + case_settings.frame_multiplier + R"(")");
+    }
+    if (!case_settings.synthesis_mode.empty()) {
+        defaults.push_back(R"("synthesisMode": ")" + case_settings.synthesis_mode + R"(")");
+    }
+    if (!case_settings.use_game_depth) {
+        defaults.push_back(R"("useGameDepth": false)");
+    }
+    if (!defaults.empty()) {
         settings << R"(, "defaults": {)";
-        if (!case_settings.frame_multiplier.empty()) {
-            settings << R"("frameMultiplier": ")" << case_settings.frame_multiplier << R"(")"
-                     << (case_settings.synthesis_mode.empty() ? "" : ", ");
-        }
-        if (!case_settings.synthesis_mode.empty()) {
-            settings << R"("synthesisMode": ")" << case_settings.synthesis_mode << R"(")";
-        }
+        for (std::size_t i = 0; i < defaults.size(); ++i) settings << (i ? ", " : "") << defaults[i];
         settings << "}";
     }
     settings << "}}}\n";
@@ -2686,11 +3146,14 @@ void CheckFrames(App& app, Game& game, Target& left, Target& right) {
     }
 }
 
-// 4. Depth on a bridged session stays the game's: its swapchain's calls reach
-// the runtime, its depth never reaches submitted frames.
+// 4. Depth on a bridged session reaches the runtime: its swapchain's calls go
+// on, each frame's views name it (with the rest of their chains), and the
+// runtime's depth image holds the frame's depth when it reads it, each eye
+// its slice.
 void CheckDepth(App& app, Game& game, Target& left, Target& right, Target& depth) {
-    Check(Peer::Bridge().Bridged(depth.swapchain) && Peer::Bridge().Unmirrored(depth.swapchain),
-          "the depth swapchain is the game's own");
+    Check(Peer::Bridge().Bridged(depth.swapchain) && !Peer::Bridge().Unmirrored(depth.swapchain) &&
+              Contains(Peer::Bridge().Describe(depth.swapchain), "mode=depth,"),
+          "the depth swapchain is mirrored: " + Peer::Bridge().Describe(depth.swapchain));
     for (ID3D11Texture2D* image : depth.images) {
         D3D11_TEXTURE2D_DESC desc{};
         image->GetDesc(&desc);
@@ -2698,9 +3161,16 @@ void CheckDepth(App& app, Game& game, Target& left, Target& right, Target& depth
                   desc.Format == DXGI_FORMAT_R32_TYPELESS,
               "the game gets typeless depth images");
     }
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        const StandInSwapchain* runtime = FindSwapchain(depth.swapchain);
+        Check(runtime && (runtime->info.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT),
+              "the runtime's depth swapchain is asked for as a depth target");
+    }
     constexpr int kFrames = 8;
     for (int frame = 0; frame < kFrames; ++frame) {
         const std::vector<Color> colors{FrameColor(frame + 10, 0), FrameColor(frame + 10, 1)};
+        g_frame_depth = 0.1f + 0.1f * static_cast<float>(frame);
         const XrResult result = Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, &depth,
                                      nullptr, true); // explicit unknown metadata: preserve it in pass-through
         Check(result == XR_SUCCESS, "depth frame " + std::to_string(frame) + ": xrEndFrame " + std::to_string(result));
@@ -2708,18 +3178,29 @@ void CheckDepth(App& app, Game& game, Target& left, Target& right, Target& depth
         Check(shown.views.size() == 2, "depth frame: two views");
         for (int eye = 0; eye < 2; ++eye) {
             const ShownView& view = shown.views[eye];
-            Check(!view.depth, "the runtime gets no depth in a bridged session's views");
-            Check(view.next_type == kApplicationStructType,
-                  "the rest of a view's chain reaches the runtime: " + std::to_string(view.next_type));
+            const float expected = eye == 0 ? g_frame_depth : g_frame_depth * 0.5f;
+            Check(view.depth && view.depth_swapchain == depth.swapchain &&
+                      view.depth_slice == static_cast<std::uint32_t>(eye),
+                  "the runtime gets each view's depth in a bridged session");
+            Check(view.after_depth == kApplicationStructType,
+                  "the rest of a view's chain reaches the runtime after its depth: " +
+                      std::to_string(view.after_depth));
+            Check(view.depth_value && *view.depth_value == expected,
+                  "depth frame " + std::to_string(frame) + " eye " + std::to_string(eye) + ": the runtime's depth " +
+                      (view.depth_value ? std::to_string(*view.depth_value) : "unread") + ", rendered " +
+                      std::to_string(expected));
             Check(Near(view.texel, colors[eye]),
                   "depth frame " + std::to_string(frame) + " eye " + std::to_string(eye) + ": the runtime shows " +
                       (view.texel ? Text(*view.texel) : "nothing") + ", rendered " + Text(colors[eye]));
         }
     }
+    g_frame_depth = 0.5f;
     const StandInSwapchain* runtime = FindSwapchain(depth.swapchain);
     Check(runtime && runtime->acquires == kFrames && runtime->waits == kFrames && runtime->releases == kFrames,
           "the depth swapchain's acquires, waits and releases reach the runtime");
-    Check(Contains(Peer::Log(), "keeps the game's depth to itself"), "the log tells depth is left out");
+    Check(!Contains(Peer::Log(), "keeps the game's depth to itself"), "the log tells of no depth left out");
+    Check(SummaryValue(Peer::Bridge().Summary(), "depthCopies") == static_cast<std::uint64_t>(kFrames),
+          "a depth copy per frame: " + Peer::Bridge().Summary());
     // CheckFrames' 10 frames, CheckRenderAfterRelease's 16 and
     // CheckAcquireAhead's two releases before these.
     Check(Contains(Peer::Bridge().Describe(left.swapchain), "copies=" + std::to_string(10 + 16 + 2 + kFrames)),
@@ -2893,6 +3374,769 @@ void TestReleaseOnAnotherThread(Game& game) {
     Target right = MakeTarget(app, ColorInfo(), "the right eye");
     CheckReleaseOnAnotherThread(app, game, left, right);
     StopApp(app);
+    EndCase(game);
+}
+
+// 4a. Lock order. A game thread holds the device's lock
+// (ID3D11Multithread::Enter, protection on) through its
+// xrReleaseSwapchainImage of the next frame's image, while the frame's
+// thread is in xrEndFrame, whose hand-over needs that lock (the bridge's
+// depth copy and "written" signal on the game's context). Driven by events:
+// the game thread enters the lock, the frame's thread ends its frame, and
+// the game thread releases only once the bridge is about to wait for the
+// lock (SetContextWaitHookForTest). Waiting for it while holding the layer's
+// mutex (the hand-over's lock) deadlocks: the release waits for that mutex.
+// The bridge waits for it before taking any of the layer's locks
+// (StageReleases): the release goes through, the game thread lets the lock
+// go, and the frame ends. A deadlock fails the case after a timeout (the
+// process ends: its threads cannot be got back).
+void TestContextHeldAcrossRelease(Game& game) {
+    const std::string name = "context-held-across-release";
+    BeginCase(name, game);
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(game.context.As(&multithread)), name + ": the game's context has ID3D11Multithread");
+    multithread->SetMultithreadProtected(TRUE); // a game entering the lock has protection on
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          name + ": a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target depth = MakeTarget(app, DepthInfo(2), "depth");
+    Target next = MakeTarget(app, ColorInfo(), "the next frame's image");
+    Check(!Peer::Bridge().Unmirrored(depth.swapchain), name + ": depth is mirrored");
+    const std::array<Eye, 2> eyes{{{&left, 0}, {&right, 0}}};
+    Check(Frame(app, game, {&left, &right}, {FrameColor(1, 0), FrameColor(1, 1)}, eyes, &depth) == XR_SUCCESS,
+          name + ": a first frame");
+
+    // Ends the case if `event` is not set in time: a deadlock.
+    const auto await = [&](HANDLE event, const char* what) {
+        if (WaitForSingleObject(event, 10000) != WAIT_OBJECT_0) {
+            std::cout << "FAILED: " << name << ": " << what
+                      << " within 10 s: deadlocked (the frame's thread waits for the device's lock holding a lock "
+                         "the game thread's release waits for)\n"
+                      << std::flush;
+            TerminateProcess(GetCurrentProcess(), 1);
+        }
+    };
+    const HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE waiting = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE released = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE ended = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::atomic<DWORD> frame_thread{0};
+    std::atomic<bool> hooked{false};
+    Peer::Bridge().SetContextWaitHookForTest([&] {
+        if (GetCurrentThreadId() == frame_thread.load() && !hooked.exchange(true)) {
+            SetEvent(waiting);
+        }
+    });
+    XrResult released_result = XR_ERROR_RUNTIME_FAILURE;
+    XrResult end_result = XR_ERROR_RUNTIME_FAILURE;
+    const std::size_t shown_before = ShownCount();
+    std::thread game_thread;
+    std::thread frame;
+    // The frame rendered and released on this thread; then the game thread
+    // takes the lock, and the frame's thread ends the frame.
+    const XrResult framed = Frame(
+        app, game, {&left, &right}, {FrameColor(3, 0), FrameColor(3, 1)}, eyes, &depth, nullptr, false, {},
+        [&](const XrFrameEndInfo& end) {
+            game_thread = std::thread([&] {
+                // The next frame's image, acquired and rendered before the lock.
+                const std::uint32_t index = Acquire(app, next);
+                Draw(game, next.images[index], FrameColor(2, 0));
+                multithread->Enter();
+                SetEvent(entered);
+                await(waiting, "the bridge did not come to the device's lock");
+                XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                released_result = app.api.release(next.swapchain, &release);
+                SetEvent(released);
+                multithread->Leave();
+            });
+            await(entered, "the game thread did not enter the device's lock");
+            frame = std::thread([&] {
+                frame_thread = GetCurrentThreadId();
+                end_result = app.api.end_frame(app.session, &end);
+                SetEvent(ended);
+            });
+            await(released, "the game thread's xrReleaseSwapchainImage did not return");
+            await(ended, "the frame's xrEndFrame did not return");
+            game_thread.join();
+            frame.join();
+            return end_result;
+        });
+    Check(framed == end_result, name + ": the frame's result");
+    Peer::Bridge().SetContextWaitHookForTest(nullptr);
+    for (const HANDLE event : {entered, waiting, released, ended}) CloseHandle(event);
+    Check(hooked, name + ": the frame's thread came to the device's lock while the game thread held it");
+    Check(released_result == XR_SUCCESS, name + ": the release " + std::to_string(released_result));
+    Check(end_result == XR_SUCCESS, name + ": the frame " + std::to_string(end_result));
+    const std::vector<ShownFrame> shown = Shown(shown_before);
+    Check(shown.size() == 1 && shown[0].views.size() == 2 && Near(shown[0].views[0].texel, FrameColor(3, 0)) &&
+              Near(shown[0].views[1].texel, FrameColor(3, 1)) && shown[0].views[0].depth,
+          name + ": the frame is shown, with its depth");
+    // And on: the next frame's image too.
+    Check(Frame(app, game, {&left, &right}, {FrameColor(4, 0), FrameColor(4, 1)}, eyes, &depth) == XR_SUCCESS,
+          name + ": a frame after");
+    CheckValidation(game, name);
+    StopApp(app);
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// 4c-4e. Lock order past the bridge's staging: the device's lock
+// (ID3D11Multithread::Enter) before any of the layer's locks, wherever the
+// layer uses the game's immediate context under them (GameContextLock). A
+// game thread holds the device's lock through an OpenXR call that takes the
+// layer's lock (`game_call`; xrLocateViews, as a render thread may), while
+// `layer_call`, on a thread of its own, uses the game's context under the
+// layer's locks. Driven by events:
+//  - `layer_call`'s thread comes to the layer's GameContextLock (its test
+//    hook): it holds none of the layer's locks yet;
+//  - there, the game thread enters the device's lock (and runs
+//    `while_entered`, a release landing at that moment), and the hook
+//    returns;
+//  - the game thread gives `layer_call` 200 ms (to take the layer's locks,
+//    would it use the context without the device's lock first), then makes
+//    `game_call` and lets the lock go.
+// Both calls must return. A layer call that took its locks first and then
+// waited for the device's lock deadlocks with `game_call`, which waits for
+// those locks: each wait ends the process after 10 s (FAILED). `hold`: which
+// of `layer_call`'s holds of the device's lock is the one (1: its first).
+struct HeldContextRun {
+    bool hooked{false}; // `layer_call` came to the device's lock before its own locks
+    DWORD layer_thread{0};
+    XrResult game_result{XR_ERROR_RUNTIME_FAILURE};
+    XrResult layer_result{XR_ERROR_RUNTIME_FAILURE};
+};
+
+HeldContextRun RunWithHeldContext(const std::string& name, ID3D11Multithread* multithread,
+                                  const std::function<XrResult()>& layer_call,
+                                  const std::function<XrResult()>& game_call,
+                                  const std::function<void()>& while_entered = {}, int hold = 1) {
+    const auto await = [&](HANDLE event, const char* what) {
+        if (WaitForSingleObject(event, 10000) != WAIT_OBJECT_0) {
+            std::cout << "FAILED: " << name << ": " << what
+                      << " within 10 s: deadlocked (a call waits for the device's lock holding a lock of the "
+                         "layer's that the game thread, holding the device's lock, waits for)\n"
+                      << std::flush;
+            TerminateProcess(GetCurrentProcess(), 1);
+        }
+    };
+    const HANDLE at_lock = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE called = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::atomic<DWORD> layer_thread{0};
+    std::atomic<bool> hooked{false};
+    std::atomic<int> holds{0};
+    Peer::GameContext().SetWaitHookForTest([&] {
+        if (GetCurrentThreadId() != layer_thread.load() || ++holds != hold || hooked.exchange(true)) return;
+        SetEvent(at_lock);
+        await(entered, "the game thread did not enter the device's lock");
+    });
+    HeldContextRun run;
+    std::thread game_thread([&] {
+        await(at_lock, "the layer's call did not come to the device's lock ahead of its own locks");
+        multithread->Enter();
+        if (while_entered) while_entered();
+        SetEvent(entered);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        run.game_result = game_call();
+        SetEvent(called);
+        multithread->Leave();
+    });
+    std::thread layer_thread_([&] {
+        layer_thread = GetCurrentThreadId();
+        run.layer_result = layer_call();
+        SetEvent(done);
+    });
+    await(called, "the game thread's call did not return");
+    await(done, "the layer's call did not return");
+    game_thread.join();
+    layer_thread_.join();
+    Peer::GameContext().SetWaitHookForTest(nullptr);
+    for (const HANDLE event : {at_lock, entered, called, done}) CloseHandle(event);
+    run.hooked = hooked;
+    run.layer_thread = layer_thread;
+    return run;
+}
+
+// The game's views at the runtime's time (xrLocateViews takes the layer's lock).
+XrResult LocateViewsNow(App& app, XrViewConfigurationType configuration, std::uint32_t count) {
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = configuration;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        locate.displayTime = g_runtime.time;
+    }
+    locate.space = app.space;
+    XrViewState state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 4> views{};
+    for (XrView& view : views) view.type = XR_TYPE_VIEW;
+    std::uint32_t located = 0;
+    return app.api.locate_views(app.session, &locate, &state, count, &located, views.data());
+}
+
+// The game's device's lock, with protection on (as a game entering it has).
+ComPtr<ID3D11Multithread> ProtectedContext(Game& game, const std::string& name) {
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(game.context.As(&multithread)), name + ": the game's context has ID3D11Multithread");
+    multithread->SetMultithreadProtected(TRUE);
+    return multithread;
+}
+
+// 4c. Quad views in a bridged session: the layer composes the four views on
+// the game's context in xrEndFrame, into swapchains of its own whose acquire
+// and release (the bridge's wait, and its "written" signal: a release
+// StageReleases never stages) also use the game's context, all under the
+// layer's locks. A game thread holds the device's lock through xrLocateViews
+// meanwhile.
+void TestQuadViewsUnderHeldContext(Game& game) {
+    const std::string name = "quad-views-context-held";
+    CaseSettings settings;
+    settings.quadviews = true;
+    BeginCase(name, game, settings);
+    g_runtime.recommended_width = g_runtime.recommended_height = kQuadStereoSize;
+    g_runtime.paced = true;
+    ComPtr<ID3D11Multithread> multithread = ProtectedContext(game, name);
+    App app = StartApp({kD3D11Extension, kQuadViewsExtension, kFoveatedExtension});
+    std::uint32_t count = 0;
+    std::array<XrViewConfigurationView, 4> configuration{};
+    for (XrViewConfigurationView& view : configuration) view.type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
+    Check(app.api.enumerate_views(app.api.instance, app.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO, 4,
+                                  &count, configuration.data()) == XR_SUCCESS &&
+              count == 4,
+          name + ": four quad views");
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          name + ": a bridged session");
+    Check(!Peer::ToggleFrameGen(), name + ": Frame Generation toggled off (the layer composes)");
+    BeginSession(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO);
+    QuadTargets targets;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        targets[i] = MakeTarget(app,
+                                ColorInfo(1, configuration[i].recommendedImageRectWidth,
+                                          configuration[i].recommendedImageRectHeight),
+                                i < 2 ? "a peripheral view" : "a focus view");
+    }
+    for (int frame = 0; frame < 3; ++frame) {
+        Check(QuadFrame(app, game, targets, frame) == XR_SUCCESS, name + ": a quad frame before");
+    }
+    const std::uint64_t composed = Peer::QuadFrames().first;
+    const std::size_t shown_before = ShownCount();
+    HeldContextRun run;
+    QuadFrameOptions options;
+    options.end_frame = [&](const XrFrameEndInfo& end) {
+        run = RunWithHeldContext(
+            name, multithread.Get(), [&] { return app.api.end_frame(app.session, &end); },
+            [&] { return LocateViewsNow(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO, 4); });
+        return run.layer_result;
+    };
+    const XrResult framed = QuadFrame(app, game, targets, 3, options);
+    Check(framed == XR_SUCCESS, name + ": the frame " + std::to_string(framed));
+    Check(run.hooked, name + ": xrEndFrame came to the device's lock before the layer's locks");
+    Check(run.game_result == XR_SUCCESS, name + ": the game thread's xrLocateViews " + std::to_string(run.game_result));
+    Check(Peer::QuadFrames().first == composed + 1, name + ": the frame was composed on Direct3D 11");
+    const std::array<XrSwapchain, 2> outputs = Peer::CompositorOutputs();
+    const std::vector<ShownFrame> shown = Shown(shown_before);
+    Check(shown.size() == 1 && shown[0].views.size() == 2 && shown[0].views[0].swapchain == outputs[0] &&
+              shown[0].views[1].swapchain == outputs[1],
+          name + ": the runtime shows the composed frame");
+    Check(QuadFrame(app, game, targets, 4) == XR_SUCCESS && Peer::QuadFrames().first == composed + 2,
+          name + ": a frame after");
+    CheckValidation(game, name);
+    StopApp(app);
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// 4d. A release landing between xrEndFrame's staging (StageReleases) and its
+// locks: the hand-over runs its Direct3D 11 half under the layer's locks
+// (Released). The game thread makes that release while holding the device's
+// lock, then xrLocateViews.
+void TestUnstagedReleaseUnderHeldContext(Game& game) {
+    const std::string name = "unstaged-release-context-held";
+    BeginCase(name, game);
+    ComPtr<ID3D11Multithread> multithread = ProtectedContext(game, name);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          name + ": a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target late = MakeTarget(app, ColorInfo(), "an image released late");
+    const std::array<Eye, 2> eyes{{{&left, 0}, {&right, 0}}};
+    Check(Frame(app, game, {&left, &right}, {FrameColor(1, 0), FrameColor(1, 1)}, eyes) == XR_SUCCESS,
+          name + ": a first frame");
+    // Acquired and rendered before; released by the game thread, holding the
+    // device's lock, once xrEndFrame's staging is done.
+    Draw(game, late.images[Acquire(app, late)], FrameColor(2, 0));
+    // The bridge's waits for the context on the frame's thread after its
+    // staging: the late release's hand-over.
+    std::atomic<DWORD> frame_thread{0};
+    std::atomic<bool> staged{false};
+    std::atomic<int> unstaged_holds{0};
+    Peer::Bridge().SetContextWaitHookForTest([&] {
+        if (GetCurrentThreadId() == frame_thread.load() && staged.load()) ++unstaged_holds;
+    });
+    HeldContextRun run;
+    XrResult late_release = XR_ERROR_RUNTIME_FAILURE;
+    const std::size_t shown_before = ShownCount();
+    const XrResult framed = Frame(
+        app, game, {&left, &right}, {FrameColor(3, 0), FrameColor(3, 1)}, eyes, nullptr, nullptr, false, {},
+        [&](const XrFrameEndInfo& end) {
+            run = RunWithHeldContext(
+                name, multithread.Get(),
+                [&] {
+                    frame_thread = GetCurrentThreadId();
+                    return app.api.end_frame(app.session, &end);
+                },
+                [&] { return LocateViewsNow(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2); },
+                [&] {
+                    staged = true;
+                    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                    late_release = app.api.release(late.swapchain, &release);
+                });
+            return run.layer_result;
+        });
+    Peer::Bridge().SetContextWaitHookForTest(nullptr);
+    Check(framed == XR_SUCCESS, name + ": the frame " + std::to_string(framed));
+    Check(run.hooked, name + ": xrEndFrame came to the device's lock before the layer's locks");
+    Check(late_release == XR_SUCCESS, name + ": the late release " + std::to_string(late_release));
+    Check(run.game_result == XR_SUCCESS, name + ": the game thread's xrLocateViews " + std::to_string(run.game_result));
+    Check(unstaged_holds.load() >= 1, name + ": the late release was handed over unstaged, in xrEndFrame");
+    const std::vector<ShownFrame> shown = Shown(shown_before);
+    Check(shown.size() == 1 && shown[0].views.size() == 2 && Near(shown[0].views[0].texel, FrameColor(3, 0)) &&
+              Near(shown[0].views[1].texel, FrameColor(3, 1)),
+          name + ": the frame is shown");
+    Check(Frame(app, game, {&left, &right}, {FrameColor(4, 0), FrameColor(4, 1)}, eyes) == XR_SUCCESS,
+          name + ": a frame after");
+    Render(app, game, late, FrameColor(5, 0));
+    CheckValidation(game, name);
+    StopApp(app);
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// 4e. The game's own Direct3D 11 session, Frame Generation engaged: it
+// captures each released eye image on the game's context, under the
+// layer's lock (and its own). The game releases the left eye on one thread
+// while another holds the device's lock through xrLocateViews.
+void TestNativeCaptureUnderHeldContext(Game& game) {
+    const std::string name = "native-capture-context-held";
+    CaseSettings settings;
+    settings.frame_multiplier = "2x";
+    BeginCase(name, game, settings);
+    SetEnv("VECTORXR_D3D11_BRIDGE", "off");
+    g_runtime.paced = true;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    ComPtr<ID3D11Multithread> multithread = ProtectedContext(game, name);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+              !Peer::Bridge().Active() && g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR,
+          name + ": the game's own Direct3D 11 session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const std::array<Eye, 2> eyes{{{&left, 0}, {&right, 0}}};
+    int frame = 0;
+    do {
+        Check(Frame(app, game, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)}, eyes) == XR_SUCCESS,
+              name + ": a frame before");
+    } while (Peer::FrameGen().generated == 0 && ++frame < 96);
+    Check(Peer::FrameGen().generated > 0, name + ": Frame Generation generates frames");
+
+    // One frame, its left eye released on a thread of its own.
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, name + ": xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, name + ": xrBeginFrame");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = app.space;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) view.type = XR_TYPE_VIEW;
+    std::uint32_t located_count = 0;
+    Check(app.api.locate_views(app.session, &locate, &view_state, 2, &located_count, located.data()) == XR_SUCCESS,
+          name + ": xrLocateViews");
+    const std::uint32_t left_index = Acquire(app, left);
+    const std::uint32_t right_index = Acquire(app, right);
+    Draw(game, left.images[left_index], FrameColor(100, 0));
+    Draw(game, right.images[right_index], FrameColor(100, 1));
+    Release(app, right);
+    g_capture_context = game.context.Get();
+    const HeldContextRun run = RunWithHeldContext(
+        name, multithread.Get(),
+        [&] {
+            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            return app.api.release(left.swapchain, &release);
+        },
+        [&] { return LocateViewsNow(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2); });
+    g_capture_context = nullptr;
+    Check(run.hooked, name + ": the release came to the device's lock before the layer's lock");
+    Check(run.layer_result == XR_SUCCESS, name + ": the release " + std::to_string(run.layer_result));
+    Check(run.game_result == XR_SUCCESS, name + ": the game thread's xrLocateViews " + std::to_string(run.game_result));
+    Check(g_capture_threads.Count(run.layer_thread) == 1, name + ": Frame Generation captured the released image");
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = eyes[eye].target->swapchain;
+        views[eye].subImage.imageRect = {{0, 0},
+                                         {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    Check(app.api.end_frame(app.session, &end) == XR_SUCCESS, name + ": xrEndFrame");
+    Check(Frame(app, game, {&left, &right}, {FrameColor(101, 0), FrameColor(101, 1)}, eyes) == XR_SUCCESS,
+          name + ": a frame after");
+    CheckValidation(game, name);
+    StopApp(app);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    SetEnv("VECTORXR_D3D11_BRIDGE", "");
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// 4f. The game's own Direct3D 11 session, Frame Generation engaged: its
+// xrEndFrame generates on the game's context (inline: no presenter thread on
+// Direct3D 11), holding Frame Generation's GPU lock, which its captures at a
+// release take as well (under the layer's lock). A game thread holds the
+// device's lock through a release of the next frame's left eye meanwhile.
+void TestNativeGenerateUnderHeldContext(Game& game) {
+    const std::string name = "native-generate-context-held";
+    CaseSettings settings;
+    settings.frame_multiplier = "2x";
+    BeginCase(name, game, settings);
+    SetEnv("VECTORXR_D3D11_BRIDGE", "off");
+    g_runtime.paced = true;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    ComPtr<ID3D11Multithread> multithread = ProtectedContext(game, name);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+              !Peer::Bridge().Active() && g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR,
+          name + ": the game's own Direct3D 11 session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const std::array<Eye, 2> eyes{{{&left, 0}, {&right, 0}}};
+    int frame = 0;
+    do {
+        Check(Frame(app, game, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)}, eyes) == XR_SUCCESS,
+              name + ": a frame before");
+    } while (Peer::FrameGen().generated == 0 && ++frame < 96);
+    Check(Peer::FrameGen().generated > 0, name + ": Frame Generation generates frames");
+    const std::uint64_t generated = Peer::FrameGen().generated;
+    HeldContextRun run;
+    XrResult released = XR_ERROR_RUNTIME_FAILURE;
+    const XrResult framed = Frame(
+        app, game, {&left, &right}, {FrameColor(200, 0), FrameColor(200, 1)}, eyes, nullptr, nullptr, false, {},
+        [&](const XrFrameEndInfo& end) {
+            // The next frame's left eye, acquired and rendered ahead.
+            const std::uint32_t next = Acquire(app, left);
+            Draw(game, left.images[next], FrameColor(201, 0));
+            g_capture_context = game.context.Get();
+            // xrEndFrame's own hold first (for the layer's locks), then Frame
+            // Generation's, before its GPU lock.
+            run = RunWithHeldContext(
+                name, multithread.Get(), [&] { return app.api.end_frame(app.session, &end); },
+                [&] {
+                    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                    released = app.api.release(left.swapchain, &release);
+                    return released;
+                },
+                {}, 2);
+            g_capture_context = nullptr;
+            return run.layer_result;
+        });
+    Check(framed == XR_SUCCESS, name + ": the frame " + std::to_string(framed));
+    Check(run.hooked, name + ": Frame Generation came to the device's lock before its GPU lock");
+    Check(released == XR_SUCCESS, name + ": the game thread's release " + std::to_string(released));
+    Check(g_execute_threads.Count(run.layer_thread) >= 1 && Peer::FrameGen().generated > generated,
+          name + ": the frame's xrEndFrame generated frames");
+    // The next frame: its right eye, and an end without layers.
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, name + ": xrWaitFrame after");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, name + ": xrBeginFrame after");
+    Render(app, game, right, FrameColor(201, 1));
+    XrFrameEndInfo empty{XR_TYPE_FRAME_END_INFO};
+    empty.displayTime = state.predictedDisplayTime;
+    empty.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    Check(app.api.end_frame(app.session, &empty) == XR_SUCCESS, name + ": an empty frame after");
+    Check(Frame(app, game, {&left, &right}, {FrameColor(202, 0), FrameColor(202, 1)}, eyes) == XR_SUCCESS,
+          name + ": a frame after");
+    CheckValidation(game, name);
+    StopApp(app);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    SetEnv("VECTORXR_D3D11_BRIDGE", "");
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// 4b. VECTORXR_D3D11_BRIDGE_DEPTH=private, or Frame Generation's Use game
+// depth off (by_profile): depth stays the game's own, as before the bridge
+// mirrored it. Its swapchain's calls reach the runtime; its depth never
+// reaches submitted frames, the rest of each view's chain does, and the game's
+// multithread protection is left as it was.
+void TestPrivateDepthSession(Game& game, bool by_profile) {
+    CaseSettings case_settings;
+    case_settings.use_game_depth = !by_profile;
+    BeginCase(by_profile ? "private-depth-profile" : "private-depth", game, case_settings);
+    const std::string switch_name =
+        by_profile ? "Frame Generation's Use game depth is off" : "VECTORXR_D3D11_BRIDGE_DEPTH=private";
+    if (!by_profile) SetEnv("VECTORXR_D3D11_BRIDGE_DEPTH", "private");
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "private depth: a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target depth = MakeTarget(app, DepthInfo(2), "depth");
+    Check(Peer::Bridge().Bridged(depth.swapchain) && Peer::Bridge().Unmirrored(depth.swapchain) &&
+              Contains(Peer::Bridge().Describe(depth.swapchain), switch_name),
+          "the depth swapchain is the game's own: " + Peer::Bridge().Describe(depth.swapchain));
+    if (by_profile) {
+        ComPtr<ID3D11Multithread> multithread;
+        Check(SUCCEEDED(game.context.As(&multithread)) && !multithread->GetMultithreadProtected(),
+              "private depth (profile): the game's multithread protection stays off");
+        Check(!Contains(Peer::Log(), "stays the game's own (its depth is left out of submitted frames)"),
+              "private depth (profile): no error line per depth swapchain for the user's own choice");
+    }
+    constexpr int kFrames = 6;
+    for (int frame = 0; frame < kFrames; ++frame) {
+        const std::vector<Color> colors{FrameColor(frame + 30, 0), FrameColor(frame + 30, 1)};
+        const XrResult result = Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, &depth,
+                                     nullptr, true); // explicit unknown metadata: preserve it in pass-through
+        Check(result == XR_SUCCESS, "private depth frame " + std::to_string(frame) + ": xrEndFrame " +
+                                        std::to_string(result));
+        const ShownFrame& shown = g_runtime.frames.back();
+        Check(shown.views.size() == 2, "private depth frame: two views");
+        for (int eye = 0; eye < 2; ++eye) {
+            const ShownView& view = shown.views[eye];
+            Check(!view.depth, "the runtime gets no private depth in a bridged session's views");
+            Check(view.next_type == kApplicationStructType,
+                  "the rest of a view's chain reaches the runtime: " + std::to_string(view.next_type));
+            Check(Near(view.texel, colors[eye]), "private depth frame " + std::to_string(frame) + " eye " +
+                                                     std::to_string(eye) + ": the runtime shows " +
+                                                     (view.texel ? Text(*view.texel) : "nothing"));
+        }
+    }
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        const StandInSwapchain* runtime = FindSwapchain(depth.swapchain);
+        Check(runtime && runtime->acquires == kFrames && runtime->waits == kFrames && runtime->releases == kFrames,
+              "the private depth swapchain's acquires, waits and releases reach the runtime");
+    }
+    Check(Contains(Peer::Log(), "keeps the game's depth to itself"), "the log tells depth is left out");
+    Check(SummaryValue(Peer::Bridge().Summary(), "depthCopies") == 0, "no depth copies: " + Peer::Bridge().Summary());
+    CheckValidation(game, "private depth");
+    StopApp(app);
+    if (!by_profile) SetEnv("VECTORXR_D3D11_BRIDGE_DEPTH", "");
+    EndCase(game);
+}
+
+// 1d. Depth sub-images a runtime refuses: mirrored depth reaches the runtime,
+// and PimaxXR and Virtual Desktop fail the whole xrEndFrame for a depth rect
+// outside its image (as the stand-in does, SubImageRefusal). UEVR places its
+// depth rect by its colour image's size, which an upscaler or screen
+// percentage makes larger than its depth image. Such depth is left out of
+// every view of its projection (never one eye's alone), never clamped, and
+// the frame's colour and the rest of the views' chains still reach the
+// runtime; valid depth, at a nonzero origin, side by side or on either slice,
+// reaches it as before. Standing by (each frame passed through), and with
+// Frame Generation engaged (frames presented from its copies of the game's,
+// and the game's depth no longer sent to Frame Generation either).
+// `bridged` false: the game's own Direct3D 11 session (VECTORXR_D3D11_BRIDGE=off),
+// whose depth the layer forwards as it is: the same depth is left out.
+void TestDepthRects(Game& game, bool engaged, bool bridged = true) {
+    CaseSettings settings;
+    if (engaged) settings.frame_multiplier = "2x";
+    const std::string name =
+        std::string(engaged ? "depth-rects-engaged" : "depth-rects") + (bridged ? "" : "-native-d3d11");
+    BeginCase(name, game, settings);
+    if (!bridged) SetEnv("VECTORXR_D3D11_BRIDGE", "off");
+    if (engaged) {
+        g_runtime.paced = true;
+        Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    }
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+              Peer::Bridge().Active() == bridged &&
+              g_runtime.binding == (bridged ? XR_TYPE_GRAPHICS_BINDING_D3D12_KHR : XR_TYPE_GRAPHICS_BINDING_D3D11_KHR),
+          name + (bridged ? ": a bridged session" : ": the game's own Direct3D 11 session"));
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const auto depth_target = [&](std::uint32_t width, std::uint32_t height, const char* what) {
+        XrSwapchainCreateInfo info = DepthInfo(2);
+        info.width = width;
+        info.height = height;
+        Target target = MakeTarget(app, info, what);
+        Check(!Peer::Bridge().Unmirrored(target.swapchain), std::string(what) + ": mirrored");
+        return target;
+    };
+    // The colour images are 64x48. An upscaler's smaller depth, a larger
+    // one, and one image for both eyes side by side.
+    Target smaller = depth_target(48, 36, "smaller depth");
+    Target larger = depth_target(80, 60, "larger depth");
+    Target side_by_side = depth_target(2 * kWidth, kHeight, "side-by-side depth");
+    constexpr std::int32_t kMax = std::numeric_limits<std::int32_t>::max();
+    struct Case {
+        const char* what;
+        const Target* depth;
+        std::array<XrRect2Di, 2> rects;
+        std::array<std::uint32_t, 2> slices;
+        bool kept;
+    };
+    const XrRect2Di colour_rect{{0, 0}, {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    const std::vector<Case> cases{
+        {"valid, both slices", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, true},
+        {"the colour's rect on a smaller depth image (UEVR)", &smaller, {colour_rect, colour_rect}, {0, 1}, false},
+        {"one texel too wide, left eye only", &smaller, {{{{0, 0}, {49, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"one texel too high, right eye only", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 37}}}}, {0, 1}, false},
+        {"valid at a nonzero origin on a larger image", &larger, {{{{8, 6}, {64, 48}}, {{16, 12}, {64, 48}}}}, {0, 1},
+         true},
+        {"one texel past the larger image's bottom", &larger, {{{{8, 13}, {64, 48}}, {{8, 12}, {64, 48}}}}, {0, 1},
+         false},
+        {"side by side, one slice", &side_by_side, {{colour_rect, {{static_cast<std::int32_t>(kWidth), 0}, colour_rect.extent}}},
+         {0, 0}, true},
+        {"side by side, the right eye one texel past",
+         &side_by_side,
+         {{colour_rect, {{static_cast<std::int32_t>(kWidth) + 1, 0}, colour_rect.extent}}},
+         {0, 0},
+         false},
+        {"a negative offset", &smaller, {{{{-1, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"a zero extent", &smaller, {{{{0, 0}, {0, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"a negative extent", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, -36}}}}, {0, 1}, false},
+        {"a slice past the image", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 2}, false},
+        {"an offset whose far edge overflows", &smaller, {{{{kMax, 0}, {1, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"an extent whose far edge overflows", &smaller, {{{{0, 0}, {48, 36}}, {{1, 1}, {kMax, kMax}}}}, {0, 1}, false},
+        {"valid again", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, true},
+    };
+
+    // Why the runtime refused its first frame, if it did (its thread may be Frame Generation's).
+    const auto refusal = [] {
+        std::scoped_lock lock(g_runtime_mutex);
+        return std::to_string(g_runtime.refused_frames) + " refused" +
+               (g_runtime.refusal.empty() ? "" : ", the first: " + g_runtime.refusal);
+    };
+    int frame_index = 0;
+    const auto run = [&](const Case& test, int frames) {
+        for (int frame = 0; frame < frames; ++frame) {
+            const std::string at = name + ": " + test.what + ", frame " + std::to_string(frame);
+            const std::vector<Color> colors{FrameColor(frame_index + 50, 0), FrameColor(frame_index + 50, 1)};
+            ++frame_index;
+            const std::size_t before = ShownCount();
+            const XrResult result =
+                Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, test.depth, nullptr, !engaged,
+                      [&](std::array<XrCompositionLayerDepthInfoKHR, 2>& depth) {
+                          for (int eye = 0; eye < 2; ++eye) {
+                              depth[eye].subImage.imageRect = test.rects[eye];
+                              depth[eye].subImage.imageArrayIndex = test.slices[eye];
+                          }
+                      });
+            Check(result == XR_SUCCESS, at + ": xrEndFrame " + std::to_string(result) + " (" + refusal() + ")");
+            if (engaged) continue; // shown from Frame Generation's thread, checked below
+            const std::vector<ShownFrame> shown = Shown(before);
+            Check(shown.size() == 1 && shown[0].views.size() == 2, at + ": one frame of two views shown");
+            for (int eye = 0; eye < 2; ++eye) {
+                const ShownView& view = shown[0].views[eye];
+                Check(view.depth == test.kept, at + ": eye " + std::to_string(eye) + (test.kept ? " has" : " has no") +
+                                                   " depth");
+                Check(view.next_type == (test.kept ? XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR : kApplicationStructType) &&
+                          (!test.kept || view.after_depth == kApplicationStructType),
+                      at + ": the rest of the view's chain reaches the runtime");
+                Check(!test.kept || view.depth_swapchain == test.depth->swapchain,
+                      at + ": the view's depth is the game's");
+                Check(Near(view.texel, colors[eye]), at + ": eye " + std::to_string(eye) + " shows " +
+                                                         (view.texel ? Text(*view.texel) : "nothing") + ", rendered " +
+                                                         Text(colors[eye]));
+            }
+        }
+    };
+
+    if (!engaged) {
+        for (const Case& test : cases) run(test, 2);
+    } else {
+        // Engaged on valid depth first.
+        int frames = 0;
+        do {
+            run(cases.front(), 1);
+        } while (Peer::FrameGen().generated == 0 && ++frames < 96);
+        Check(Peer::FrameGen().generated > 0, name + ": Frame Generation generates frames");
+        // Every refused case, each for a while: once the frames before them
+        // are shown, nothing the runtime gets carries depth, and Frame
+        // Generation is sent none.
+        for (std::size_t i = 1; i + 1 < cases.size(); ++i) {
+            if (cases[i].kept) continue;
+            run(cases[i], 4);
+            const std::size_t from = ShownCount();
+            const std::uint64_t generated = Peer::FrameGen().generated;
+            run(cases[i], 6);
+            const std::vector<ShownFrame> shown = Shown(from);
+            Check(!shown.empty(), name + ": " + cases[i].what + ": frames shown");
+            for (const ShownFrame& frame : shown) {
+                for (const ShownView& view : frame.views) {
+                    Check(!view.depth, name + ": " + cases[i].what + ": no frame shown carries the refused depth");
+                }
+            }
+            Check(Peer::FrameGen().generated > generated,
+                  name + ": " + cases[i].what + ": Frame Generation keeps generating");
+            Check(Peer::FrameGen().depth == depthxr::FrameGenDepthState::kNotSent,
+                  name + ": " + cases[i].what + ": Frame Generation is sent no depth (" +
+                      depthxr::ToString(Peer::FrameGen().depth) + ")");
+        }
+        // Valid depth again reaches the runtime with the game's frames.
+        run(cases.back(), 4);
+        const std::size_t from = ShownCount();
+        run(cases.back(), 8);
+        bool depth_shown = false;
+        for (const ShownFrame& frame : Shown(from)) {
+            for (const ShownView& view : frame.views) {
+                depth_shown = depth_shown || (view.depth && view.depth_swapchain == smaller.swapchain);
+            }
+        }
+        Check(depth_shown, name + ": valid depth reaches the runtime again");
+        Check(Peer::FrameGen().depth != depthxr::FrameGenDepthState::kNotSent,
+              name + ": Frame Generation is sent depth again (" + depthxr::ToString(Peer::FrameGen().depth) + ")");
+    }
+    Check(refusal() == "0 refused", name + ": the runtime refused no frame (" + refusal() + ")");
+    const std::string log = Peer::Log();
+    Check(Count(log, "The game's depth sub-image lies outside its depth image") == 1,
+          name + ": the log tells once of depth outside its image");
+    Check(!Contains(log, "keeps the game's depth to itself"), name + ": no depth swapchain is private");
+    CheckValidation(game, name);
+    StopApp(app);
+    if (engaged) {
+        Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    }
+    if (!bridged) SetEnv("VECTORXR_D3D11_BRIDGE", "");
+    Check(GameRuns(game), "the game's device works");
     EndCase(game);
 }
 
@@ -4239,8 +5483,9 @@ Color QuadLayerColor(int release) {
 }
 
 // Each eye's view of the side-by-side session, and the quad layer's swapchain.
-constexpr std::uint32_t kSideBySideEyeWidth = 128;
-constexpr std::uint32_t kSideBySideEyeHeight = 96;
+// BRIDGE_TEST_EYE=WxH sizes the eyes for the GPU-bound cases.
+std::uint32_t g_side_by_side_eye_width = 128;
+std::uint32_t g_side_by_side_eye_height = 96;
 constexpr std::uint32_t kQuadLayerSize = 128;
 // How long the game's GPU work of a loaded frame takes (three refreshes).
 constexpr DWORD kGameLoadMs = 30;
@@ -4380,8 +5625,25 @@ struct SideBySideFrameOptions {
     bool quad_layer{true};   // the UI rendered, released and submitted as a quad layer after the projection
     bool depth{false};       // depth rendered and chained to each view, its half
     GameLoad* load{nullptr}; // the game's work held back from before the eyes' rendering
+    std::function<void()> before_render; // the game's own CPU and GPU work, before the eyes' rendering
     bool unknown_after_depth{false}; // separate from the supported depth-only generation case
+    // With quad_layer: the quad's image is acquired, waited for, drawn and
+    // released after the eyes' release, right before xrEndFrame, as
+    // OpenKneeboard above VectorXR does inside the game's xrEndFrame
+    // (OpenXRKneeboard.cpp), not at the frame's start.
+    bool kneeboard{false};
 };
+
+// The game's time in its calls on the side-by-side session's swapchains
+// (acquire with its wait, release), per kind, milliseconds since cleared.
+struct CallTimes {
+    double eyes_acquire{0}, eyes_release{0}, ui_acquire{0}, ui_release{0}, end{0}, wait{0}, max_frame{0};
+    int frames{0};
+};
+CallTimes g_call_times;
+double MsSince(std::chrono::steady_clock::time_point since) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - since).count();
+}
 
 // One frame of the X-Plane-shaped game: both eyes rendered into their halves
 // of one image and released, depth likewise, then the UI rendered and
@@ -4393,7 +5655,9 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
     const std::string at = "side-by-side frame " + std::to_string(frame);
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState state{XR_TYPE_FRAME_STATE};
+    const auto frame_start = std::chrono::steady_clock::now();
     Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, at + ": xrWaitFrame");
+    g_call_times.wait += MsSince(frame_start);
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
     Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, at + ": xrBeginFrame");
     XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
@@ -4408,32 +5672,49 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
               located_count == 2,
           at + ": xrLocateViews");
 
+    auto timed = std::chrono::steady_clock::now();
     const std::uint32_t eyes_index = Acquire(app, session.eyes);
+    g_call_times.eyes_acquire += MsSince(timed);
     const std::uint32_t depth_index = options.depth ? Acquire(app, session.depth) : 0;
-    const std::uint32_t ui_index = options.quad_layer ? Acquire(app, session.ui) : 0;
+    timed = std::chrono::steady_clock::now();
+    std::uint32_t ui_index = options.quad_layer && !options.kneeboard ? Acquire(app, session.ui) : 0;
+    g_call_times.ui_acquire += MsSince(timed);
+    ++g_call_times.frames;
     if (options.load) {
         options.load->HoldGame(game);
+    }
+    if (options.before_render) {
+        options.before_render();
     }
     ClearHalves(game, session.eyes.images[eyes_index], {SideBySideColor(frame, 0), SideBySideColor(frame, 1)});
     if (options.depth) {
         ClearDepth(game, session.depth.images[depth_index], 0);
     }
+    timed = std::chrono::steady_clock::now();
     Release(app, session.eyes);
+    g_call_times.eyes_release += MsSince(timed);
     if (options.depth) {
         Release(app, session.depth);
     }
+    if (options.quad_layer && options.kneeboard) {
+        timed = std::chrono::steady_clock::now();
+        ui_index = Acquire(app, session.ui);
+        g_call_times.ui_acquire += MsSince(timed);
+    }
     if (options.quad_layer) {
         Draw(game, session.ui.images[ui_index], QuadLayerColor(session.ui_releases++));
+        timed = std::chrono::steady_clock::now();
         Release(app, session.ui);
+        g_call_times.ui_release += MsSince(timed);
     }
 
     XrBaseInStructure after_depth{kApplicationStructType};
     std::array<XrCompositionLayerDepthInfoKHR, 2> depth_infos{};
     std::array<XrCompositionLayerProjectionView, 2> views{};
     for (std::uint32_t eye = 0; eye < 2; ++eye) {
-        const XrRect2Di half{{static_cast<std::int32_t>(eye * kSideBySideEyeWidth), 0},
-                             {static_cast<std::int32_t>(kSideBySideEyeWidth),
-                              static_cast<std::int32_t>(kSideBySideEyeHeight)}};
+        const XrRect2Di half{{static_cast<std::int32_t>(eye * g_side_by_side_eye_width), 0},
+                             {static_cast<std::int32_t>(g_side_by_side_eye_width),
+                              static_cast<std::int32_t>(g_side_by_side_eye_height)}};
         views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
         views[eye].pose = located[eye].pose;
         views[eye].fov = located[eye].fov;
@@ -4470,7 +5751,10 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
     end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     end.layerCount = options.quad_layer ? 2 : 1;
     end.layers = layers;
+    timed = std::chrono::steady_clock::now();
     const XrResult result = app.api.end_frame(app.session, &end);
+    g_call_times.end += MsSince(timed);
+    g_call_times.max_frame = std::max(g_call_times.max_frame, MsSince(frame_start));
     Check(result == XR_SUCCESS, at + ": xrEndFrame " + std::to_string(result));
     if (options.quad_layer) {
         // A bridged release reaches the runtime at the frame's end.
@@ -4520,18 +5804,19 @@ std::string Spread(std::vector<double> values) {
 // otherwise, for what that costs): the quad layer's
 // releases are kept lazy instead, so under the same load no frame of Frame
 // Generation's waits for the game's work on the runtime's queue (the
-// game's next wait on the quad's swapchain waits for its release on the
-// CPU), and every refresh shows the quad's newest finished release, the
-// game's latest or the one before it; the runtime still sees every call on
-// it in order.
+// game's next wait on the quad's swapchain waits on the CPU for its oldest
+// held-back release, only when the image it waits for is the newest the
+// runtime has), and every refresh shows the quad's newest finished release,
+// at most two behind the game's latest (with its three images); the runtime
+// still sees every call on it in order.
 void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy = false) {
     CaseSettings settings;
     settings.frame_multiplier = "2x";
     settings.synthesis_mode = mode;
     BeginCase("side-by-side-framegen-" + mode + (shown_lazy ? "-shown-lazy" : ""), game, settings);
     SetEnv("VECTORXR_FRAMEGEN_SHOWN_LAYERS", shown_lazy ? "" : "off");
-    g_runtime.recommended_width = kSideBySideEyeWidth;
-    g_runtime.recommended_height = kSideBySideEyeHeight;
+    g_runtime.recommended_width = g_side_by_side_eye_width;
+    g_runtime.recommended_height = g_side_by_side_eye_height;
     g_runtime.paced = true;
     {
         std::scoped_lock lock(g_runtime_mutex);
@@ -4556,25 +5841,25 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
           std::string("the log tells once that shown layers are kept lazy, only when they are (") +
               (shown_lazy ? "on" : "off") + ")");
     BeginSession(app);
-    session.eyes = MakeTarget(app, XPlaneInfo(2 * kSideBySideEyeWidth, kSideBySideEyeHeight), "both eyes side by side");
+    session.eyes = MakeTarget(app, XPlaneInfo(2 * g_side_by_side_eye_width, g_side_by_side_eye_height), "both eyes side by side");
     session.ui = MakeTarget(app, XPlaneInfo(kQuadLayerSize, kQuadLayerSize), "the quad layer's");
     XrSwapchainCreateInfo depth_info = DepthInfo(1);
-    depth_info.width = 2 * kSideBySideEyeWidth;
-    depth_info.height = kSideBySideEyeHeight;
+    depth_info.width = 2 * g_side_by_side_eye_width;
+    depth_info.height = g_side_by_side_eye_height;
     session.depth = MakeTarget(app, depth_info, "both eyes' depth side by side");
     {
         std::scoped_lock lock(g_runtime_mutex);
         const StandInSwapchain* eyes = FindSwapchain(session.eyes.swapchain);
         const StandInSwapchain* ui = FindSwapchain(session.ui.swapchain);
-        Check(eyes && ui && eyes->info.width == 2 * kSideBySideEyeWidth && eyes->info.format == 29 &&
+        Check(eyes && ui && eyes->info.width == 2 * g_side_by_side_eye_width && eyes->info.format == 29 &&
                   (eyes->info.usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
                   (eyes->info.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) && ui->info.width == kQuadLayerSize &&
                   (ui->info.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT),
               "the runtime's swapchains are the bridge's copy destinations, whatever usage the game asked for");
     }
     Check(Peer::Bridge().Bridged(session.eyes.swapchain) && Peer::Bridge().Bridged(session.ui.swapchain) &&
-              Peer::Bridge().Unmirrored(session.depth.swapchain),
-          "both colour swapchains are bridged, depth is the game's own");
+              Peer::Bridge().Bridged(session.depth.swapchain) && !Peer::Bridge().Unmirrored(session.depth.swapchain),
+          "both colour swapchains and depth are bridged, depth mirrored");
 
     // What the stand-in saw of each frame: its layers, and the runtime's
     // queue reaching it (with the quad layer read there).
@@ -4656,8 +5941,8 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     // layer after the projection (`quad_layer`) showing the game's latest
     // release; Frame Generation's outputs, or the game's image, each eye
     // its own half. How many showed Frame Generation's outputs.
-    constexpr auto kEyeWidth = static_cast<std::int32_t>(kSideBySideEyeWidth);
-    constexpr auto kEyeHeight = static_cast<std::int32_t>(kSideBySideEyeHeight);
+    static const auto kEyeWidth = static_cast<std::int32_t>(g_side_by_side_eye_width);
+    static const auto kEyeHeight = static_cast<std::int32_t>(g_side_by_side_eye_height);
     // Refreshes whose quad layer showed the game's release before its latest.
     std::size_t quad_behind = 0;
     const auto check_shown = [&](std::size_t from, const std::string& at, bool quad_layer) {
@@ -4678,10 +5963,13 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
                       where + ": the quad layer shows " + (extra.quad_texel ? Text(*extra.quad_texel) : "nothing") +
                           ", the game's latest release (" + std::to_string(extra.quad_releases) + ") rendered " +
                           Text(expected));
-                // Lazy, the newest release whose rendering is done: the
-                // game's latest, or the one before it.
+                // Lazy, the newest release whose rendering is done: at most
+                // two behind the game's latest (the game's wait on the quad's
+                // swapchain waits for the oldest of them only when the image
+                // it waits for is the runtime's newest, so a GPU-bound game's
+                // CPU stays a frame ahead of its GPU).
                 const int behind = extra.game_quad_releases - extra.quad_releases;
-                Check(behind <= (shown_lazy ? 1 : 0),
+                Check(behind <= (shown_lazy ? 2 : 0),
                       where + ": the runtime had the game's releases of the quad layer's swapchain but " +
                           std::to_string(behind) + " (" + std::to_string(extra.quad_releases) + " of " +
                           std::to_string(extra.game_quad_releases) + ")");
@@ -4791,7 +6079,7 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
             std::uint64_t moved{0};    // frames Frame Generation generated meanwhile
             std::uint64_t repeated{0}; // refreshes it repeated the frame before at
             depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown; // the quad's, meanwhile
-            std::size_t behind{0}; // refreshes whose quad layer showed the release before the game's latest
+            std::size_t behind{0}; // refreshes whose quad layer showed a release before the game's latest
             double game_ms{0.0};   // the game's 16 frames took
         };
         const auto loaded = [&](bool quad_layer, const std::string& at) {
@@ -4869,14 +6157,15 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
             // The quad layer's releases kept lazy: no frame of Frame
             // Generation's waits for the game's work, with the quad layer or
             // without it. Each of the game's releases of the quad (one a frame)
-            // was held back, its next wait waiting for it on the CPU, on the
-            // runtime's queue only past that wait's bound (far beyond the game's
+            // was held back, a later wait waiting for it on the CPU (when the
+            // image waited for was the runtime's newest), on the runtime's
+            // queue only past that wait's bound (far beyond the game's
             // held-back work).
             const auto counts = [](const Backlog& backlog) {
                 return std::to_string(backlog.shown.releases) + " lazy releases, " +
                        std::to_string(backlog.shown.cpu_waits) + " waited for on the CPU, " +
                        std::to_string(backlog.shown.gpu_waits) + " on the runtime's queue; " +
-                       std::to_string(backlog.behind) + " refreshes showed the release before the game's latest";
+                       std::to_string(backlog.behind) + " refreshes showed a release before the game's latest";
             };
             std::cout << g_case << ": shown layers kept lazy: the game's GPU work held back " << kGameLoadMs
                       << " ms a frame, the runtime's queue waited for it before frames of Frame Generation's ended "
@@ -4888,10 +6177,12 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
                       describe(with_quad));
             // A release whose work outlasts the CPU wait's bound (100 ms: a busy
             // or software GPU) goes on the runtime's queue instead, as designed;
-            // one of six local runs saw one (2026-10-14).
-            Check(with_quad.shown.releases == 16 && with_quad.shown.cpu_waits > 0 && with_quad.shown.gpu_waits <= 2,
+            // one of six local runs saw one (2026-10-14). CPU waits may be
+            // none: a wait for an image the runtime does not show is held
+            // back behind the releases instead (FrameGenQueueSubstitution::Wait).
+            Check(with_quad.shown.releases == 16 && with_quad.shown.gpu_waits <= 2,
                   "GPU-bound, with the quad layer kept lazy: its releases are held back until their work has run, "
-                  "the game's next wait waiting for them on the CPU: " +
+                  "the game's waits held back behind them or waiting for them on the CPU: " +
                       counts(with_quad));
             Check(without_quad.during > 0 && without_quad.waited == 0 && without_quad.shown.releases == 0,
                   "GPU-bound, without the quad layer: no frame of Frame Generation's waits for the game's work: " +
@@ -4931,7 +6222,7 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     // Depth in the same shape (one swapchain, each view's depth its half):
     // colour still captured and shown through Frame Generation; then, Frame
     // Generation toggled off, the game's frames reach the runtime as they
-    // are, without the bridge-private depth. Unknown metadata is checked
+    // are, with the depth the bridge mirrors. Unknown metadata is checked
     // separately below, once supported depth has passed generation.
     settle({});
     const depthxr::FrameGenStatus before_depth = Peer::FrameGen();
@@ -4958,10 +6249,18 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
         std::scoped_lock lock(g_runtime_mutex);
         for (std::size_t i = depth_from; i < g_runtime.frames.size(); ++i) {
             for (const ShownView& view : g_runtime.frames[i].views) {
-                Check(!view.depth, "depth: the runtime gets no depth in a bridged session's views");
+                // Frame Generation's own frames carry no depth (they show its
+                // image); any frame that does carries the game's.
+                if (view.depth) {
+                    Check(view.depth_swapchain == session.depth.swapchain && view.depth_value &&
+                              *view.depth_value == 0.5f,
+                          "depth: a view's depth is the game's (" +
+                              (view.depth_value ? std::to_string(*view.depth_value) : std::string("unread")) + ")");
+                }
                 if (i >= as_is_from) {
-                    Check(view.next_type == XR_TYPE_UNKNOWN,
-                          "depth-only, Frame Generation off: the stripped view has no other metadata");
+                    Check(view.depth && view.next_type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR &&
+                              view.after_depth == XR_TYPE_UNKNOWN,
+                          "depth-only, Frame Generation off: the view has its depth and no other metadata");
                 }
             }
         }
@@ -4969,9 +6268,9 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
         Check(depth && depth->releases == 26, "depth: the depth swapchain's releases reach the runtime");
     }
     std::string log = Peer::Log();
-    Check(Contains(log, "keeps the game's depth to itself"), "depth: the log tells depth is left out");
+    Check(!Contains(log, "keeps the game's depth to itself"), "depth: the log tells of no depth left out");
 
-    for (const Target* target : {&session.eyes, &session.ui}) {
+    for (const Target* target : {&session.eyes, &session.ui, &session.depth}) {
         const std::string describe = Peer::Bridge().Describe(target->swapchain);
         Check(Contains(describe, "skippedCopies=0"), "every release copied: " + describe);
     }
@@ -5021,8 +6320,8 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
             Check(g_runtime.frames.size() >= unknown_from + 6, "unknown metadata frames reached the runtime");
             for (std::size_t i = unknown_from; i < g_runtime.frames.size(); ++i) {
                 for (const ShownView& view : g_runtime.frames[i].views) {
-                    Check(!view.depth && view.next_type == kApplicationStructType,
-                          "the bridge strips private depth and preserves the following unknown metadata");
+                    Check(view.depth && view.after_depth == kApplicationStructType,
+                          "mirrored depth and the unknown metadata after it reach the runtime");
                 }
             }
         }
@@ -5049,6 +6348,654 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     EndCase(game);
 }
 
+// A GPU-bound game's Direct3D 11 frames on a timeline of their own: each
+// frame's work is held back until `gpu` after the one before it finished
+// (or after it was submitted, if later), as a GPU running one frame at a
+// time does, with nothing actually drawn (no real GPU load, no stall of the
+// device: software adapter only).
+struct SerialGameGpu {
+    using Clock = std::chrono::steady_clock;
+    struct Hold {
+        std::unique_ptr<Gate> gate;
+        Clock::time_point due;
+        bool open{false};
+    };
+    std::chrono::microseconds gpu;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<Hold> holds;
+    Clock::time_point last_due{};
+    bool stop{false};
+    std::thread opener;
+
+    explicit SerialGameGpu(std::chrono::microseconds frame) : gpu(frame) {
+        opener = std::thread([this] {
+            std::unique_lock lock(mutex);
+            for (;;) {
+                const auto next = std::find_if(holds.begin(), holds.end(), [](const Hold& hold) { return !hold.open; });
+                if (stop && next == holds.end()) return;
+                if (next == holds.end()) {
+                    cv.wait(lock);
+                    continue;
+                }
+                if (Clock::now() < next->due) {
+                    cv.wait_until(lock, next->due);
+                    continue;
+                }
+                next->gate->Open();
+                next->open = true;
+                // The game's device may still be past a gate's wait only
+                // once later frames were held behind it: keep a few.
+                while (holds.size() > 16 && holds.front().open) holds.pop_front();
+            }
+        });
+    }
+    ~SerialGameGpu() {
+        {
+            std::scoped_lock lock(mutex);
+            stop = true;
+        }
+        cv.notify_all();
+        opener.join();
+    }
+    void HoldFrame(Game& game) {
+        std::scoped_lock lock(mutex);
+        Hold& hold = holds.emplace_back();
+        hold.gate = std::make_unique<Gate>(g_runtime.device12.Get(), game);
+        hold.gate->HoldGame(game);
+        hold.due = std::max(last_due, Clock::now()) + gpu;
+        last_due = hold.due;
+        cv.notify_all();
+    }
+};
+
+// A GPU-bound game's real Direct3D 11 work on a GPU: full-screen draws on the
+// game's own context, each about `chunk` long (short, so nothing holds the
+// GPU), as many per frame as make up `frame`. Calibrated with timestamps.
+struct GameDraws {
+    Game& game;
+    ComPtr<ID3D11VertexShader> vs;
+    ComPtr<ID3D11PixelShader> ps;
+    ComPtr<ID3D11Texture2D> target;
+    ComPtr<ID3D11RenderTargetView> rtv;
+    ComPtr<ID3D11Buffer> constants;
+    std::uint32_t iterations{64};
+    double chunk_ms{0.0};
+    int chunks{1};
+    static constexpr UINT kSize = 2048;
+
+    GameDraws(Game& g, double frame_ms, double chunk_target_ms = 0.5) : game(g) {
+        static const char source[] = R"(
+cbuffer Load : register(b0) { uint iterations; uint3 pad; };
+float4 VSMain(uint id : SV_VertexID) : SV_Position {
+    const float2 uv = float2((id << 1) & 2, id & 2);
+    return float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+float4 PSMain(float4 position : SV_Position) : SV_Target {
+    float4 v = float4(position.xy * 0.001, 0.5, 1.0);
+    [loop] for (uint i = 0; i < iterations; ++i) { v = frac(v * 1.0001 + v.yzwx * 0.37 + 0.11); }
+    return v;
+}
+)";
+        ComPtr<ID3DBlob> vs_blob, ps_blob;
+        Check(SUCCEEDED(D3DCompile(source, std::strlen(source), "load", nullptr, nullptr, "VSMain", "vs_5_0", 0, 0,
+                                   &vs_blob, nullptr)) &&
+                  SUCCEEDED(D3DCompile(source, std::strlen(source), "load", nullptr, nullptr, "PSMain", "ps_5_0", 0, 0,
+                                       &ps_blob, nullptr)) &&
+                  SUCCEEDED(game.device->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(),
+                                                            nullptr, &vs)) &&
+                  SUCCEEDED(game.device->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(),
+                                                           nullptr, &ps)),
+              "the game load's shaders");
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = desc.Height = kSize;
+        desc.MipLevels = desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        D3D11_BUFFER_DESC buffer{16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+        Check(SUCCEEDED(game.device->CreateTexture2D(&desc, nullptr, &target)) &&
+                  SUCCEEDED(game.device->CreateRenderTargetView(target.Get(), nullptr, &rtv)) &&
+                  SUCCEEDED(game.device->CreateBuffer(&buffer, nullptr, &constants)),
+              "the game load's target");
+        double ms = Measure(iterations);
+        while (ms < chunk_target_ms * 0.5 && iterations < (1u << 22)) {
+            iterations *= 2;
+            ms = Measure(iterations);
+        }
+        iterations = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(iterations * chunk_target_ms / std::max(ms, 1e-3)));
+        chunk_ms = Measure(iterations);
+        chunks = std::max(1, static_cast<int>(std::lround(frame_ms / std::max(chunk_ms, 1e-3))));
+    }
+
+    void Bind(std::uint32_t count) {
+        const std::uint32_t data[4]{count, 0, 0, 0};
+        ID3D11DeviceContext* context = game.context.Get();
+        context->UpdateSubresource(constants.Get(), 0, nullptr, data, 0, 0);
+        const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(kSize), static_cast<float>(kSize), 0.0f, 1.0f};
+        context->RSSetViewports(1, &viewport);
+        context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->IASetInputLayout(nullptr);
+        context->VSSetShader(vs.Get(), nullptr, 0);
+        context->PSSetShader(ps.Get(), nullptr, 0);
+        context->PSSetConstantBuffers(0, 1, constants.GetAddressOf());
+    }
+
+    void Unbind() {
+        ID3D11DeviceContext* context = game.context.Get();
+        ID3D11RenderTargetView* none = nullptr;
+        context->OMSetRenderTargets(1, &none, nullptr);
+        context->VSSetShader(nullptr, nullptr, 0);
+        context->PSSetShader(nullptr, nullptr, 0);
+    }
+
+    // One draw's GPU time at `count` iterations (median of five).
+    double Measure(std::uint32_t count) {
+        ComPtr<ID3D11Query> disjoint, begin, end;
+        const D3D11_QUERY_DESC disjoint_desc{D3D11_QUERY_TIMESTAMP_DISJOINT, 0}, stamp{D3D11_QUERY_TIMESTAMP, 0};
+        Check(SUCCEEDED(game.device->CreateQuery(&disjoint_desc, &disjoint)) &&
+                  SUCCEEDED(game.device->CreateQuery(&stamp, &begin)) && SUCCEEDED(game.device->CreateQuery(&stamp, &end)),
+              "the game load's timing queries");
+        ID3D11DeviceContext* context = game.context.Get();
+        Bind(count);
+        std::vector<double> times;
+        for (int i = 0; i < 5; ++i) {
+            context->Begin(disjoint.Get());
+            context->End(begin.Get());
+            context->Draw(3, 0);
+            context->End(end.Get());
+            context->End(disjoint.Get());
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT frequency{};
+            while (context->GetData(disjoint.Get(), &frequency, sizeof(frequency), 0) == S_FALSE) std::this_thread::yield();
+            UINT64 a = 0, b = 0;
+            while (context->GetData(begin.Get(), &a, sizeof(a), 0) == S_FALSE) std::this_thread::yield();
+            while (context->GetData(end.Get(), &b, sizeof(b), 0) == S_FALSE) std::this_thread::yield();
+            if (!frequency.Disjoint && b > a) times.push_back(static_cast<double>(b - a) * 1000.0 / frequency.Frequency);
+        }
+        Unbind();
+        std::sort(times.begin(), times.end());
+        return times.empty() ? 0.0 : times[times.size() / 2];
+    }
+
+    // One frame's work, on the game's context (`share` of it).
+    void Frame(double share = 1.0) {
+        Bind(iterations);
+        const int count = std::max(1, static_cast<int>(std::lround(chunks * share)));
+        for (int chunk = 0; chunk < count; ++chunk) {
+            game.context->Draw(3, 0);
+            if (chunk % 4 == 3) game.context->Flush();
+        }
+        Unbind();
+        game.context->Flush();
+    }
+};
+
+// A DCS-shaped game, GPU-bound at about half the refresh rate (its frame's
+// GPU work 20 ms, its CPU work 9 ms of it before rendering), in Dynamic
+// interpolate through the bridge: engaged, the game must keep most of the
+// rate it ran at passing through (DCS on a 4080 SUPER, 2026-10-22: 44 fps
+// passing through, 17 engaged with the GPU half idle). `pimax`: on PimaxXR
+// 0.4.4's frame loop and swapchains (PimaxCompositor) with "Prefer framerate
+// over latency", the reporter's runtime: its xrEndFrame holds Frame
+// Generation's frames until its refresh with its swapchain lock taken, and
+// the game's swapchain calls must not wait for it (each did, up to a
+// refresh: 36 fps passing through, 13 engaged). `quad`: the game also
+// acquires and waits for a quad layer's image at each frame's start, draws
+// it after releasing the eyes and shows it (OpenKneeboard above VectorXR, or
+// a game's interface): the layer's wait must not wait for the game's last
+// frame's GPU work (it did, for the newest held-back release: 32 fps
+// engaged against 48 passing through, the GPU idle through the game's CPU
+// work). On WARP the game's GPU time is held back by gates; on a GPU it is
+// real draws (a GPU's device is never held: gpu-test-bsod-hazard).
+void TestBridgedGpuBoundDynamic(Game& game, bool pimax, bool quad = false, bool kneeboard = false) {
+    const std::string name = std::string(pimax ? "gpu-bound-dynamic-pimax" : quad ? "gpu-bound-dynamic-quad" : "gpu-bound-dynamic") +
+                             (pimax && quad ? "-quad" : "") + (kneeboard ? "-kneeboard" : "");
+    const bool software = SoftwareAdapter(game);
+    // A headset's eyes (the reporter's: 3456x4035): Frame Generation's GPU work in proportion.
+    const std::uint32_t small_width = g_side_by_side_eye_width, small_height = g_side_by_side_eye_height;
+    if (const char* eye = std::getenv("BRIDGE_TEST_EYE")) {
+        unsigned width = 0, height = 0;
+        if (std::sscanf(eye, "%ux%u", &width, &height) == 2 && width && height) {
+            g_side_by_side_eye_width = width;
+            g_side_by_side_eye_height = height;
+        }
+    }
+    // The game's GPU and CPU work per frame, and the views it renders into
+    // swapchains of their own before the eyes (DCS: four, 932x1092 and
+    // 1556x1636 pairs), each acquired, rendered and released in turn.
+    // On PimaxXR the game is DCS-shaped (on a 4080 SUPER, 2026-10-22: about
+    // 26 ms of CPU and 27 of GPU a frame, four views besides the eyes); on
+    // WARP, whose Frame Generation takes the CPU's time, a lighter one.
+    double game_gpu_ms = pimax && !software ? 26.0 : 20.0;
+    if (const char* ms = std::getenv("BRIDGE_TEST_GAME_GPU_MS")) game_gpu_ms = std::atof(ms);
+    double game_cpu_ms = !pimax ? 9.0 : software ? 12.0 : 25.0;
+    if (const char* ms = std::getenv("BRIDGE_TEST_GAME_CPU_MS")) game_cpu_ms = std::atof(ms);
+    int extra_views = !pimax ? 0 : software ? 2 : 4;
+    if (const char* views = std::getenv("BRIDGE_TEST_EXTRA_VIEWS")) extra_views = std::atoi(views);
+    CaseSettings settings;
+    settings.frame_multiplier = "dynamic";
+    settings.synthesis_mode = "interpolate";
+    settings.debug_log = true;
+    BeginCase(name, game, settings);
+    g_runtime.recommended_width = g_side_by_side_eye_width;
+    g_runtime.recommended_height = g_side_by_side_eye_height;
+    g_runtime.paced = !pimax;
+    g_runtime.pimax = pimax;
+    g_runtime.unread = true;
+    if (const char* same = std::getenv("BRIDGE_TEST_SAME_IMAGE")) g_runtime.same_image = std::string(same) == "1";
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    Peer::UseFrameGenGpu(depthxr::CreateFrameGenGpu);
+    depthxr::FrameGenDynamicPolicy policy;
+    policy.engage_after = std::chrono::milliseconds(60000); // passing through first
+    policy.settle = std::chrono::milliseconds(500);
+    policy.guard_window = std::chrono::milliseconds(1000);
+    policy.hold = std::chrono::milliseconds(60000);
+    policy.probe_after = std::chrono::milliseconds(600000);
+    Peer::SetFrameGenDynamicPolicy(policy);
+    Peer::SetFrameGenSummaryInterval(std::chrono::milliseconds(1000));
+    // The plain case has a forwarding layer below VectorXR (OpenKneeboard
+    // after an update, neighbor-layers.md): it gets every frame Frame
+    // Generation shows, and the log says so and how many.
+    const bool layer_below = !pimax && !quad && !kneeboard;
+    depthxr::XrApiLayerNextInfo below{};
+    below.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO;
+    below.structVersion = depthxr::XR_API_LAYER_NEXT_INFO_STRUCT_VERSION;
+    below.structSize = sizeof(below);
+    std::strncpy(below.layerName, "XR_APILAYER_FREDEMMOTT_OpenKneeboard", XR_MAX_API_LAYER_NAME_SIZE - 1);
+    below.nextGetInstanceProcAddr = RtGetInstanceProcAddr;
+    below.nextCreateApiLayerInstance = RtCreateApiLayerInstance;
+    if (layer_below) g_layer_below = &below;
+    SideBySideSession session;
+    App& app = session.app;
+    app = StartApp();
+    session.create = std::make_unique<SessionCreate>(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &session.create->info, &app.session) == XR_SUCCESS &&
+              Peer::Bridge().Active() && Peer::QueueSubstituted(),
+          name + ": the session is bridged");
+    if (pimax) {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_pimax_game_thread = std::this_thread::get_id();
+        // "Prefer framerate over latency" (the reporter's: xrEndFrame 10.7 ms
+        // for Frame Generation's frames); BRIDGE_TEST_PIMAX_DEFER=0 for PimaxXR's default.
+        const char* defer = std::getenv("BRIDGE_TEST_PIMAX_DEFER");
+        g_pimax.defer = !(defer && std::string(defer) == "0");
+        // BRIDGE_TEST_PIMAX_SYNC_GPU=1: "Wait for GPU work in EndFrame"
+        // (quirk_sync_gpu_work_in_end_frame) on PimaxXR's Experimental page.
+        const char* sync = std::getenv("BRIDGE_TEST_PIMAX_SYNC_GPU");
+        g_pimax.sync_gpu_in_end = sync && std::string(sync) == "1";
+        // BRIDGE_TEST_PIMAX_CLAMP_EVERY=N: every Nth wait, two waits whose
+        // display times PimaxXR clamps to 1 ns after the last.
+        if (const char* clamp = std::getenv("BRIDGE_TEST_PIMAX_CLAMP_EVERY")) g_runtime.pimax_clamp_every = std::atoi(clamp);
+        g_pimax.Start(g_runtime.device12.Get());
+    }
+    BeginSession(app);
+    session.eyes = MakeTarget(app, XPlaneInfo(2 * g_side_by_side_eye_width, g_side_by_side_eye_height), "both eyes side by side");
+    session.ui = MakeTarget(app, XPlaneInfo(kQuadLayerSize, kQuadLayerSize), "the quad layer's");
+    session.depth = MakeTarget(app, DepthInfo(1), "depth");
+    std::optional<SerialGameGpu> gates;
+    std::optional<GameDraws> draws;
+    if (software) {
+        gates.emplace(std::chrono::microseconds(static_cast<long long>(game_gpu_ms * 1000.0)));
+    } else {
+        draws.emplace(game, game_gpu_ms);
+        std::cout << name << ": game load " << draws->chunks << " draws of " << draws->chunk_ms << " ms\n";
+    }
+    SideBySideFrameOptions options;
+    // BRIDGE_TEST_QUAD=1: a quad layer the game renders, waits for and shows each frame (OpenKneeboard's).
+    const char* quad_env = std::getenv("BRIDGE_TEST_QUAD");
+    options.quad_layer = quad || kneeboard || (quad_env && std::string(quad_env) == "1");
+    options.kneeboard = kneeboard;
+    std::vector<Target> extras;
+    for (int view = 0; view < extra_views; ++view) {
+        extras.push_back(MakeTarget(app, view % 4 < 2 ? XPlaneInfo(932, 1092) : XPlaneInfo(1556, 1636),
+                                    "an extra view's"));
+    }
+    options.before_render = [&] {
+        const double slices = static_cast<double>(extras.size() + 1);
+        const auto cpu = std::chrono::microseconds(static_cast<long long>(game_cpu_ms * 1000.0 / slices));
+        for (const Target& extra : extras) {
+            SleepUntil(std::chrono::steady_clock::now() + cpu);
+            const std::uint32_t index = Acquire(app, extra);
+            if (draws) draws->Frame(1.0 / slices);
+            Clear(game, extra.images[index], {40, 80, 120, 255}, 0);
+            Release(app, extra);
+        }
+        SleepUntil(std::chrono::steady_clock::now() + cpu);
+        if (gates) gates->HoldFrame(game);
+        if (draws) draws->Frame(1.0 / slices);
+    };
+    const auto calls_line = [&] {
+        const CallTimes t = std::exchange(g_call_times, {});
+        if (!t.frames) return std::string();
+        std::ostringstream line;
+        line << std::fixed << std::setprecision(2) << " [game calls ms/frame: eyes acquire " << t.eyes_acquire / t.frames
+             << ", release " << t.eyes_release / t.frames << "; quad acquire " << t.ui_acquire / t.frames
+             << ", release " << t.ui_release / t.frames << "; xrWaitFrame " << t.wait / t.frames << ", xrEndFrame "
+             << t.end / t.frames << "; longest frame " << t.max_frame << "]";
+        return line.str();
+    };
+    const auto pimax_line = [&] {
+        if (!pimax) return std::string();
+        std::scoped_lock lock(g_pimax.mutex);
+        std::ostringstream line;
+        const std::uint64_t calls = g_pimax_swapchain_calls.exchange(0);
+        const std::uint64_t waited_us = g_pimax_swapchain_wait_us.exchange(0);
+        const std::uint64_t max_us = g_pimax_swapchain_wait_max_us.exchange(0);
+        line << std::fixed << std::setprecision(2) << " (PimaxXR xrEndFrame waited "
+             << (g_pimax.ends ? g_pimax.end_wait_ms / g_pimax.ends : 0.0) << " ms";
+        if (g_pimax.sync_gpu_in_end) {
+            line << " (" << (g_pimax.ends ? g_pimax.end_sync_ms / g_pimax.ends : 0.0) << " for GPU work)";
+        }
+        line << ", xrWaitFrame " << (g_pimax.waits ? g_pimax.wait_wait_ms / g_pimax.waits : 0.0)
+             << " ms, swapchain calls " << (calls ? waited_us / 1000.0 / calls : 0.0) << " ms on average (" << calls
+             << " calls, at most " << max_us / 1000.0 << " ms), blank refreshes " << g_pimax.blank_refreshes << ")";
+        g_pimax.end_wait_ms = g_pimax.wait_wait_ms = g_pimax.end_sync_ms = 0.0;
+        g_pimax.ends = g_pimax.waits = 0;
+        return line.str();
+    };
+    // Direct3D 11's waits for the bridge's copy of the image it acquires
+    // (D3D11Bridge::Acquired), per game frame since asked last.
+    std::uint64_t done_waits_seen = 0;
+    int done_frames_seen = 0;
+    double done_waits_per_frame = 0.0;
+    const auto done_waits_line = [&] {
+        const std::uint64_t waits = SummaryValue(Peer::Bridge().Summary(), "doneWaits");
+        const int frames = session.frames;
+        done_waits_per_frame = frames > done_frames_seen ? static_cast<double>(waits - done_waits_seen) /
+                                                               (frames - done_frames_seen)
+                                                         : 0.0;
+        done_waits_seen = waits;
+        done_frames_seen = frames;
+        std::ostringstream line;
+        line << std::fixed << std::setprecision(2) << " [bridge doneWaits/frame " << done_waits_per_frame << "]";
+        return line.str();
+    };
+    // BRIDGE_TEST_STALL_DUMP=1: a game frame taking over 300 ms prints the
+    // queues' state while it is held (diagnostics).
+    std::atomic<std::int64_t> frame_began{0};
+    std::atomic<bool> watching{true};
+    std::thread watchdog;
+    if (const char* dump = std::getenv("BRIDGE_TEST_STALL_DUMP"); dump && std::string(dump) == "1") {
+        watchdog = std::thread([&] {
+            std::int64_t dumped = 0, dumped_at = 0;
+            while (watching) {
+                Sleep(20);
+                const std::int64_t began = frame_began.load();
+                const std::int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+                if (began && now - began > 300'000'000 && (began != dumped || now - dumped_at > 400'000'000)) {
+                    dumped = began;
+                    dumped_at = now;
+                    std::cout << name << ": STALL " << (now - began) / 1'000'000 << " ms\n  queue: " << Peer::QueueState()
+                              << "\n  bridge: " << Peer::Bridge().Summary();
+                    if (pimax) {
+                        std::scoped_lock lock(g_pimax.mutex);
+                        std::cout << "\n  pimax: idle=" << g_pimax.idle << " handed=" << g_pimax.handed
+                                  << " serialized=" << g_pimax.serialized << "/"
+                                  << (g_pimax.serialize ? g_pimax.serialize->GetCompletedValue() : 0)
+                                  << " rendered=" << g_pimax.rendered_value << "/"
+                                  << (g_pimax.rendered ? g_pimax.rendered->GetCompletedValue() : 0);
+                    }
+                    const depthxr::FrameGenStatus status = Peer::FrameGen();
+                    std::cout << "\n  framegen: generated=" << status.generated << " gpuWaits=" << status.gpu_waits
+                              << " reason=" << Peer::FrameGenStatusReason(status) << std::endl;
+                }
+            }
+        });
+    }
+    const auto rate = [&](std::chrono::milliseconds duration, const std::function<bool()>& until = {}) {
+        const auto start = std::chrono::steady_clock::now();
+        int frames = 0;
+        while (std::chrono::steady_clock::now() - start < duration) {
+            frame_began = std::chrono::steady_clock::now().time_since_epoch().count();
+            SideBySideFrame(session, game, options);
+            ++frames;
+            if (until && until()) break;
+        }
+        return frames / std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    };
+    const auto engaged = [] {
+        const depthxr::FrameGenStatus status = Peer::FrameGen();
+        return status.threaded && !status.standby;
+    };
+    rate(std::chrono::milliseconds(1000));
+    pimax_line();
+    calls_line();
+    done_waits_line();
+    const double through = rate(std::chrono::milliseconds(2000));
+    const std::string through_pimax = pimax_line() + calls_line() + done_waits_line();
+    Check(Peer::FrameGen().standby, name + ": standing by first");
+    policy.engage_after = std::chrono::milliseconds(500);
+    Peer::SetFrameGenDynamicPolicy(policy);
+    rate(std::chrono::milliseconds(6000), engaged);
+    Check(engaged(), name + ": engages for a game at half the refresh rate");
+    // Engaging sets Frame Generation's GPU work up on the game's frame thread
+    // (its pipelines and views, made by its first Executes and again when its
+    // interpolation flow switches: on WARP 180 ms, then 1.2-1.5 s, now and
+    // then a third; one game frame held each time). Measured before that is
+    // done, the window took such a frame in or not by chance: the PimaxXR
+    // case failed about 3 runs in 8 right after the quad case, and any case
+    // could (Nov 2 2026). The rate is measured once two settling windows in a
+    // row kept the rate (6 s at most): a game slowed on every frame never
+    // does, and fails below.
+    for (int settled = 0, tries = 0; settled < 2 && tries < 20; ++tries) {
+        settled = rate(std::chrono::milliseconds(300)) >= 0.75 * through ? settled + 1 : 0;
+    }
+    pimax_line();
+    calls_line();
+    done_waits_line();
+    std::uint64_t blank_before = 0;
+    {
+        std::scoped_lock lock(g_pimax.mutex);
+        blank_before = g_pimax.blank_refreshes;
+    }
+    const double during = rate(std::chrono::milliseconds(1500));
+    const std::string during_pimax = pimax_line() + calls_line() + done_waits_line();
+    watching = false;
+    if (watchdog.joinable()) watchdog.join();
+    const depthxr::FrameGenStatus status = Peer::FrameGen();
+    std::cout << name << ": " << through << " fps passing through" << through_pimax << ", " << during
+              << " fps engaged" << during_pimax << " (generated " << status.generated << ", gpuWaits "
+              << status.gpu_waits << ", gating " << status.gpu_gating << ")\n";
+    // BRIDGE_TEST_LOG_DIR: the case's log kept (its summaries every second),
+    // before the session's end can discard it.
+    if (const char* keep = std::getenv("BRIDGE_TEST_LOG_DIR")) {
+        std::error_code error;
+        std::filesystem::create_directories(keep, error);
+        std::filesystem::copy_file(Peer::ActiveLogPath(), std::filesystem::path(keep) / (name + ".log"),
+                                   std::filesystem::copy_options::overwrite_existing, error);
+        if (error) std::cout << name << ": the log was not kept (" << error.message() << ")\n";
+    }
+    Check(during >= 0.75 * through, name + ": engaged, the game keeps most of its rate (" + std::to_string(during) +
+                                        " fps against " + std::to_string(through) + " passing through)");
+    if (pimax) {
+        // PimaxXR 0.4.4 shows a frame begun and never ended as a blank
+        // refresh. Engaged, none; the first refreshes after engaging, before
+        // anything is written, still leave a few open (nothing consistent to
+        // show: the frame passed through has newer images in its swapchains).
+        std::scoped_lock lock(g_pimax.mutex);
+        Check(g_pimax.blank_refreshes == blank_before,
+              name + ": engaged, no frame is left open (" + std::to_string(g_pimax.blank_refreshes - blank_before) +
+                  " blank refreshes; " + std::to_string(blank_before) + " while engaging)");
+        const std::string log = Peer::Log();
+        // (Read from this machine's registry, as PimaxXR reads them.)
+        Check(Contains(log, "PimaxXR frame settings: defer_frame_wait="), name + ": the log names PimaxXR's frame settings");
+        Check(Contains(log, "runtimeWaitMs=") && Contains(log, "runtimeWaitsBlocked="),
+              name + ": the summaries tell how long the runtime's waits took");
+    }
+    for (const Target& extra : extras) {
+        Check(app.api.destroy_swapchain(extra.swapchain) == XR_SUCCESS, "an extra view's swapchain is destroyed");
+    }
+    for (const Target* target : {&session.eyes, &session.ui, &session.depth}) {
+        Check(app.api.destroy_swapchain(target->swapchain) == XR_SUCCESS, "a swapchain is destroyed");
+    }
+    if (layer_below) {
+        Check(app.api.destroy_session(app.session) == XR_SUCCESS, name + ": xrDestroySession");
+        app.session = XR_NULL_HANDLE;
+        const std::string log = Peer::Log();
+        const std::string end_line = "Frame Generation at session end: the runtime and the layers below VectorXR "
+                                     "[XR_APILAYER_FREDEMMOTT_OpenKneeboard] got ";
+        const std::size_t at = log.find(end_line);
+        Check(Contains(log, "Frame Generation: the API layers below VectorXR [XR_APILAYER_FREDEMMOTT_OpenKneeboard] get "
+                            "every frame it shows") &&
+                  at != std::string::npos,
+              name + ": the log names the layer below and what it gets");
+        const std::string counts = log.substr(at + end_line.size(), log.find('\n', at) - at - end_line.size());
+        const std::size_t per = counts.find('(');
+        const double ratio = per == std::string::npos ? 0.0 : std::atof(counts.c_str() + per + 1);
+        std::cout << name << ": the layer below got " << counts << "\n";
+        Check(ratio > 1.1, name + ": the layer below got more frames than the game ended (" + counts + ")");
+    }
+    StopApp(app);
+    g_layer_below = nullptr;
+    g_pimax.Stop();
+    Peer::SetFrameGenSummaryInterval(std::chrono::milliseconds(30000));
+    g_side_by_side_eye_width = small_width;
+    g_side_by_side_eye_height = small_height;
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    Peer::SetFrameGenDynamicPolicy({});
+    EndCase(game);
+}
+
+// OpenXR Toolkit below VectorXR, not bypassed: Frame Generation stays off.
+// The Toolkit holds every release back until its next xrEndFrame and then
+// releases every swapchain it held, shown in that frame or not, and writes
+// its upscaled image into the runtime's only for swapchains the frame shows
+// (OpenXR-Toolkit layer.cpp xrReleaseSwapchainImage, xrEndFrame). Frame
+// Generation's frames (2-4 per game frame, from its own thread) would make
+// it release the game's images without its work and race its unlocked
+// swapchain map against the game's thread.
+void TestToolkitBelowKeepsFrameGenOff(Game& game) {
+    const std::string name = "toolkit-below-framegen-off";
+    BeginCase(name, game);
+    depthxr::XrApiLayerNextInfo toolkit{};
+    toolkit.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO;
+    toolkit.structVersion = depthxr::XR_API_LAYER_NEXT_INFO_STRUCT_VERSION;
+    toolkit.structSize = sizeof(toolkit);
+    std::strncpy(toolkit.layerName, "XR_APILAYER_MBUCCHIA_toolkit", XR_MAX_API_LAYER_NAME_SIZE - 1);
+    toolkit.nextGetInstanceProcAddr = RtGetInstanceProcAddr;
+    toolkit.nextCreateApiLayerInstance = RtCreateApiLayerInstance;
+    g_layer_below = &toolkit;
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, name + ": a session");
+    Check(!Peer::Bridge().Active() && !Peer::QueueSubstituted(),
+          name + ": the session is kept as it is (no bridge, no queue of Frame Generation's)");
+    const std::string log = Peer::Log();
+    Check(Contains(log, "OpenXR Toolkit is loaded below VectorXR.") &&
+              Contains(log, "Frame Generation is off for this game: OpenXR Toolkit is loaded below VectorXR"),
+          name + ": the log says why Frame Generation is off");
+    const depthxr::OsdSnapshot osd = Peer::Osd();
+    Check(osd.framegen == "Off  /  Layer conflict with OpenXR Toolkit" &&
+              osd.compact_framegen == osd.framegen && Contains(osd.framegen_detail, "Move OpenXR Toolkit above VectorXR"),
+          name + ": the OSD says Frame Generation is off for OpenXR Toolkit, not just Disabled (" + osd.framegen + ")");
+    StopApp(app);
+    g_layer_below = nullptr;
+    EndCase(game);
+}
+
+// A runtime swapchain call the layer makes for the game stalls on PimaxXR's
+// swapchain lock (its xrEndFrame holds it for a refresh, called from Frame
+// Generation's thread): the game's other threads' calls into the layer must
+// not wait for it. The bridge hands the game's releases over at its
+// xrEndFrame; that forwarded them to the runtime with the layer's lock held,
+// so the game's xrLocateViews on another thread (DCS's frame loop has a few)
+// waited out the runtime's stall too.
+void TestRuntimeStallOutsideLayerLock(Game& game) {
+    const std::string name = "runtime-stall-outside-layer-lock";
+    CaseSettings settings;
+    settings.frame_multiplier = "dynamic";
+    BeginCase(name, game, settings);
+    g_runtime.pimax = true;
+    depthxr::FrameGenDynamicPolicy policy;
+    policy.engage_after = std::chrono::milliseconds(600000); // passing through: releases go at once
+    Peer::SetFrameGenDynamicPolicy(policy);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+              Peer::Bridge().Active() && Peer::QueueSubstituted(),
+          name + ": the session is bridged");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "left eye");
+    Target right = MakeTarget(app, ColorInfo(), "right eye");
+    for (int frame = 0; frame < 3; ++frame) {
+        Check(Frame(app, game, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)}, {{{&left}, {&right}}}) ==
+                  XR_SUCCESS,
+              name + ": a frame");
+    }
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, name + ": xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, name + ": xrBeginFrame");
+    for (const Target* target : {&left, &right}) {
+        Draw(game, target->images[Acquire(app, *target)], FrameColor(3, target == &left ? 0 : 1));
+        Release(app, *target); // a bridged release: handed over at xrEndFrame
+    }
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = {{0, 0, 0, 1}, {0, 0, 0}};
+        views[eye].fov = g_runtime.fovs[eye];
+        views[eye].subImage.swapchain = (eye ? right : left).swapchain;
+        views[eye].subImage.imageRect = {{0, 0}, {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    // PimaxXR's xrEndFrame (Frame Generation's) holds its swapchain lock.
+    constexpr auto kStall = std::chrono::milliseconds(400);
+    std::unique_lock stalled(g_pimax_swapchains);
+    std::atomic<bool> ended{false};
+    XrResult end_result = XR_ERROR_RUNTIME_FAILURE;
+    std::thread render([&] {
+        end_result = app.api.end_frame(app.session, &end);
+        ended = true;
+    });
+    Sleep(50); // the game's xrEndFrame reaches the runtime's release
+    std::atomic<double> located_ms{0.0};
+    std::thread frame_loop([&] {
+        XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+        locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        locate.displayTime = state.predictedDisplayTime;
+        locate.space = app.space;
+        XrViewState view_state{XR_TYPE_VIEW_STATE};
+        std::array<XrView, 2> located{};
+        for (XrView& view : located) view.type = XR_TYPE_VIEW;
+        std::uint32_t count = 0;
+        const auto start = std::chrono::steady_clock::now();
+        app.api.locate_views(app.session, &locate, &view_state, 2, &count, located.data());
+        located_ms = MsSince(start);
+    });
+    const auto stall_start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - stall_start < kStall && located_ms == 0.0) Sleep(5);
+    const bool end_held = !ended;
+    Sleep(20);
+    stalled.unlock();
+    frame_loop.join();
+    render.join();
+    std::cout << name << ": xrLocateViews on another thread took " << located_ms.load()
+              << " ms while the runtime held the game's release " << kStall.count() << " ms\n";
+    Check(end_held, name + ": the game's xrEndFrame waited for the runtime's swapchain lock");
+    Check(end_result == XR_SUCCESS, name + ": xrEndFrame");
+    Check(located_ms < 100.0, name + ": xrLocateViews did not wait for the runtime's stalled swapchain call (" +
+                                  std::to_string(located_ms.load()) + " ms)");
+    for (const Target* target : {&left, &right}) {
+        Check(app.api.destroy_swapchain(target->swapchain) == XR_SUCCESS, "a swapchain is destroyed");
+    }
+    StopApp(app);
+    Peer::SetFrameGenDynamicPolicy({});
+    EndCase(game);
+}
+
 // 15. A game quitting while Frame Generation presents from its own thread,
 // the runtime holding that thread inside xrWaitFrame until the session ends
 // (DCS hung so on quitting, 2026-10-09). With `ends_session` the game ends
@@ -5064,8 +7011,8 @@ void TestQuitWhilePresenterHeld(Game& game, bool ends_session) {
     settings.synthesis_mode = "extrapolate";
     BeginCase(std::string("quit-presenter-held") + (ends_session ? "-session-ended" : ""), game, settings);
     SetEnv("VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS", "400");
-    g_runtime.recommended_width = kSideBySideEyeWidth;
-    g_runtime.recommended_height = kSideBySideEyeHeight;
+    g_runtime.recommended_width = g_side_by_side_eye_width;
+    g_runtime.recommended_height = g_side_by_side_eye_height;
     g_runtime.paced = true;
     Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
     Peer::UseFrameGenGpu(depthxr::CreateFrameGenGpu);
@@ -5078,7 +7025,7 @@ void TestQuitWhilePresenterHeld(Game& game, bool ends_session) {
           "a bridged session");
     SetEnv("VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS", "");
     BeginSession(app);
-    session.eyes = MakeTarget(app, XPlaneInfo(2 * kSideBySideEyeWidth, kSideBySideEyeHeight), "both eyes side by side");
+    session.eyes = MakeTarget(app, XPlaneInfo(2 * g_side_by_side_eye_width, g_side_by_side_eye_height), "both eyes side by side");
     SideBySideFrameOptions options;
     options.quad_layer = false;
     int frames = 0;
@@ -5373,7 +7320,38 @@ int main(int argc, char** argv) {
     }
     CheckFrameGenStatusLine();
     const bool bridged = TestBridgedSession(game);
-    if (bridged) {
+    const char* only = std::getenv("BRIDGE_TEST_ONLY");
+    if (bridged && only && std::string(only) == "lock-order") {
+        TestContextHeldAcrossRelease(game);
+        TestQuadViewsUnderHeldContext(game);
+        TestUnstagedReleaseUnderHeldContext(game);
+        TestNativeCaptureUnderHeldContext(game);
+        TestNativeGenerateUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "native-generate-context-held") {
+        TestNativeGenerateUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "quad-views-context-held") {
+        TestQuadViewsUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "unstaged-release-context-held") {
+        TestUnstagedReleaseUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "native-capture-context-held") {
+        TestNativeCaptureUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "depth-rects") {
+        TestDepthRects(game, false);
+        TestDepthRects(game, true);
+        TestDepthRects(game, false, false);
+    } else if (bridged && only && std::string(only) == "runtime-stall-outside-layer-lock") {
+        TestRuntimeStallOutsideLayerLock(game);
+    } else if (bridged && only && std::string(only) == "toolkit-below-framegen-off") {
+        TestToolkitBelowKeepsFrameGenOff(game);
+    } else if (bridged && only && std::string(only).rfind("gpu-bound-dynamic", 0) == 0) {
+        const std::string which = only;
+        if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-plain") TestBridgedGpuBoundDynamic(game, false);
+        if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-quad") TestBridgedGpuBoundDynamic(game, false, true);
+        if (which == "gpu-bound-dynamic" || which == "gpu-bound-dynamic-pimax") TestBridgedGpuBoundDynamic(game, true);
+        if (which == "gpu-bound-dynamic-kneeboard") TestBridgedGpuBoundDynamic(game, false, false, true);
+        if (which == "gpu-bound-dynamic-pimax-quad") TestBridgedGpuBoundDynamic(game, true, true);
+        if (which == "gpu-bound-dynamic-pimax-kneeboard") TestBridgedGpuBoundDynamic(game, true, false, true);
+    } else if (bridged) {
         TestKeepGameQueue(game);
         TestBridgeOffSession(game);
         TestRefusedD3D12Session(game);
@@ -5381,6 +7359,18 @@ int main(int argc, char** argv) {
         TestDestroyInstanceWithSession(game);
         TestStatusFile(game);
         TestReleaseOnAnotherThread(game);
+        TestContextHeldAcrossRelease(game);
+        TestQuadViewsUnderHeldContext(game);
+        TestUnstagedReleaseUnderHeldContext(game);
+        TestNativeCaptureUnderHeldContext(game);
+        TestNativeGenerateUnderHeldContext(game);
+        TestPrivateDepthSession(game, false);
+        TestPrivateDepthSession(game, true);
+        TestDepthRects(game, false);
+        TestDepthRects(game, true);
+        TestDepthRects(game, false, false);
+        TestRuntimeStallOutsideLayerLock(game);
+        TestToolkitBelowKeepsFrameGenOff(game);
         TestBridgedQuadViewsComposed(game, false);
         TestBridgedQuadViewsComposed(game, true);
         TestBridgedQuadFrameGen(game, "extrapolate");
@@ -5390,6 +7380,12 @@ int main(int argc, char** argv) {
         TestSideBySideFrameGen(game, "interpolate");
         TestSideBySideFrameGen(game, "extrapolate", true);
         TestSideBySideFrameGen(game, "interpolate", true);
+        TestBridgedGpuBoundDynamic(game, false);
+        TestBridgedGpuBoundDynamic(game, false, true);
+        TestBridgedGpuBoundDynamic(game, true);
+        // OpenKneeboard above VectorXR on PimaxXR (the report's setup): its
+        // quad acquired, waited for, drawn and released inside xrEndFrame.
+        TestBridgedGpuBoundDynamic(game, true, false, true);
         if (!skip_negative_controls) {
             TestQuitWhilePresenterHeld(game, false);
             TestQuitWhilePresenterHeld(game, true);

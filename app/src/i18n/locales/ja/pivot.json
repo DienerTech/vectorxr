@@ -16,7 +16,8 @@
     "noCustomProfiles": "カスタム プロファイルはまだありません。Pivot の回転を特定のアプリケーションにバインドするには、プロファイルを追加してください。",
     "profileNumber": "プロファイル {number}",
     "nudgeSetDefaultName": "微調整セット",
-    "nudgeSetCopyName": "{name} のコピー"
+    "nudgeSetCopyName": "{name} のコピー",
+    "profileCopyName": "{name} のコピー"
   },
   "warnings": {
     "noActivationTitle": "モーション アシストの有効化がありません",

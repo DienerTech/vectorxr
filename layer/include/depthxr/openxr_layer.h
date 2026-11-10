@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -46,6 +47,8 @@
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
 #include "depthxr/turbo_prediction_history.h"
+#include "depthxr/turbo_probe_guard.h"
+#include "depthxr/upstream_turbo.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/handshake_census.h"
@@ -69,6 +72,9 @@ struct ID3D11VertexShader;
 
 namespace depthxr {
 
+class GameContextLock;
+class GameContextHold;
+
 #if defined(DEPTHXR_TESTING)
 class TurboFrameTestPeer;
 #endif
@@ -85,8 +91,34 @@ class OpenXrLayer {
     void SetLayerDirectory(std::filesystem::path dll_directory);
     void SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr);
     bool CanCreateInstance();
+    // A second instance passed straight through (layer_entry.cpp's
+    // PassThroughInstance): said in the first instance's log.
+    void NotePassThroughInstance(const std::string& application_name, XrResult result);
+    // Another instance is being created while VectorXR's is alive. An instance
+    // that enabled no graphics extension and never asked for a session cannot
+    // have a session VectorXR could serve: OpenXR Toolkit's and
+    // Quad-Views-Foveated's probe instance, which they keep alive on VIVE
+    // runtimes. VectorXR lets it go as at xrDestroyInstance, without
+    // destroying it in the runtime, and answers true with what its calls
+    // go on to (it passes straight through from here); the new instance is
+    // VectorXR's. Any other instance keeps VectorXR (false).
+    struct RetiredInstance {
+        XrInstance instance{XR_NULL_HANDLE};
+        PFN_xrGetInstanceProcAddr next_get_instance_proc_addr{nullptr};
+        PFN_xrDestroyInstance next_destroy_instance{nullptr};
+    };
+    bool RetireIdleInstance(const std::string& next_application_name, RetiredInstance* retired);
+    // The application's name as it created the instance.
+    std::string application_name_;
+    // Native quad views on a runtime that shows the focus views with the FOVs
+    // it located for the frame's display time (PimaxXR, DCS World).
+    bool RuntimeTakesFocusFovsFromLocateLocked() const;
+    bool native_quad_focus_shares_eye_poses_{false};
+    bool has_logged_focus_fov_quirk_convergence_{false};
 
     struct InstanceCreateDiagnostics {
+        // "absent", "above" or "below" VectorXR.
+        std::string quad_views_foveated{"absent"};
         bool turbo_clock_enabled{false};
         bool app_requested_quad_views{false};
         bool app_requested_varjo_foveated_rendering{false};
@@ -145,9 +177,9 @@ class OpenXrLayer {
         // The names of the layers below VectorXR, nearest first.
         std::string layers_below;
         // Where OpenXR Toolkit is: "absent", "below", "above", or
-        // "above-bypassed" (its per-application bypass passes everything
-        // through). Above VectorXR it gets a game's quad views, which it does
-        // not support.
+        // "above-bypassed" / "below-bypassed" (its per-application bypass
+        // passes everything through). Above VectorXR it gets a game's quad
+        // views, which it does not support; below it, Frame Generation's frames.
         std::string openxr_toolkit{"absent"};
         // The space-warp probe (spacewarp_probe.h): VECTORXR_SPACEWARP_PROBE
         // (parsed, and as set: empty when it is not), what the application
@@ -195,6 +227,9 @@ class OpenXrLayer {
     void AbandonInstance();
     XrResult GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
     XrResult DestroyInstance(XrInstance instance);
+    // DestroyInstance's teardown; `in_runtime` false keeps the runtime's
+    // instance (RetireIdleInstance).
+    XrResult EndInstance(XrInstance instance, bool in_runtime);
     XrResult CreateSession(XrInstance instance, const XrSessionCreateInfo* create_info, XrSession* session);
     XrResult DestroySession(XrSession session);
     XrResult BeginSession(XrSession session, const XrSessionBeginInfo* begin_info);
@@ -316,7 +351,7 @@ class OpenXrLayer {
     friend class SpaceWarpProbeTestPeer;
 #endif
 
-    OpenXrLayer() = default;
+    OpenXrLayer();
     ~OpenXrLayer();
 
     struct SwapchainInfo {
@@ -599,7 +634,8 @@ class OpenXrLayer {
     // (and again after a config change); the verdict/stall helpers run on the
     // frame thread after the lock is released.
     void ResolveTurboPacingModeLocked();
-    void RecordTurboPacingVerdict(TurboPacingMode mode, const char* source, std::int64_t stable_seconds);
+    void RecordTurboPacingVerdict(TurboPacingMode mode, const char* source, std::int64_t stable_seconds,
+                                  std::int64_t early_probe_failures = 0);
     void QueueRuntimePacingWrite(RuntimePacingObservation observation);
     void DrainRuntimePacingWrites();
     void NoteTurboPacingStableFrame(double app_frame_delta_ms);
@@ -609,10 +645,16 @@ class OpenXrLayer {
     // Releases config_lock (mutex_) before any blocking runtime call so
     // xrLocateViews/xrLocateSpace from other app threads are never serialized
     // behind the compositor pacing wait. Call as the tail of EndFrame only.
+    // `context_hold`: EndFrame's hold of the game's Direct3D 11 context
+    // (game_context_), let go with config_lock.
     XrResult ForwardEndFrame(XrSession session,
                              const XrFrameEndInfo* frame_end_info,
-                             std::unique_lock<std::mutex>& config_lock);
+                             std::unique_lock<std::mutex>& config_lock,
+                             GameContextHold* context_hold = nullptr);
     void ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_end_info);
+    // At the app's xrEndFrame: whether a layer above pipelines its frames
+    // already (upstream_turbo_); logs once when that is first seen.
+    bool NoteUpstreamTurboFrame();
     void ArmTurboAsyncHandoffLocked(const char* reason);
     void PublishTurboAsyncHandoffLocked();
     void CancelTurboAsyncHandoffLocked(const char* reason);
@@ -724,9 +766,21 @@ class OpenXrLayer {
     // swapchain's: while the Vulkan bridge gives the game's motion vector
     // images back at their releases (vulkan_bridge_motion_), each
     // swapchain's copies are made first, then the captures and releases.
+    // `forward_later`: the releases due on to the runtime are added to it
+    // (a swapchain per release) instead, for ForwardHandedOverReleases.
     XrResult HandOverBridgedReleasesLocked(XrSwapchain swapchain, SwapchainInfo& info, std::string_view reason,
-                                           bool copy = true);
-    XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true);
+                                           bool copy = true, std::vector<XrSwapchain>* forward_later = nullptr);
+    XrResult HandOverBridgedReleasesLocked(std::string_view reason, bool copy = true,
+                                           std::vector<XrSwapchain>* forward_later = nullptr);
+    // The releases a hand-over left for later, on to the runtime with
+    // `lock` (of mutex_) let go meanwhile: a runtime's swapchain calls can
+    // stall for a refresh (PimaxXR's xrEndFrame holds their lock, called from
+    // Frame Generation's thread), and the game's other threads' calls into
+    // the layer must not wait for that. The caller holds
+    // bridge_handover_mutex_, so no other hand-over or swapchain call of the
+    // game's comes between the hand-over and its releases.
+    XrResult ForwardHandedOverReleases(std::unique_lock<std::mutex>& lock, std::vector<XrSwapchain>& releases,
+                                       std::string_view reason);
     // At a session's (or an instance's) end, before the Vulkan bridge's
     // Escape: releases no frame's end handed over still give the game's
     // rendering into their images to the bridge (its Released, not Frame
@@ -890,13 +944,23 @@ class OpenXrLayer {
     bool EnsureD3D11QuadViewsPixelProbeResources(int64_t format);
     void ReleaseD3D11QuadViewsPixelProbeResources(bool preserve_history);
     void PollD3D11QuadViewsPixelProbe();
+    // `eye_in_view`: each stereo eye's orientation relative to VIEW when the
+    // runtime's eyes are canted (CantedEyeOrientations), else null.
     bool SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
                                        const QuadViewsSettings& quadviews_settings,
                                        double focus_yaw_radians,
                                        double focus_pitch_radians,
                                        uint32_t view_capacity_input,
                                        uint32_t* view_count_output,
-                                       XrView* views) const;
+                                       XrView* views,
+                                       const std::array<XrQuaternionf, 2>* eye_in_view = nullptr) const;
+    // Whether the two stereo eyes the runtime located are turned from each
+    // other (a canted display), and if so each eye's orientation relative to
+    // VIEW at the locate's display time. Caller holds mutex_.
+    bool CantedEyeOrientations(XrSession session,
+                               const XrViewLocateInfo& view_locate_info,
+                               std::span<const XrView> stereo_views,
+                               std::array<XrQuaternionf, 2>* eye_in_view);
     XrResult LocateSpaceWithPivot(XrSpace space,
                                   XrSpace base_space,
                                   XrTime time,
@@ -982,7 +1046,16 @@ class OpenXrLayer {
     // be sharpened is left untouched (submits the app's unsharpened focus).
     void SharpenNativeFocusViews(std::vector<XrCompositionLayerProjectionView>& views, XrTime display_time);
 
+    // The game's Direct3D 11 device's lock (a Direct3D 11 session's, bridged
+    // or not; set at xrCreateSession): taken before bridge_handover_mutex_
+    // and mutex_ by every call that uses the game's immediate context under
+    // them (GameContextLock), while the game's device is multithread
+    // protected. Made with the layer, never replaced.
+    std::unique_ptr<GameContextLock> game_context_;
     std::mutex mutex_;
+    // Held across a bridged hand-over and its releases' runtime calls
+    // (ForwardHandedOverReleases), which go without mutex_; taken before mutex_.
+    std::mutex bridge_handover_mutex_;
     std::filesystem::path dll_directory_;
     std::filesystem::path config_path_;
     std::filesystem::path log_path_;
@@ -1088,6 +1161,7 @@ class OpenXrLayer {
     D3D11Bridge d3d11_bridge_;
     bool d3d11_bridge_lost_logged_{false};    // mutex_
     bool d3d11_bridge_depth_logged_{false};   // mutex_
+    bool depth_rect_logged_{false}; // mutex_: a depth sub-image outside its image was left out (any session)
     bool d3d11_bridge_sharpen_logged_{false}; // mutex_
     std::chrono::steady_clock::time_point d3d11_bridge_last_summary_; // mutex_
     // Quad views frames of a bridged session (mutex_): composed by Frame
@@ -1120,6 +1194,53 @@ class OpenXrLayer {
     std::optional<TraceQuadSpace> pending_trace_quad_space_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_summarized_;
+    // The game's swapchain calls while the bridge is active: how long each
+    // took in the layer and the runtime, for the bridge's summary (a game
+    // blocked inside its own frame, DCS 2026-10-22: 57 ms of a frame with
+    // its thread 41% busy, the GPU half idle).
+    struct BridgeCallTiming {
+        std::atomic<std::uint64_t> calls{0};
+        std::atomic<std::uint64_t> total_ns{0};
+        std::atomic<std::uint64_t> max_ns{0};
+        void Add(std::uint64_t ns) {
+            ++calls;
+            total_ns += ns;
+            for (std::uint64_t seen = max_ns.load(); ns > seen && !max_ns.compare_exchange_weak(seen, ns);) {
+            }
+        }
+        // "avg/max" ms since the last call, then starts over.
+        std::string Take() {
+            const std::uint64_t count = calls.exchange(0);
+            const std::uint64_t total = total_ns.exchange(0);
+            const std::uint64_t most = max_ns.exchange(0);
+            if (!count) return "-";
+            const auto ms = [](double ns) {
+                const long long hundredths = std::llround(ns / 1e4);
+                return std::to_string(hundredths / 100) + "." + (hundredths % 100 < 10 ? "0" : "") +
+                       std::to_string(hundredths % 100);
+            };
+            return ms(static_cast<double>(total) / static_cast<double>(count)) + "/" + ms(static_cast<double>(most));
+        }
+    };
+    std::array<BridgeCallTiming, 3> bridge_call_timing_; // acquire, wait, release
+    class BridgeCallTimer {
+      public:
+        explicit BridgeCallTimer(BridgeCallTiming* timing)
+            : timing_(timing), start_(timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+        ~BridgeCallTimer() {
+            if (timing_) {
+                timing_->Add(static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start_)
+                        .count()));
+            }
+        }
+        BridgeCallTimer(const BridgeCallTimer&) = delete;
+        BridgeCallTimer& operator=(const BridgeCallTimer&) = delete;
+
+      private:
+        BridgeCallTiming* timing_;
+        std::chrono::steady_clock::time_point start_;
+    };
     // Vulkan games with Frame Generation: the session is Direct3D 12 and the
     // game renders into images shared with it (see VulkanBridge); decided at
     // xrCreateSession. Frame Generation runs a Vulkan session only through it.
@@ -1132,6 +1253,8 @@ class OpenXrLayer {
     // Frame Generation's captures (HandOverBridgedReleasesLocked). mutex_.
     bool vulkan_bridge_motion_{false};
     std::chrono::steady_clock::time_point vulkan_bridge_last_summary_; // mutex_
+    std::chrono::steady_clock::time_point vulkan_bridge_last_depth_poll_; // mutex_
+
     // Either bridge's swapchain, and one whose runtime images never get
     // anything (its calls need no ordering with the game's queue).
     bool BridgedSwapchain(XrSwapchain swapchain) const {
@@ -1319,6 +1442,12 @@ class OpenXrLayer {
     // number of extensions it enabled for it.
     bool instance_requested_session_{false};
     uint32_t instance_enabled_extension_count_{0};
+    // The application enabled a graphics API's extension (or a headless
+    // one): the instance can create a session.
+    bool instance_enabled_session_extension_{false};
+    // RetireIdleInstance's line for the next instance's log (the retired
+    // instance's own log is a probe's, removed with it).
+    std::string retired_instance_note_;
     std::vector<PivotProfileInputState> pivotxr_profile_input_states_;
     // IsPivotXrActive's per-call claim lists (under mutex_), kept so the
     // locate paths do not allocate.
@@ -1387,6 +1516,19 @@ class OpenXrLayer {
     };
     std::vector<PivotReferenceChange> pivotxr_reference_changes_;
     bool PivotAnchorAffectedBy(XrReferenceSpaceType type) const;
+    // A runtime that recenters without the event (PimaxXR): the head located
+    // at the previous drive, against which a jump no head can make is taken
+    // as a recenter (NoteSilentRecenterLocked). Not watched once the runtime
+    // has sent a reference space change itself.
+    struct PivotDriveSample {
+        XrTime time{0};
+        XrSpace reference_space{XR_NULL_HANDLE};
+        XrPosef view_pose{};
+    };
+    std::optional<PivotDriveSample> pivotxr_last_drive_;
+    bool pivotxr_runtime_reports_recenters_{false};
+    uint32_t pivotxr_silent_recenter_logs_{0};
+    void NoteSilentRecenterLocked(XrTime time, XrSpace reference_space, const XrPosef& view_pose);
     bool depthxr_toggle_enabled_{true};
     bool depthxr_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
@@ -1528,7 +1670,18 @@ class OpenXrLayer {
     // runtime, or the in-session fallback after async tripped.
     enum class TurboPacingSource { kForced, kPinned, kDiscovered, kProbing, kFallback };
     std::uint64_t turbo_test_started_at_{0};
-    bool TryTurboAutoFallbackLocked(const std::string& reason);
+    bool TryTurboAutoFallbackLocked(const std::string& reason,
+                                    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+    // Auto's async probe (frame thread): stalls in its first seconds are not
+    // counted, and a fallback within seconds of engaging is "early"
+    // (TurboProbeGuard, runtime_pacing.h).
+    TurboProbeGuard turbo_probe_guard_;
+    int turbo_probe_grace_log_budget_{0};
+    // This session's sequenced fallback came from a probe that failed early.
+    bool turbo_fallback_early_{false};
+    // The recorded sequenced verdict a re-probe is testing again: its outcome
+    // is recorded at once if async falls back (sequenced is already proven).
+    std::optional<RuntimePacingObservation> turbo_reprobe_of_;
     // Frame-submission-thread only (resolved under the config lock at
     // EndFrame, consumed after it is released); the sequenced state machine
     // below is turbo_mutex_-guarded because WaitFrame/BeginFrame consult it.
@@ -1558,6 +1711,11 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> session_begin_wall_time_;
     bool turbo_cadence_pause_logged_{false};
     double turbo_last_frame_blocked_ms_{0.0};
+    // A layer above already pipelining the game's frames (OpenXR Toolkit's
+    // Turbo, upstream_turbo.h), under turbo_mutex_. Detected, Turbo stands
+    // aside for the session.
+    UpstreamTurboDetector upstream_turbo_;
+    bool upstream_turbo_logged_{false};
     // Sequenced pacing state machine (turbo_mutex_). DCS overlaps xrWaitFrame
     // (sim thread) with xrEndFrame (render thread) — spec-legal — so the
     // fabrication shield must never have a per-frame gap, and establishment
@@ -1796,6 +1954,24 @@ class OpenXrLayer {
     // Quadviews stays off and the game runs stereo.
     bool openxr_toolkit_above_{false};
     bool openxr_toolkit_quadviews_logged_{false};
+    // OpenXR Toolkit is below VectorXR for this instance (not bypassed): it
+    // holds every release back until its next xrEndFrame and then releases
+    // every swapchain it held, and is not safe to call from two threads, so
+    // Frame Generation (more frames than the game's, from its own thread)
+    // stays off.
+    bool openxr_toolkit_below_{false};
+    bool openxr_toolkit_framegen_logged_{false};
+    // Frame Generation was asked for but is kept off for that reason; the
+    // OSD says so instead of a plain Off (read on the OSD's thread).
+    std::atomic<bool> framegen_off_for_toolkit_{false};
+    // The layers below VectorXR (names, nearest first) for this instance:
+    // with Frame Generation they get every frame it shows, from its thread,
+    // and (Direct3D 12) its queue as the session's. The session's frames the
+    // game ended and the frames the runtime got, for the session's end.
+    std::string layers_below_;
+    std::atomic<std::uint64_t> game_frames_ended_{0};
+    std::atomic<std::uint64_t> runtime_frames_ended_{0};
+    bool layers_below_get_framegen_{false}; // the session's (StartFrameGen)
     bool defer_quadviews_swapchain_releases_{false};
     // Quadviews changes the application's view/swapchain topology. Once a session
     // is created, keep its initial activation state until teardown so a config
@@ -1811,6 +1987,7 @@ class OpenXrLayer {
     XrSpace varjo_native_view_space_{XR_NULL_HANDLE};
     XrSpace varjo_native_combined_eye_space_{XR_NULL_HANDLE};
     bool varjo_native_rendering_gaze_tracked_{false};
+    bool has_logged_varjo_native_rendering_gaze_uninformative_{false};
     bool has_logged_varjo_native_rendering_gaze_active_{false};
     bool has_logged_varjo_native_rendering_gaze_unavailable_{false};
     bool varjo_native_foveation_resources_attempted_{false};
@@ -1853,6 +2030,7 @@ class OpenXrLayer {
     uint32_t pending_quadviews_pixel_diagnostics_{0};
     bool has_active_primary_view_configuration_{false};
     bool has_logged_quad_view_short_count_{false};
+    bool has_logged_canted_quadviews_eyes_{false};
     bool has_logged_pivotxr_spike_mode_{false};
     bool has_logged_quadviews_view_configuration_capabilities_{false};
     uint64_t varjo_native_view_configuration_calls_{0};
@@ -1944,6 +2122,26 @@ class OpenXrLayer {
     std::optional<XrResult> last_app_action_sync_result_;
     std::optional<XrResult> last_eye_gaze_self_sync_result_;
     XrSessionState observed_session_state_{XR_SESSION_STATE_UNKNOWN};
+    // A new session's first state event not yet seen: events the runtime kept
+    // from the previous session (PimaxXR) are not taken as this one's state.
+    // Head prediction's answer to one xrLocateSpace query (space, base) at one
+    // display time, as its first locate gave it: later locates of the query
+    // at that time answer the same (LocateSpace). Never used for another time.
+    struct HeadExtensionAnswer {
+        XrTime time{0};
+        XrSpace space{XR_NULL_HANDLE};
+        XrSpace base_space{XR_NULL_HANDLE};
+        XrTime limit{0};
+        bool applied{false};
+        XrPosef pose{};
+    };
+    static constexpr std::size_t kHeadExtensionAnswersKept = 8;
+    std::vector<HeadExtensionAnswer> head_extension_answers_;
+    bool awaiting_session_start_event_{false};
+    XrTime session_create_time_{0};
+    uint32_t stale_session_event_logs_{0};
+    void NoteSessionCreatedLocked(XrTime create_time);
+    bool IsStaleSessionEventLocked(const XrEventDataSessionStateChanged& change);
     bool eye_gaze_sync_not_focused_{false};
     uint32_t eye_gaze_sync_transition_logs_remaining_{32};
     std::optional<std::chrono::steady_clock::time_point> last_eye_gaze_bound_sources_probe_;
@@ -1953,6 +2151,19 @@ class OpenXrLayer {
     std::string eye_gaze_unfocused_outcome_;
     std::optional<XrQuaternionf> eye_gaze_unfocused_last_orientation_;
     uint32_t eye_gaze_unfocused_identical_frames_{0};
+    // The focused session's gaze as last located, at which display time, and
+    // for how many display times in a row it has not changed at all.
+    std::optional<XrQuaternionf> eye_gaze_focused_last_orientation_;
+    XrTime eye_gaze_focused_last_time_{0};
+    uint32_t eye_gaze_focused_identical_frames_{0};
+    bool eye_gaze_focused_frozen_logged_{false};
+    // Diagnostic: the display time since which the focused gaze has stayed
+    // near (yaw, pitch); logged once per episode, a few times per session.
+    std::optional<XrTime> eye_gaze_still_since_;
+    double eye_gaze_still_yaw_{0.0};
+    double eye_gaze_still_pitch_{0.0};
+    bool eye_gaze_still_logged_{false};
+    int eye_gaze_still_logs_remaining_{8};
     uint32_t eye_gaze_unfocused_logs_remaining_{16};
     // Focused and inactive since (reset by valid gaze or focus loss); the
     // "no data" line is logged once per session.

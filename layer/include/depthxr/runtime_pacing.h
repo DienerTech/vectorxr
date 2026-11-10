@@ -31,7 +31,28 @@ struct RuntimePacingObservation {
     // verdict, and how long the winning mode ran clean.
     std::int64_t probe_timeouts{0};
     std::int64_t stable_seconds{0};
+    // Async probes in a row that fell back to sequenced within seconds of
+    // engaging (TurboProbeGuard). One such verdict is provisional: the next
+    // session probes async again. 0 in records from before 0.20.1.
+    std::int64_t early_probe_failures{0};
 };
+
+// A recorded sequenced verdict is probed with async again once its evidence
+// may be stale; the re-probe records its outcome either way, so each reason
+// costs at most one probe (two when the re-probe also fails early):
+//  - the async probe behind it fell back early, once (kEarlyProbeFailureLimit
+//    early failures in a row and the verdict stands);
+//  - it was recorded by another VectorXR version, or last used with another
+//    runtime version (both empty-tolerant: no version, no reason);
+//  - it is older than kReprobeAge (testStartedAt, the session that tested it).
+// Async verdicts are never re-probed here: async failing later falls back in
+// the session. Returns the reason, or nothing when the verdict stands.
+inline constexpr std::int64_t kEarlyProbeFailureLimit = 2;
+inline constexpr std::int64_t kReprobeAgeMs = 30LL * 24 * 60 * 60 * 1000;
+std::optional<std::string> RuntimePacingReprobeReason(const RuntimePacingObservation& observation,
+                                                      const std::string& layer_version,
+                                                      const std::string& runtime_version,
+                                                      std::int64_t now_unix_ms);
 
 std::filesystem::path ResolveRuntimePacingPath();
 

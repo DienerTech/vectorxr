@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -160,8 +161,11 @@ void FeatherOsdPixels(const std::uint32_t* bits, std::uint32_t* pixels, int pane
 // Produces premultiplied sRGB pixels for an sRGB OpenXR swapchain.
 OsdBitmap RasterizeOsd(const OsdSettings&, bool compact, const OsdSnapshot&, const OsdTelemetry&, bool rgba);
 
+class GameContextLock;
+
 class OsdRenderer {
   public:
+    OsdRenderer();
     ~OsdRenderer();
     void Initialize(XrSession, ID3D11Device*, std::uint32_t max_layers, OsdDispatch);
     void InitializeGraphics(XrSession, const void* binding_chain, std::uint32_t max_layers, OsdDispatch, Logger*, std::string identity);
@@ -184,8 +188,13 @@ class OsdRenderer {
     // Called for every runtime xrEndFrame, after game-layer transforms: on the
     // application's end-frame thread, or Frame Generation's presenter thread.
     // Makes runtime calls (swapchain images; a world-anchored panel's space and
-    // head location) under the renderer's lock.
+    // head location) under the renderer's lock. Direct3D 11: while the panel
+    // is drawn, the game's device's lock is taken before the renderer's
+    // (GameContextLock), as its upload uses the game's immediate context.
     const XrCompositionLayerBaseHeader* Append(const XrFrameEndInfo&, bool should_render);
+    // Tests: called on Append's thread just before it takes the game's
+    // device's lock (GameContextLock::SetWaitHookForTest).
+    void SetContextWaitHookForTest(std::function<void()> hook);
     OsdStatus Status() const;
     // Places the panel in the world at each frame's head pose, located at
     // that frame's own display time, instead of in the VIEW space. A runtime
@@ -202,6 +211,9 @@ class OsdRenderer {
     void Event(bool error, std::string message);
     std::vector<std::pair<LogLevel,std::string>> CollectDiagnosticsLocked(bool final);
     std::size_t Mode() const;
+    // The Direct3D 11 game's device's lock (InitializeGraphics), made with
+    // the renderer: read by Append before mutex_.
+    const std::unique_ptr<GameContextLock> context_lock_;
     mutable std::mutex mutex_;
     XrSession session_{XR_NULL_HANDLE};
     XrSwapchain swapchain_{XR_NULL_HANDLE};

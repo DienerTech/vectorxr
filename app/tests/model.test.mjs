@@ -7,6 +7,7 @@ import {
   createPivotQuickView,
   defaultConfig,
   createPivotProfile,
+  duplicatePivotProfile,
   normalizeConfig,
   normalizeKeyboardKey,
   pivotBindingConflictWarnings,
@@ -612,4 +613,32 @@ test('0.15 and 0.15.1 configs preserve existing settings, profiles, and bindings
   assert.deepEqual(normalized.modules.quadviews.diagnosticVisualizationBinding, none())
   assert.deepEqual(validateConfig(normalized), [])
   assert.deepEqual(normalizeConfig(normalized), normalized)
+})
+
+test('Duplicating a Pivot profile copies its settings under fresh ids', () => {
+  const config = defaultConfig()
+  config.applications = [{ id: 'dcs-world', name: 'DCS World', enabled: true, match: { exe: 'DCS.exe' } }]
+  const appId = 'dcs-world'
+  const source = createPivotProfile(config.modules.pivotxr.defaults, [appId], false, [activation('hold', keyboard('F1'))])
+  source.name = 'DCS Hornet'
+  source.settings.rotationMultiplier = 1.7
+  source.viewControls.quickViews.push(createPivotQuickView('Left'))
+  const copy = duplicatePivotProfile(source)
+
+  assert.notEqual(copy.id, source.id)
+  assert.equal(copy.name, 'DCS Hornet Copy')
+  assert.deepEqual(copy.applicationIds, [appId])
+  assert.equal(copy.settings.rotationMultiplier, 1.7)
+  assert.deepEqual(copy.activationBindings, source.activationBindings)
+  assert.equal(copy.nudgeSetId, source.nudgeSetId)
+  assert.notEqual(copy.viewControls.quickViews[0].id, source.viewControls.quickViews[0].id)
+
+  copy.applicationIds = []
+  copy.settings.rotationMultiplier = 1
+  assert.deepEqual(source.applicationIds, [appId])
+  assert.equal(source.settings.rotationMultiplier, 1.7)
+
+  copy.applicationIds = [appId]
+  config.modules.pivotxr.profiles.push(source, copy)
+  assert.deepEqual(validateConfig(config), [])
 })

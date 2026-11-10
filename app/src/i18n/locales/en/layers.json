@@ -21,7 +21,9 @@
     "turboLabel": "Turbo conflict:",
     "toolkitTurbo": "OpenXR Toolkit is enabled while VectorXR Turbo is in use. Two frame-pacing layers fight each other — if OXRTK's Turbo Mode is on, disable it there or in VectorXR, never both.",
     "quadviewsOffLabel": "Quadviews off:",
-    "toolkitQuad": "OpenXR Toolkit is above VectorXR ({slices}). It does not support quad views, so VectorXR keeps Quadviews off for every game OpenXR Toolkit runs in. Disable OpenXR Toolkit, or turn it off for those games, to use Quadviews."
+    "toolkitQuad": "OpenXR Toolkit is above VectorXR ({slices}). It does not support quad views, so VectorXR keeps Quadviews off for every game OpenXR Toolkit runs in. Disable OpenXR Toolkit, or turn it off for those games, to use Quadviews.",
+    "frameGenOffLabel": "Frame Generation off:",
+    "toolkitFrameGen": "OpenXR Toolkit is below VectorXR ({slices}). It can't handle Frame Generation's extra frames there, so VectorXR keeps Frame Generation off in every game OpenXR Toolkit runs in. Move OpenXR Toolkit above VectorXR, or turn it off for those games, to use Frame Generation."
   },
   "status": {
     "unlocked": "Machine-wide OpenXR layer writes are unlocked for this app session.",

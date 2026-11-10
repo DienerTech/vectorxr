@@ -25,14 +25,32 @@ const props = defineProps<{
   applications: RegisteredApplication[]
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   addPivotProfile: []
+  duplicatePivotProfile: [index: number]
   removePivotProfile: [index: number]
   movePivotProfile: [index: number, direction: -1 | 1]
   syncPivotProfileName: [index: number]
 }>()
 
 const compatibilityInfoOpen = ref(false)
+
+// After a duplicate, bring the copy into view and pulse it briefly so it's
+// clear where it landed. 'nearest' leaves the page alone when it's visible.
+const flashProfileId = ref<string | null>(null)
+let flashTimer: ReturnType<typeof setTimeout> | undefined
+
+async function duplicateProfile(index: number) {
+  emit('duplicatePivotProfile', index)
+  const copy = props.config.modules.pivotxr.profiles[index + 1]
+  if (!copy) return
+  await nextTick()
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  document.querySelector(`[data-profile-id="${CSS.escape(copy.id)}"]`)?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' }) // i18n-ignore
+  flashProfileId.value = copy.id
+  clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => { flashProfileId.value = null }, 1200)
+}
 const centeringInfoOpen = ref(false)
 
 // Bindings are edited on a dedicated sub-page (not a dialog) so the editors
@@ -472,6 +490,9 @@ const profileOverviewWarningIndexes = computed(() => profileWarningState.value.o
         <ProfileShell
           v-for="(profile, index) in config.modules.pivotxr.profiles"
           :key="profile.id"
+          :data-profile-id="profile.id"
+          class="pivot-profile-card"
+          :class="{ 'pivot-profile-flash': flashProfileId === profile.id }"
           :index="index"
           :profile="profile"
           :applications="applications"
@@ -479,7 +500,9 @@ const profileOverviewWarningIndexes = computed(() => profileWarningState.value.o
           :warning-title="t('pivot.tab.bindingWarning')"
           :warnings="profileWarnings.get(index)"
           reorderable
+          duplicable
           :profile-count="config.modules.pivotxr.profiles.length"
+          @duplicate="duplicateProfile(index)"
           @remove="$emit('removePivotProfile', index)"
           @move="$emit('movePivotProfile', index, $event)"
           @sync-name="$emit('syncPivotProfileName', index)"
@@ -613,9 +636,38 @@ const profileOverviewWarningIndexes = computed(() => profileWarningState.value.o
   transition: transform 0.3s ease;
 }
 
+/* A new card (Add or Duplicate) fades and slides in; the cards below it slide
+   down via the move class above. */
+.pivot-profile-enter-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.pivot-profile-enter-from {
+  opacity: 0;
+  transform: translateY(-0.5rem);
+}
+
+/* Keeps a scrolled-to card clear of the sticky Custom Profiles header. */
+.pivot-profile-card {
+  scroll-margin-top: 6rem;
+  scroll-margin-bottom: 1rem;
+}
+
+/* Brief accent ring on a fresh duplicate; it fades back out on its own. */
+.pivot-profile-flash {
+  animation: pivot-profile-flash 1.2s ease-out;
+}
+@keyframes pivot-profile-flash {
+  0%, 35% { outline: 2px solid var(--app-accent); outline-offset: 2px; }
+  100% { outline: 2px solid transparent; outline-offset: 2px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .pivot-profile-move {
+  .pivot-profile-move,
+  .pivot-profile-enter-active {
     transition: none;
+  }
+  .pivot-profile-flash {
+    animation: none;
   }
 }
 </style>

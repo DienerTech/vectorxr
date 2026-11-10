@@ -312,6 +312,104 @@ void FirstShownImageTest(ID3D12Device* device) {
     std::cout << "First shown image synchronization passed\n";
 }
 
+// A GPU-bound game's shown layer (OpenKneeboard's, or its interface quad),
+// acquired and waited for at each frame's start: its wait must not wait for
+// the game's last frame's work while the runtime has a release of another
+// image newer than the waited image's (it did, for the newest held-back
+// release: the game's GPU idled through its CPU work, 2026-11-01). The wait
+// is held back behind the release instead, in order. Waiting for the image
+// the runtime shows waits on the CPU for the oldest held-back release only.
+void ShownLayerPipelinedWaitTest(ID3D12Device* device) {
+    Harness h(device);
+    h.Frame(kUi, false);
+    h.Submit({kUi}, true);
+    h.HoldGame(1);
+    h.Frame(kUi, false);
+    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    std::uint32_t image = 0;
+    Check(h.substitution.Acquire(kUi, 3, kCalls, &acquire, &image) == XR_SUCCESS && image == 2,
+          "the third frame's acquire hands out an image the runtime never showed");
+    auto start = std::chrono::steady_clock::now();
+    Check(h.substitution.Wait(kUi, false, kCalls, &wait) == XR_SUCCESS, "the third frame's wait");
+    const auto waited = std::chrono::steady_clock::now() - start;
+    Check(waited < std::chrono::milliseconds(50) && h.runtime.chains.at(kUi).calls == "awrawa" &&
+              h.Chain(kUi).find("heldWaits=1 heldReleases=1") != std::string::npos &&
+              h.substitution.ShownLayers().cpu_waits == 0 && h.substitution.ShownLayers().gpu_waits == 0,
+          "the wait is held back behind the unfinished release, not waited for (" + h.runtime.chains.at(kUi).calls +
+              ", " + h.Chain(kUi) + ")");
+    Check(h.runtime_marker.Reaches(h.runtime_queue), "the runtime's queue does not wait for the game's work");
+    Check(h.substitution.Release(kUi, false, kCalls, &release) == XR_SUCCESS, "the third frame's release");
+    // The fourth frame's image is the one the runtime shows: its wait waits
+    // for the oldest held-back release (finished meanwhile), then everything
+    // goes in order.
+    Check(h.substitution.Acquire(kUi, 3, kCalls, &acquire, &image) == XR_SUCCESS && image == 0,
+          "the fourth frame's acquire hands out the image the runtime shows");
+    std::thread work([&] {
+        Sleep(30);
+        h.gate->Signal(1);
+    });
+    start = std::chrono::steady_clock::now();
+    Check(h.substitution.Wait(kUi, false, kCalls, &wait) == XR_SUCCESS, "the fourth frame's wait");
+    const auto waited_shown = std::chrono::steady_clock::now() - start;
+    work.join();
+    // The CPU wait ends with the oldest release's work; the third frame's
+    // (signalled on the game's queue just after it) may not have run yet:
+    // then that release stays held back and so does this wait, behind it
+    // (the waited image is no longer the runtime's newest), in order.
+    const std::string& calls = h.runtime.chains.at(kUi).calls;
+    const bool all_ran = calls == "awrawaarwrw";
+    const bool third_pending = calls == "awrawaarw" && h.Chain(kUi).find("heldWaits=1 heldReleases=1") != std::string::npos;
+    Check(waited_shown >= std::chrono::milliseconds(20) && (all_ran || third_pending) &&
+              h.substitution.ShownLayers().cpu_waits == 1 && h.substitution.ShownLayers().gpu_waits == 0,
+          "waiting for the image the runtime shows waits for the oldest release before it on the CPU, in order (" +
+              calls + ", " + h.Chain(kUi) + ")");
+    Check(h.substitution.Release(kUi, false, kCalls, &release) == XR_SUCCESS, "the fourth frame's release");
+    h.FinishGame(1);
+    h.Submit({kUi}, true);
+    Check(h.runtime.chains.at(kUi).calls == "awrawaarwrwr" && h.runtime_marker.Reaches(h.runtime_queue),
+          "the last release reaches the runtime once its work has run");
+    std::cout << "Shown layer waits pipelined behind unfinished releases passed\n";
+}
+
+// The game's queue waits for the runtime's after an image wait only where
+// the runtime may have queued work for the image. On PimaxXR and Virtual
+// Desktop's runtime that is only before each image's first wait (barriers at
+// the first enumerate): after that, each wait made the game's next frame wait
+// for every frame Frame Generation had queued on the runtime's queue, and a
+// frame written just in time waits there for the game's last frame to be
+// measured (a gate stands for it here). Other runtimes keep the wait.
+void FirstUseOrderingTest(ID3D12Device* device, bool only_first_use) {
+    Harness h(device);
+    h.substitution.SetRuntimeQueuesOnlyFirstUse(only_first_use);
+    // Each image waited for once.
+    for (int i = 0; i < 3; ++i) h.Frame(kSource, true);
+    Check(h.game_marker.Reaches(h.game.Get()) && h.runtime_marker.Reaches(h.runtime_queue), "the first frames run");
+    ComPtr<ID3D12Fence> synthesis;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&synthesis))), "synthesis gate");
+    const test_gates::Guard guard(synthesis.Get());
+    Check(SUCCEEDED(h.runtime_queue->Wait(synthesis.Get(), 1)), "a frame written just in time, still waiting");
+    h.Frame(kSource, true);
+    const bool game_ran = h.game_marker.Reaches(h.game.Get(), 200);
+    if (only_first_use) {
+        Check(game_ran, "an image waited for before does not make the game's queue wait for the runtime's");
+        // A swapchain's first image: its first wait still orders the game's
+        // queue after the runtime's.
+        h.Frame(kUi, false);
+        Check(!h.game_marker.Reaches(h.game.Get(), 50), "an image's first wait still waits for the runtime's queue");
+    } else {
+        Check(!game_ran, "another runtime's waits keep the game's queue after the runtime's");
+    }
+    Check(SUCCEEDED(synthesis->Signal(1)), "the frame's measurement is done");
+    Check(h.runtime_marker.Reaches(h.runtime_queue) && h.game_marker.Reaches(h.game.Get()), "both queues run on");
+    const Swapchain& source = h.runtime.chains.at(kSource);
+    Check(source.calls.rfind("awra", 0) == 0 && source.calls.find("ww") == std::string::npos &&
+              source.calls.find("rr") == std::string::npos,
+          "the runtime's calls stay in order (" + source.calls + ")");
+    std::cout << "Image waits ordered " << (only_first_use ? "at first use only" : "every time") << " passed\n";
+}
+
 void AcquireExhaustionTest(ID3D12Device* device) {
     Harness h(device);
     h.HoldGame(1);
@@ -389,7 +487,10 @@ int main(int argc, char** argv) {
         StoppedShownLayerTest(device.Get());
         PassThroughUnderLoadTest(device.Get());
         FirstShownImageTest(device.Get());
+        ShownLayerPipelinedWaitTest(device.Get());
         AcquireExhaustionTest(device.Get());
+        FirstUseOrderingTest(device.Get(), false);
+        FirstUseOrderingTest(device.Get(), true);
     } else {
         std::cout << "FG_TEST_NO_STALL=1: skipped GPU fence-hold controls\n";
     }

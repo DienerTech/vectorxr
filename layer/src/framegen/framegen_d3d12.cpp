@@ -58,6 +58,8 @@ constexpr UINT kDescriptorsPerSynthesis = 256;
 // dispatch per capture slot, after every frame's range.
 constexpr UINT kShaderResources = 6;
 constexpr UINT kFirstUav = kShaderResources;
+// The root parameter holding the draws' edge fill (b1, FrameGenImage::content).
+constexpr UINT kFillParameter = 3;
 constexpr UINT kDescriptorsPerDispatch = kShaderResources + 2;
 // Engine motion vectors (CaptureMotion): submissions in flight, never waited
 // for, each with a block of descriptors per dispatch (the two eyes'
@@ -270,6 +272,10 @@ struct ViewResources {
     // frames read again (0: no frame's).
     std::uint64_t shading_frame{0};
     const Texture* shading_depth{nullptr};
+    // Edge fill: the output image the rates cover and where the frame starts
+    // in it (the frame's own extent and {0, 0} without the fill).
+    FrameGenExtent shading_covered{};
+    XrOffset2Di shading_offset{0, 0};
     bool trust_stereo{false}; // this frame's stereo evidence is in trust[newest]
     bool depth_ready{false};  // captured since the last Execute
     bool depth_fresh{false};  // captured for this Execute's frame (for the check)
@@ -562,7 +568,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         D3D12_DESCRIPTOR_RANGE ranges[2]{};
         ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kShaderResources, 0, 0, 0};
         ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0, 0};
-        D3D12_ROOT_PARAMETER parameters[3]{};
+        D3D12_ROOT_PARAMETER parameters[4]{};
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         parameters[0].Constants = {0, 0, sizeof(FrameGenConstants) / 4};
         parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -571,12 +577,16 @@ class D3D12FrameGen final : public FrameGenGpu {
             parameters[1 + i].DescriptorTable = {1, &ranges[i]};
             parameters[1 + i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         }
+        // b1: the draws' edge fill (g_fill), set by every draw.
+        parameters[kFillParameter].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameters[kFillParameter].Constants = {1, 0, 4};
+        parameters[kFillParameter].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         D3D12_STATIC_SAMPLER_DESC sampler{};
         sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         sampler.MaxLOD = D3D12_FLOAT32_MAX;
         sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        D3D12_ROOT_SIGNATURE_DESC root{3, parameters, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+        D3D12_ROOT_SIGNATURE_DESC root{4, parameters, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
         ComPtr<ID3DBlob> serialized, diagnostics;
         if (!check(D3D12SerializeRootSignature(&root, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &diagnostics),
                    "D3D12 Frame Generation root signature") ||
@@ -1254,6 +1264,20 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (view_format == DXGI_FORMAT_UNKNOWN || desc.SampleDesc.Count != 1 ||
             depth.array_index >= desc.DepthOrArraySize) {
             error = "Frame Generation cannot read depth format " + std::to_string(static_cast<int>(desc.Format));
+            return false;
+        }
+        // Texels past the image read as zero, which decodes as near or
+        // infinitely far: a rect the game placed by its colour image's size
+        // in a smaller depth image (UEVR with an upscaler or screen
+        // percentage) is refused instead.
+        const XrRect2Di& rect = depth.rect;
+        if (rect.offset.x < 0 || rect.offset.y < 0 || rect.extent.width <= 0 || rect.extent.height <= 0 ||
+            static_cast<UINT64>(rect.offset.x) + static_cast<UINT64>(rect.extent.width) > desc.Width ||
+            static_cast<UINT64>(rect.offset.y) + static_cast<UINT64>(rect.extent.height) > desc.Height) {
+            error = "Frame Generation's depth rect (" + std::to_string(rect.offset.x) + "," +
+                    std::to_string(rect.offset.y) + " " + std::to_string(rect.extent.width) + "x" +
+                    std::to_string(rect.extent.height) + ") lies outside its " + std::to_string(desc.Width) + "x" +
+                    std::to_string(desc.Height) + " image";
             return false;
         }
         HRESULT hr = DeviceRemovedReason();
@@ -2538,9 +2562,24 @@ class D3D12FrameGen final : public FrameGenGpu {
         return pipeline;
     }
 
+    // Whether `image`'s region holds a frame of `extent` at its content
+    // offset: the frame's own size, or (edge fill) wider by a margin each
+    // side.
+    static bool HoldsFrame(const FrameGenImage& image, FrameGenExtent extent) {
+        return image.content.x >= 0 && image.content.y >= 0 &&
+               static_cast<std::int64_t>(image.content.x) + extent.width <= image.rect.extent.width &&
+               static_cast<std::int64_t>(image.content.y) + extent.height <= image.rect.extent.height;
+    }
+
+    // The draws' edge fill constants (b1) for an output image.
+    static std::array<UINT, 4> FillConstants(const FrameGenImage& image) {
+        return {static_cast<UINT>(image.content.x), static_cast<UINT>(image.content.y), 0u, 0u};
+    }
+
     // Whether every generated frame of the view can be drawn straight into
     // its output image: renderable, single-sampled, a typed format, and the
-    // whole image at the view's size; together, or `one_at_a_time`.
+    // whole image at the view's size (edge fill: wider, the frame at the same
+    // place in each); together, or `one_at_a_time`.
     bool CanDraw(const FrameGenViewSubmission& submission, const std::vector<ID3D12Resource*>& outputs,
                  std::size_t count, bool one_at_a_time) {
         if (!direct_output_ || !rtv_heap_ || count == 0 || count > kFrameGenMaxGenerated || outputs.size() < count) {
@@ -2550,13 +2589,17 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (std::size_t i = 0; i < count; ++i) {
             formats[i] = static_cast<DXGI_FORMAT>(submission.outputs[i].format);
         }
+        const FrameGenImage& first_image = submission.outputs[0];
         for (std::size_t i = 0; i < count; ++i) {
             const FrameGenImage& image = submission.outputs[i];
             const D3D12_RESOURCE_DESC desc = outputs[i]->GetDesc();
             if (!(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) || desc.SampleDesc.Count != 1 ||
                 image.array_index >= desc.DepthOrArraySize || image.rect.offset.x != 0 || image.rect.offset.y != 0 ||
-                static_cast<std::uint32_t>(image.rect.extent.width) != submission.request.extent.width ||
-                static_cast<std::uint32_t>(image.rect.extent.height) != submission.request.extent.height ||
+                !HoldsFrame(image, submission.request.extent) ||
+                image.rect.extent.width != first_image.rect.extent.width ||
+                image.rect.extent.height != first_image.rect.extent.height || image.content.x != first_image.content.x ||
+                image.content.y != first_image.content.y || static_cast<UINT64>(image.rect.extent.width) > desc.Width ||
+                static_cast<UINT>(image.rect.extent.height) > desc.Height ||
                 image.format == DXGI_FORMAT_R8G8B8A8_TYPELESS || image.format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
                 image.format == DXGI_FORMAT_R16G16B16A16_TYPELESS || image.format == DXGI_FORMAT_UNKNOWN) {
                 return false;
@@ -2739,6 +2782,19 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     void SetDirectOutput(bool on) override { direct_output_ = on; }
     bool DrawsOutputs() const override { return direct_output_ && rtv_heap_; }
+    // The margin is drawn with the frame (FG_PASS_SYNTHESIZE_DRAW, and the
+    // quad views compose draw); a frame copied by compute fills none.
+    bool SupportsEdgeFill() const override { return DrawsOutputs(); }
+    bool EdgesFilled() const override { return edges_filled_; }
+    // Edge fill: no output with a margin written by the copy fallback since
+    // the frame function began (EdgesFilled).
+    bool edges_filled_{true};
+    // Whether image has a margin around a frame of extent.
+    static bool HasMargin(const FrameGenImage& image, FrameGenExtent extent) {
+        return image.content.x != 0 || image.content.y != 0 ||
+               static_cast<std::uint32_t>(image.rect.extent.width) != extent.width ||
+               static_cast<std::uint32_t>(image.rect.extent.height) != extent.height;
+    }
     std::uint64_t DrawsForTest() const override { return draws_; }
     std::uint64_t ShadingRatesForTest() const override { return shading_rates_; }
 
@@ -2763,8 +2819,20 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (!shading_tile_) {
             return false;
         }
+        // Edge fill: the tiles cover the whole output image, the frame at its
+        // content offset (every output of a view's draw alike, CanDraw).
+        const FrameGenImage* image = submission.outputs.empty() ? nullptr : &submission.outputs.front();
+        const XrOffset2Di offset = image ? image->content : XrOffset2Di{0, 0};
+        const FrameGenExtent covered =
+            image && (image->content.x || image->content.y ||
+                      static_cast<std::uint32_t>(image->rect.extent.width) != submission.request.extent.width ||
+                      static_cast<std::uint32_t>(image->rect.extent.height) != submission.request.extent.height)
+                ? FrameGenExtent{static_cast<std::uint32_t>(image->rect.extent.width),
+                                 static_cast<std::uint32_t>(image->rect.extent.height)}
+                : submission.request.extent;
         if (drawing_frame_ && view.shading_frame == drawing_frame_ && view.shading_depth == depth &&
-            view.shading_rate.resource) {
+            view.shading_rate.resource && view.shading_offset.x == offset.x && view.shading_offset.y == offset.y &&
+            view.shading_covered.width == covered.width && view.shading_covered.height == covered.height) {
             return true;
         }
         view.shading_frame = 0;
@@ -2789,10 +2857,16 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (!view.shading_coarse) {
             return false;
         }
-        const UINT tiles_x = (extent.width + shading_tile_ - 1) / shading_tile_;
-        const UINT tiles_y = (extent.height + shading_tile_ - 1) / shading_tile_;
+        const UINT tiles_x = (covered.width + shading_tile_ - 1) / shading_tile_;
+        const UINT tiles_y = (covered.height + shading_tile_ - 1) / shading_tile_;
         if (!view.shading_rate.resource || view.shading_rate.resource->GetDesc().Width != tiles_x ||
             view.shading_rate.resource->GetDesc().Height != tiles_y) {
+            // Replaced (edge fill turned on or off, a view of another size):
+            // earlier submissions may still read the old image.
+            if (view.shading_rate.resource && !WaitIdle()) {
+                error = "D3D12 Frame Generation GPU work did not finish before reallocation";
+                return false;
+            }
             if (!Create(view.shading_rate, {tiles_x, tiles_y}, DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R8_UINT, true, error)) {
                 view.shading_coarse = false;
                 return false;
@@ -2817,7 +2891,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         FrameGenConstants constants{};
         constants.fov_current = tangents;
         constants.size = {tiles_x, tiles_y, extent.width, extent.height};
-        constants.options = {shading_tile_, depth ? kFrameGenFlagDepth : 0u, 0u, 0u};
+        constants.options = {shading_tile_, depth ? kFrameGenFlagDepth : 0u, static_cast<std::uint32_t>(offset.x),
+                             static_cast<std::uint32_t>(offset.y)};
         constants.tuning = {static_cast<float>(coarse_tangent_), 0.0f, 0.0f, 0.0f};
         commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kShadingRate)].Get());
         commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &constants, 0);
@@ -2828,6 +2903,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         Stamp(static_cast<int>(FrameGenPass::kShadingRate));
         view.shading_frame = drawing_frame_;
         view.shading_depth = depth;
+        view.shading_offset = offset;
+        view.shading_covered = covered;
         ++shading_rates_;
         return true;
     }
@@ -2904,13 +2981,18 @@ class D3D12FrameGen final : public FrameGenGpu {
             const float fraction = frames[i]->constants.tuning[0];
             std::memcpy(i < 3 ? &constants.size[1 + i] : &constants.options[0], &fraction, sizeof(fraction));
         }
-        const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(submission.request.extent.width),
-                                      static_cast<float>(submission.request.extent.height), 0.0f, 1.0f};
-        const D3D12_RECT scissor{0, 0, static_cast<LONG>(submission.request.extent.width),
-                                 static_cast<LONG>(submission.request.extent.height)};
+        // The whole output image: with edge fill, the margin around the frame
+        // too (CanDraw: every output of the draw alike).
+        const FrameGenImage& image = submission.outputs[indices[0]];
+        const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(image.rect.extent.width),
+                                      static_cast<float>(image.rect.extent.height), 0.0f, 1.0f};
+        const D3D12_RECT scissor{0, 0, static_cast<LONG>(image.rect.extent.width),
+                                 static_cast<LONG>(image.rect.extent.height)};
+        const std::array<UINT, 4> fill = FillConstants(image);
         commands_->SetGraphicsRootSignature(root_signature_.Get());
         commands_->SetPipelineState(pipeline);
         commands_->SetGraphicsRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &constants, 0);
+        commands_->SetGraphicsRoot32BitConstants(kFillParameter, 4, fill.data(), 0);
         commands_->SetGraphicsRootDescriptorTable(1, Gpu(base));
         commands_->SetGraphicsRootDescriptorTable(2, Gpu(base + kFirstUav));
         commands_->RSSetViewports(1, &viewport);
@@ -2973,6 +3055,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {
+        edges_filled_ = true;
         result.synthesized.assign(views.size(), false);
         result.depth.assign(views.size(), false);
         result.merged.assign(views.size(), false);
@@ -3471,6 +3554,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool Synthesize(std::uint64_t frame_id, FrameGenSynthesisMode mode, float fraction,
                     const std::vector<FrameGenImage>& outputs, std::string& error) override {
+        edges_filled_ = true;
         HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
@@ -3543,6 +3627,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool SynthesizeStale(std::uint64_t frame_id, std::uint64_t motion_id, float fraction,
                          const std::vector<FrameGenImage>& outputs, std::string& error) override {
+        edges_filled_ = true;
         HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation device", hr);
@@ -3634,6 +3719,9 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool ComposeSynthesis(std::uint64_t frame_id, std::uint64_t motion_id, FrameGenSynthesisMode mode, float fraction,
                           const FrameGenComposition& composition, const std::vector<FrameGenImage>& outputs,
                           std::string& error) {
+        // The compose draw fills every eye's margin (ComposeOutput refuses
+        // an output it cannot draw into).
+        edges_filled_ = true;
         if (!supports_composition_) {
             error = "this Direct3D 12 device cannot compose quad views";
             return false;
@@ -4284,8 +4372,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         const DXGI_FORMAT format = static_cast<DXGI_FORMAT>(image.format);
         if (!(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) || desc.SampleDesc.Count != 1 ||
             image.array_index >= desc.DepthOrArraySize || image.rect.offset.x != 0 || image.rect.offset.y != 0 ||
-            static_cast<std::uint32_t>(image.rect.extent.width) != extent.width ||
-            static_cast<std::uint32_t>(image.rect.extent.height) != extent.height || format == DXGI_FORMAT_UNKNOWN ||
+            !HoldsFrame(image, extent) || static_cast<UINT64>(image.rect.extent.width) > desc.Width ||
+            static_cast<UINT>(image.rect.extent.height) > desc.Height || format == DXGI_FORMAT_UNKNOWN ||
             format == DXGI_FORMAT_R8G8B8A8_TYPELESS || format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
             format == DXGI_FORMAT_R16G16B16A16_TYPELESS) {
             error = "a composed eye's output image cannot be drawn into";
@@ -4338,12 +4426,18 @@ class D3D12FrameGen final : public FrameGenGpu {
         D3D12_CPU_DESCRIPTOR_HANDLE target = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
         target.ptr += static_cast<SIZE_T>(rtv_cursor_++ % kRenderTargetViews) * rtv_size_;
         device_->CreateRenderTargetView(output, &rtv, target);
-        const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height),
-                                      0.0f, 1.0f};
-        const D3D12_RECT scissor{0, 0, static_cast<LONG>(extent.width), static_cast<LONG>(extent.height)};
+        // The whole output image (ComposeOutput): with edge fill, the margin
+        // around the eye too.
+        (void)extent;
+        const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(image.rect.extent.width),
+                                      static_cast<float>(image.rect.extent.height), 0.0f, 1.0f};
+        const D3D12_RECT scissor{0, 0, static_cast<LONG>(image.rect.extent.width),
+                                 static_cast<LONG>(image.rect.extent.height)};
+        const std::array<UINT, 4> fill = FillConstants(image);
         commands_->SetGraphicsRootSignature(root_signature_.Get());
         commands_->SetPipelineState(pipeline);
         commands_->SetGraphicsRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &constants, 0);
+        commands_->SetGraphicsRoot32BitConstants(kFillParameter, 4, fill.data(), 0);
         commands_->SetGraphicsRootDescriptorTable(1, Gpu(base));
         commands_->SetGraphicsRootDescriptorTable(2, Gpu(base + kFirstUav));
         commands_->RSSetViewports(1, &viewport);
@@ -6817,8 +6911,13 @@ class D3D12FrameGen final : public FrameGenGpu {
                 out_destination.SubresourceIndex = image.array_index * output_desc.MipLevels;
                 D3D12_TEXTURE_COPY_LOCATION out_source{view.output.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
                 out_source.SubresourceIndex = 0;
-                commands_->CopyTextureRegion(&out_destination, static_cast<UINT>(image.rect.offset.x),
-                                             static_cast<UINT>(image.rect.offset.y), 0, &out_source, nullptr);
+                // Copied, a frame keeps its place in an image with edge fill;
+                // its margin keeps what it held, so the caller shows the frame
+                // from its own region (EdgesFilled).
+                if (HasMargin(image, submission.request.extent)) edges_filled_ = false;
+                commands_->CopyTextureRegion(&out_destination, static_cast<UINT>(image.rect.offset.x + image.content.x),
+                                             static_cast<UINT>(image.rect.offset.y + image.content.y), 0, &out_source,
+                                             nullptr);
                 Transition(barriers, output, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 Flush(barriers);
                 Stamp(kProfileOutputCopy);

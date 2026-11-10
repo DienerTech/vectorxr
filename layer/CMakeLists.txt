@@ -91,10 +91,58 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         endif()
     endif()
 
+    # Pinned archives (the Vulkan headers, DXC) are downloaded once into a
+    # cache directory, DEPTHXR_DOWNLOAD_CACHE or <build>/_downloads, and
+    # FetchContent extracts the cached file. Downloads are retried: GitHub's
+    # release downloads sometimes answer 5xx for a while.
+    function(depthxr_cached_archive out_var name url sha256)
+        if(DEFINED ENV{DEPTHXR_DOWNLOAD_CACHE} AND NOT "$ENV{DEPTHXR_DOWNLOAD_CACHE}" STREQUAL "")
+            file(TO_CMAKE_PATH "$ENV{DEPTHXR_DOWNLOAD_CACHE}" _dir)
+        else()
+            set(_dir "${CMAKE_BINARY_DIR}/_downloads")
+        endif()
+        set(_file "${_dir}/${name}")
+        string(TOLOWER "${sha256}" _want)
+        if(EXISTS "${_file}")
+            file(SHA256 "${_file}" _have)
+            if(NOT _have STREQUAL _want)
+                file(REMOVE "${_file}")
+            endif()
+        endif()
+        if(NOT EXISTS "${_file}")
+            set(_attempts 5)
+            foreach(_attempt RANGE 1 ${_attempts})
+                file(DOWNLOAD "${url}" "${_file}.part" STATUS _status TLS_VERIFY ON)
+                list(GET _status 0 _code)
+                list(GET _status 1 _message)
+                if(_code EQUAL 0)
+                    file(SHA256 "${_file}.part" _have)
+                    if(NOT _have STREQUAL _want)
+                        file(REMOVE "${_file}.part")
+                        message(FATAL_ERROR "${url} has SHA256 ${_have}, not the pinned ${_want}")
+                    endif()
+                    file(RENAME "${_file}.part" "${_file}")
+                    break()
+                endif()
+                file(REMOVE "${_file}.part")
+                if(_attempt EQUAL _attempts)
+                    message(FATAL_ERROR "Downloading ${url} failed ${_attempts} times: ${_message}")
+                endif()
+                math(EXPR _delay "15 * ${_attempt}")
+                message(STATUS "Downloading ${name} failed (${_message}); retrying in ${_delay} s")
+                execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep ${_delay})
+            endforeach()
+        endif()
+        set(${out_var} "${_file}" PARENT_SCOPE)
+    endfunction()
+
     set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "" FORCE)
     include(FetchContent)
+    depthxr_cached_archive(_vulkan_headers_archive vulkan-headers-b379292b2ab6df5771ba9870d53cf8b2c9295daf.tar.gz
+        https://github.com/KhronosGroup/Vulkan-Headers/archive/b379292b2ab6df5771ba9870d53cf8b2c9295daf.tar.gz
+        2ad177c0e468ac2eb3db9b5be6b8a18a6730d339378ac670e5fbda3503ac7d64)
     FetchContent_Declare(vulkan_headers
-        URL https://github.com/KhronosGroup/Vulkan-Headers/archive/b379292b2ab6df5771ba9870d53cf8b2c9295daf.tar.gz
+        URL "${_vulkan_headers_archive}"
         URL_HASH SHA256=2ad177c0e468ac2eb3db9b5be6b8a18a6730d339378ac670e5fbda3503ac7d64
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
     FetchContent_MakeAvailable(vulkan_headers)
@@ -123,8 +171,11 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     find_program(DEPTHXR_FXC fxc HINTS ${_framegen_fxc_hints} REQUIRED)
     set(DEPTHXR_DXC "")
     if(DEPTHXR_FRAMEGEN_SPIRV)
+        depthxr_cached_archive(_dxc_archive dxc_2025_07_14.zip
+            https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505.1/dxc_2025_07_14.zip
+            9ad895a6b039e3a8f8c22a1009f866800b840a74b50db9218d13319e215ea8a4)
         FetchContent_Declare(dxc_release
-            URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505.1/dxc_2025_07_14.zip
+            URL "${_dxc_archive}"
             URL_HASH SHA256=9ad895a6b039e3a8f8c22a1009f866800b840a74b50db9218d13319e215ea8a4
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
         FetchContent_MakeAvailable(dxc_release)
@@ -204,6 +255,33 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         DEPENDS "${_framegen_hlsl}"
         COMMENT "Compiling Frame Generation FLOW_MERGE (DXBC)"
         VERBATIM)
+    # The Direct3D 11 bridge's depth: a Direct3D 11 compute shader copying the
+    # game's depth into a shared twin, and the Direct3D 12 draw writing the
+    # twin into the runtime's depth image, included by the bridge as headers.
+    set(_bridge_depth_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/bridge_depth.hlsl")
+    set(_bridge_depth_headers "")
+    foreach(_bridge_depth_shader TO_TWIN VS PS)
+        if(_bridge_depth_shader STREQUAL "TO_TWIN")
+            set(_bridge_depth_args -T cs_5_0 -E CSMain)
+            set(_bridge_depth_name kBridgeDepthToTwinDxbc)
+        elseif(_bridge_depth_shader STREQUAL "VS")
+            set(_bridge_depth_args -T vs_5_0 -E VSMain)
+            set(_bridge_depth_name kBridgeDepthVsDxbc)
+        else()
+            set(_bridge_depth_args -T ps_5_0 -E PSMain)
+            set(_bridge_depth_name kBridgeDepthPsDxbc)
+        endif()
+        string(TOLOWER "${_bridge_depth_shader}" _bridge_depth_file)
+        set(_bridge_depth_header "${_framegen_out}/bridge_depth_${_bridge_depth_file}.h")
+        add_custom_command(
+            OUTPUT "${_bridge_depth_header}"
+            COMMAND "${DEPTHXR_FXC}" -nologo ${_bridge_depth_args} -D "BRIDGE_DEPTH_${_bridge_depth_shader}=1" -O3 -WX
+                    -Vn ${_bridge_depth_name} -Fh "${_bridge_depth_header}" "${_bridge_depth_hlsl}"
+            DEPENDS "${_bridge_depth_hlsl}"
+            COMMENT "Compiling the Direct3D 11 bridge's depth ${_bridge_depth_shader} (DXBC)"
+            VERBATIM)
+        list(APPEND _bridge_depth_headers "${_bridge_depth_header}")
+    endforeach()
     string(REPLACE ";" "," _framegen_pass_list "${_framegen_passes}")
     string(REPLACE ";" "," _framegen_draw_list "${_framegen_draw_shaders}")
     set(_framegen_spirv_dir "")
@@ -241,7 +319,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # ...and the engine motion record and census made from it.
         src/engine_motion.cpp
         "${_framegen_out}/framegen_shaders.cpp"
-        "${_framegen_out}/framegen_flow_merge.h")
+        "${_framegen_out}/framegen_flow_merge.h"
+        ${_bridge_depth_headers})
     target_include_directories(depthxr_framegen PUBLIC include)
     target_include_directories(depthxr_framegen PRIVATE "${_framegen_out}")
     target_compile_features(depthxr_framegen PUBLIC cxx_std_20)
@@ -558,7 +637,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # Frame Generation's Direct3D 11 bridge against a stand-in runtime, on WARP
         # (`depthxr_d3d11_bridge_tests hw` runs it on the GPU).
         add_executable(depthxr_d3d11_bridge_tests tests/d3d11_bridge_tests.cpp)
-        target_link_libraries(depthxr_d3d11_bridge_tests PRIVATE depthxr_framegen d3d11 d3d12 dxgi)
+        target_link_libraries(depthxr_d3d11_bridge_tests PRIVATE depthxr_framegen d3d11 d3d12 dxgi d3dcompiler)
         target_compile_definitions(depthxr_d3d11_bridge_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12)
         add_test(NAME depthxr_d3d11_bridge_tests COMMAND depthxr_d3d11_bridge_tests)
         add_test(NAME depthxr_d3d11_bridge_hw_tests COMMAND depthxr_d3d11_bridge_tests hw)
@@ -576,10 +655,18 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_executable(depthxr_framegen_presenter_tests tests/framegen_presenter_tests.cpp)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-        add_test(NAME depthxr_framegen_presenter_tests COMMAND depthxr_framegen_presenter_tests)
-        # Paced by the wall clock: about 375 s on a fast desktop (0.19.2), longer on a shared CI runner. The lead
-        # ceiling's tests add about 3 minutes; serially (FG_TEST_SERIAL=1) the suite takes about 16 minutes.
-        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 1200)
+        # Paced by the wall clock, mostly waiting: about 680 s on a fast desktop (0.20.1) in one process beside its
+        # policy tests (no argument). CTest runs its groups (--group, GROUP in the test) as tests of their own, side by
+        # side under ctest -j: 45-160 s each on a desktop, about 18 minutes in all. -R depthxr_framegen_presenter_tests_
+        # selects them. They create no graphics device.
+        set(_presenter_tests "")
+        foreach(_group IN ITEMS pacing lifecycle quad clocks probe_burst lead ceiling policy policy_late)
+            add_test(NAME depthxr_framegen_presenter_tests_${_group}
+                     COMMAND depthxr_framegen_presenter_tests --group ${_group})
+            list(APPEND _presenter_tests depthxr_framegen_presenter_tests_${_group})
+        endforeach()
+        # COST: CTest starts the longest tests first, before it has timings of its own.
+        set_tests_properties(${_presenter_tests} PROPERTIES TIMEOUT 600 COST 200)
         add_executable(depthxr_osd_tests tests/osd_tests.cpp)
         target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
         target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
@@ -851,4 +938,49 @@ if(DEPTHXR_BUILD_TESTS)
     target_include_directories(depthxr_action_set_attachment_tests PRIVATE include)
     add_test(NAME depthxr_action_set_attachment_tests COMMAND depthxr_action_set_attachment_tests)
     set_tests_properties(depthxr_action_set_attachment_tests PROPERTIES TIMEOUT 10)
+endif()
+
+if(DEPTHXR_BUILD_TESTS)
+    # CTest may run tests side by side (ctest -j, as Build-Layer.ps1 does), but a test that touches a graphics device
+    # runs alone (RUN_SERIAL), WARP and the software Vulkan device included: never two at once (0x139 bug checks on
+    # this machine's GPU), and never beside the presenter's wall-clock pacing, which WARP's load on every core makes
+    # late (four presenter groups failed beside it under -j 8; none failed with only the CPU tests beside them).
+    # Every test is such a test except those listed here, which create no Direct3D or Vulkan device at all
+    # (stand-in runtimes and devices, or none).
+    set(_cpu_only_tests
+        vectorxr_hardware_probe_self_test
+        depthxr_layer_crt_imports_tests
+        depthxr_layer_load_tests
+        depthxr_crt_failure_report_tests
+        depthxr_test_adapter_tests
+        ${_presenter_tests}
+        depthxr_turbo_frame_tests
+        depthxr_pivot_pose_tests
+        depthxr_pivot_snap_tests
+        depthxr_pivot_gaze_tests
+        depthxr_eye_gaze_tests
+        depthxr_head_prediction_layer_tests
+        depthxr_spacewarp_probe_tests
+        depthxr_layer_tests
+        depthxr_head_prediction_tests
+        depthxr_turbo_trace_tests
+        depthxr_turbo_recovery_tests
+        depthxr_runtime_relay_tests
+        depthxr_external_status_tests
+        depthxr_process_exit_tests
+        depthxr_path_unicode_tests
+        depthxr_sound_player_tests
+        depthxr_thread_census_tests
+        depthxr_action_set_attachment_tests)
+    get_property(_layer_tests DIRECTORY PROPERTY TESTS)
+    # Labelled too, so CI runs the two kinds on separate runners at once
+    # (Build-Layer.ps1 -Tests Cpu or Graphics): ctest -L graphics / -LE graphics.
+    foreach(_test IN LISTS _layer_tests)
+        if(NOT _test IN_LIST _cpu_only_tests)
+            set_property(TEST ${_test} PROPERTY RUN_SERIAL TRUE)
+            set_property(TEST ${_test} APPEND PROPERTY LABELS graphics)
+        else()
+            set_property(TEST ${_test} APPEND PROPERTY LABELS cpu)
+        endif()
+    endforeach()
 endif()

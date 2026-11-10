@@ -581,6 +581,16 @@ struct FrameGenSettings {
     // Generation tells the game that the runtime does not predict (see
     // head_prediction.h). Off by default.
     bool extend_head_prediction{false};
+    // Edge fill: frames Frame Generation writes reach a few degrees past the
+    // game's field of view, the margin repeating the frame's edge, so a fast
+    // head turn shows a smeared edge instead of black on its leading side
+    // (FrameGenEdgeMargins). Direct3D 12 and the bridges only. Off by default.
+    bool edge_fill{false};
+    // Use the game's depth (on by default). Off, Frame Generation works
+    // without it and the bridges keep a bridged game's depth to itself, as
+    // before 0.20.1: no copy, and no multithread protection turned on for it.
+    // The bridges read it when the session starts.
+    bool use_game_depth{true};
 };
 
 struct FrameGenProfile {

@@ -33,8 +33,21 @@ namespace depthxr {
 // acquired again. Neither API waits for the other on the CPU.
 //
 // Images a twin cannot be: multisampled ones are rendered privately and
-// resolved into the twin at release; depth stays private and never reaches
-// the runtime (the caller keeps it out of submitted frames).
+// resolved into the twin at release. Depth is rendered privately too
+// (Direct3D 12 shares no depth with simultaneous access): at release,
+// Direct3D 11 copies its depth plane into a twin (R16_UNORM for D16, else
+// R32_FLOAT), and the bridge's
+// queue draws the twin into the runtime's depth image as depth, ahead of
+// Frame Generation's capture as for colour, so the runtime and Frame
+// Generation both get the game's depth plane (D16, D24S8, D32 and D32S8
+// alike: value for value, but for D24S8, whose 24-bit depth is read
+// normalized and may arrive one 24-bit step off; stencil is not carried).
+// Depth the bridge cannot mirror (multisampled, a runtime image that is no
+// depth target, or VECTORXR_D3D11_BRIDGE_DEPTH=private) stays private and
+// never reaches the runtime (the caller keeps it out of submitted frames).
+// A mirrored depth swapchain turns the game device's multithread protection
+// on (never off): each copy holds the immediate context through its calls,
+// which keeps out only threads whose calls are protected.
 //
 // Every Direct3D 11 call is made inside the application's own OpenXR calls,
 // on its thread; nothing here is called from the presenter thread.
@@ -47,6 +60,9 @@ class D3D11Bridge {
 
     // Where retirements that leaked, skipped copies and second threads are reported.
     void SetLog(std::function<void(const std::string&)> log);
+    // Before Begin: keep every depth swapchain private (Frame Generation's
+    // Use game depth off), as VECTORXR_D3D11_BRIDGE_DEPTH=private does.
+    void SetKeepDepthPrivate(bool keep);
 
     // Before xrCreateSession, for a session whose first structure is a
     // Direct3D 11 binding: makes a Direct3D 12 device on the game's adapter
@@ -83,14 +99,16 @@ class D3D11Bridge {
     // At each xrEndFrame (the application's thread): the game's immediate
     // context is used by the bridge from the threads its swapchain calls come
     // from; when those (or the frame's) differ, the device's multithread
-    // protection is turned on, so the bridge's calls cannot race the game's.
+    // protection is turned on at the next StageReleases (before any lock,
+    // as it waits for the device's lock), so the bridge's calls cannot race
+    // the game's.
     // With VECTORXR_D3D11_BRIDGE_DEBUG=1, also reports what the Direct3D 12
     // debug layer found.
     void FrameEnded();
 
     // The runtime's create info for the application's: the bridge's copies
-    // write the runtime's colour images as render targets do, and
-    // multisampled images are resolved to one sample.
+    // write the runtime's colour images as render targets do, multisampled
+    // images are resolved to one sample, and depth images are depth targets.
     static XrSwapchainCreateInfo RuntimeCreateInfo(const XrSwapchainCreateInfo& info);
     // After the runtime created `swapchain` from RuntimeCreateInfo(info):
     // makes an image for each of its images (`enumerate` is the runtime's).
@@ -102,15 +120,16 @@ class D3D11Bridge {
     // fails: their releases need not wait on the runtime's queue.
     void SetComposed(XrSwapchain swapchain, bool composed);
     bool Composed(XrSwapchain swapchain) const;
-    // Bridged, and the runtime's images never get anything (depth): the
-    // runtime's calls on it need no ordering with the bridge's queue, and its
-    // depth stays out of submitted frames.
+    // Bridged, and the runtime's images never get anything (depth the
+    // bridge cannot mirror): the runtime's calls on it need no ordering with
+    // the bridge's queue, and its depth stays out of submitted frames.
     bool Unmirrored(XrSwapchain swapchain) const;
     bool HasUnmirrored() const;
     // The Direct3D 11 textures rendered into, by image index (empty when not bridged).
     std::vector<ID3D11Texture2D*> Images(XrSwapchain swapchain) const;
     // After the runtime handed out image `index`: Direct3D 11 waits (on the
-    // GPU) until the bridge's queue is done with the image's last release.
+    // GPU) until the bridge's queue is done with the image's last release
+    // (queued on the game's context without the bridge's lock).
     void Acquired(XrSwapchain swapchain, std::uint32_t index);
     // At the frame's end after the application released the image (the layer
     // hands releases over inside xrEndFrame, or the next acquire on the
@@ -120,12 +139,33 @@ class D3D11Bridge {
     // copied into the runtime's image on the bridge's queue. False when the
     // copy was skipped (the bridge's queue is stalled): the runtime's image
     // holds an older frame, which Frame Generation must not capture as new.
+    // Released calls the game's immediate context only for a release whose
+    // Direct3D 11 half StageReleases did not run, taking it first.
     bool Released(XrSwapchain swapchain);
     // The application's xrReleaseSwapchainImage of a bridged image, whose
     // hand-over (Released) waits for the frame's end: its thread counts among
     // the game's swapchain and frame calls' threads, as it did when the copy
-    // ran there (a second thread turns multithread protection on).
-    void ReleaseCalled();
+    // ran there (a second thread turns multithread protection on), and the
+    // release is counted for StageReleases.
+    void ReleaseCalled(XrSwapchain swapchain);
+    // At a hand-over, before the caller takes any lock of its own (xrEndFrame
+    // for every swapchain: XR_NULL_HANDLE; the next acquire or wait on
+    // `swapchain`): runs the Direct3D 11 half of each release ReleaseCalled
+    // counted (a depth image's copy into its twin, a multisampled image's
+    // resolve, the "written" signal), holding the game's immediate context
+    // first. Released then only submits the copy into the runtime's image.
+    // A game thread may hold the device's lock (ID3D11Multithread::Enter)
+    // while it makes an OpenXR call that takes the caller's locks: this waits
+    // for that lock holding none of them. Nothing to run: returns at once.
+    void StageReleases(XrSwapchain swapchain);
+    // Tests: called inside a depth copy into its twin, holding the game's
+    // immediate context with the copy's compute state bound, before its
+    // dispatch and before the game's state goes back.
+    void SetDepthCopyHookForTest(std::function<void()> hook);
+    // Tests: called just before the bridge enters the game's immediate
+    // context's lock (multithread protection on), on the thread entering it.
+    // Set and cleared while no bridge call runs.
+    void SetContextWaitHookForTest(std::function<void()> hook);
     // A release of an image nothing was drawn into: no copy; the runtime's
     // image keeps what it had.
     void Abandoned(XrSwapchain swapchain);
@@ -144,6 +184,7 @@ class D3D11Bridge {
     std::unique_ptr<Impl> impl_;
     std::function<void(const std::string&)> log_;
     bool queried_d3d12_requirements_{false};
+    bool keep_depth_private_{false};
 };
 
 } // namespace depthxr

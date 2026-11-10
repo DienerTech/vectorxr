@@ -16,7 +16,8 @@
     "noCustomProfiles": "Своих профилей пока нет. Добавьте профиль, чтобы привязать поворот Pivot к определённому приложению.",
     "profileNumber": "Профиль {number}",
     "nudgeSetDefaultName": "Набор сдвигов",
-    "nudgeSetCopyName": "{name} (копия)"
+    "nudgeSetCopyName": "{name} (копия)",
+    "profileCopyName": "{name} (копия)"
   },
   "warnings": {
     "noActivationTitle": "Нет активации усиления движения",

@@ -20,7 +20,9 @@
     "turboLabel": "Turbo の競合:",
     "toolkitTurbo": "VectorXR Turbo の使用中に OpenXR Toolkit が有効になっています。2 つのフレーム ペーシング レイヤーは互いに干渉します。OXRTK の Turbo Mode がオンの場合は、OXRTK 側か VectorXR 側のどちらかで無効にしてください。両方で使用しないでください。",
     "quadviewsOffLabel": "Quadviews オフ:",
-    "toolkitQuad": "OpenXR Toolkit が VectorXR より上にあります ({slices})。OpenXR Toolkit はクアッド ビューに対応していないため、VectorXR は OpenXR Toolkit が動作するすべてのゲームで Quadviews をオフにします。Quadviews を使用するには、OpenXR Toolkit を無効にするか、それらのゲームでオフにしてください。"
+    "toolkitQuad": "OpenXR Toolkit が VectorXR より上にあります ({slices})。OpenXR Toolkit はクアッド ビューに対応していないため、VectorXR は OpenXR Toolkit が動作するすべてのゲームで Quadviews をオフにします。Quadviews を使用するには、OpenXR Toolkit を無効にするか、それらのゲームでオフにしてください。",
+    "frameGenOffLabel": "Frame Generation オフ:",
+    "toolkitFrameGen": "OpenXR Toolkit が VectorXR の下にあります（{slices}）。この位置では Frame Generation の追加フレームを処理できないため、OpenXR Toolkit が動作するすべてのゲームで VectorXR は Frame Generation をオフにします。Frame Generation を使うには、OpenXR Toolkit を VectorXR の上に移動するか、それらのゲームで無効にしてください。"
   },
   "status": {
     "unlocked": "このアプリのセッションでは、コンピューター全体の OpenXR レイヤーへの書き込みがロック解除されています。",

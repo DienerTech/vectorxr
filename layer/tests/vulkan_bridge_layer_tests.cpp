@@ -57,6 +57,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -595,10 +596,10 @@ void ClearVulkan(VulkanGame& game, VkImage image, std::uint32_t layers, const Co
     SubmitCommands(game, slot);
 }
 
-void ClearVulkanDepth(VulkanGame& game, VkImage image, std::uint32_t layers, float depth) {
+void ClearVulkanDepth(VulkanGame& game, VkImage image, std::uint32_t layers, float depth, std::uint32_t first = 0) {
     std::uint32_t slot = 0;
     const VkCommandBuffer commands = BeginCommands(game, slot);
-    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, layers};
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, first, layers};
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -923,6 +924,8 @@ struct StandIn {
     XrTime time{1'000'000'000};
     std::chrono::steady_clock::time_point refresh{}; // paced: the refresh the last wait returned at
     std::uintptr_t handles{0x1000};
+    int refused_frames{0}; // xrEndFrame refused for a sub-image outside its image (SubImageRefusal)
+    std::string refusal;   // the first refused frame's: why
 
     // The index of the first `call` at or after `from`, or -1.
     std::ptrdiff_t Position(const std::string& call, std::ptrdiff_t from = 0) const {
@@ -1628,10 +1631,63 @@ XrResult XRAPI_CALL RtBeginFrame(XrSession, const XrFrameBeginInfo*) {
     return XR_SUCCESS;
 }
 
+// As PimaxXR's and Virtual Desktop's xrEndFrame check a projection's
+// sub-images (holding g_runtime_mutex): each view's colour and depth rect
+// inside its image (XR_ERROR_SWAPCHAIN_RECT_INVALID), and its depth's slice
+// one of the image's (XR_ERROR_VALIDATION_FAILURE). XR_SUCCESS: none
+// outside. `why` says which.
+XrResult SubImageRefusal(const XrFrameEndInfo& info, std::string& why) {
+    const auto check = [&](const XrSwapchainSubImage& sub, const char* what, bool depth) {
+        const StandInSwapchain* chain = FindSwapchain(sub.swapchain);
+        if (!chain) {
+            why = std::string(what) + " names no swapchain";
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        const XrRect2Di& rect = sub.imageRect;
+        const std::int64_t right = static_cast<std::int64_t>(rect.offset.x) + rect.extent.width;
+        const std::int64_t bottom = static_cast<std::int64_t>(rect.offset.y) + rect.extent.height;
+        std::ostringstream text;
+        text << what << " rect " << rect.offset.x << "," << rect.offset.y << " " << rect.extent.width << "x"
+             << rect.extent.height << " slice " << sub.imageArrayIndex << " on " << chain->info.width << "x"
+             << chain->info.height << " of " << chain->info.arraySize;
+        if (depth && sub.imageArrayIndex >= chain->info.arraySize) {
+            why = text.str();
+            return XR_ERROR_VALIDATION_FAILURE;
+        }
+        if (rect.offset.x < 0 || rect.offset.y < 0 || rect.extent.width <= 0 || rect.extent.height <= 0 ||
+            right > static_cast<std::int64_t>(chain->info.width) ||
+            bottom > static_cast<std::int64_t>(chain->info.height)) {
+            why = text.str();
+            return XR_ERROR_SWAPCHAIN_RECT_INVALID;
+        }
+        return XR_SUCCESS;
+    };
+    for (std::uint32_t i = 0; i < info.layerCount; ++i) {
+        const XrCompositionLayerBaseHeader* base = info.layers[i];
+        if (!base || base->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+        const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(base);
+        for (std::uint32_t v = 0; v < projection.viewCount; ++v) {
+            const XrCompositionLayerProjectionView& view = projection.views[v];
+            if (const XrResult result = check(view.subImage, "colour", false); result != XR_SUCCESS) return result;
+            for (auto* chain = static_cast<const XrBaseInStructure*>(view.next); chain; chain = chain->next) {
+                if (chain->type != XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) continue;
+                const auto& depth = *reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(chain);
+                if (const XrResult result = check(depth.subImage, "depth", true); result != XR_SUCCESS) return result;
+            }
+        }
+    }
+    return XR_SUCCESS;
+}
+
 XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     rt.calls.push_back("xrEndFrame");
+    std::string why;
+    if (const XrResult refused = SubImageRefusal(*info, why); refused != XR_SUCCESS) {
+        if (rt.refused_frames++ == 0) rt.refusal = why;
+        return refused;
+    }
     ShownFrame frame;
     frame.time = info->displayTime;
     for (std::uint32_t i = 0; i < info->layerCount; ++i) {
@@ -2561,6 +2617,8 @@ struct FrameOptions {
     // depth slice too) ahead of its depth. Needs `depth`.
     const Target* motion{nullptr};
     Color motion_color{64, 128, 32, 255};
+    // Changes the views' depth structures before the frame ends (with `depth`).
+    std::function<void(std::array<XrCompositionLayerDepthInfoKHR, 2>&)> edit_depth;
 };
 
 // What a Star Citizen-ordered frame's images hold when released (FrameOptions::release_before_begin).
@@ -2710,6 +2768,9 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
             info.farZ = depth_infos[eye].farZ;
             views[eye].next = &info;
         }
+    }
+    if (depth && options.edit_depth) {
+        options.edit_depth(depth_infos);
     }
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projection.layerFlags = options.layer_flags;
@@ -4215,6 +4276,177 @@ void TestBridgedFrameGen(const std::string& mode) {
     EndCase();
 }
 
+std::uint32_t HostMemoryType(VkPhysicalDevice physical, std::uint32_t bits);
+
+// The game writes slice `layer` of a D32 depth image: `top` in its upper
+// half, `bottom` in its lower (the stand-in reads the centre: `bottom`),
+// through a buffer, from the attachment layout and back. Waits for it.
+void WriteVulkanDepthHalves(VulkanGame& game, VkImage image, std::uint32_t width, std::uint32_t height,
+                            std::uint32_t layer, float top, float bottom) {
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    info.size = VkDeviceSize{width} * height * sizeof(float);
+    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    CheckVk(g_vk.vkCreateBuffer(game.device, &info, nullptr, &staging), "a depth upload buffer");
+    VkMemoryRequirements requirements{};
+    g_vk.vkGetBufferMemoryRequirements(game.device, staging, &requirements);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = HostMemoryType(game.physical, requirements.memoryTypeBits);
+    Check(allocate.memoryTypeIndex != UINT32_MAX, "host-visible memory for the depth upload");
+    CheckVk(g_vk.vkAllocateMemory(game.device, &allocate, nullptr, &memory), "the depth upload's memory");
+    CheckVk(g_vk.vkBindBufferMemory(game.device, staging, memory, 0), "the depth upload's memory bound");
+    void* mapped = nullptr;
+    CheckVk(g_vk.vkMapMemory(game.device, memory, 0, VK_WHOLE_SIZE, 0, &mapped), "the depth upload mapped");
+    auto* values = static_cast<float*>(mapped);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) values[y * width + x] = y < height / 2 ? top : bottom;
+    }
+    std::uint32_t slot = 0;
+    const VkCommandBuffer commands = BeginCommands(game, slot);
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, layer, 1};
+    const VkPipelineStageFlags depth_stages =
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    g_vk.vkCmdPipelineBarrier(commands, depth_stages, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                              &barrier);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, layer, 1};
+    region.imageExtent = {width, height, 1};
+    g_vk.vkCmdCopyBufferToImage(commands, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    std::swap(barrier.oldLayout, barrier.newLayout);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    g_vk.vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, depth_stages, 0, 0, nullptr, 0, nullptr, 1,
+                              &barrier);
+    SubmitCommands(game, slot);
+    Check(g_vk.vkWaitForFences(game.device, 1, &game.fences[slot], VK_TRUE, 10'000'000'000ull) == VK_SUCCESS,
+          "the depth upload finishes");
+    g_vk.vkDestroyBuffer(game.device, staging, nullptr);
+    g_vk.vkFreeMemory(game.device, memory, nullptr);
+}
+// 13b. Depth Star Citizen writes after its frame's end (CIG, 2026-10-29: after
+// xrReleaseSwapchainImage; every hand-over at xrEndFrame found it all zero).
+// Each frame the game's depth swapchain holds zero at its release and gets the
+// frame's depth (each eye's slice its own value) after xrEndFrame. The bridge
+// checks at every hand-over here (VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS=0):
+// the runtime's depth is zero until the bridge finds the depth at the next
+// acquire, then each frame's views carry the frame before's depth, for each
+// eye its own. With VECTORXR_VULKAN_BRIDGE_DEPTH=end-frame it stays zero;
+// with =private the views carry no depth at all (the colour still arrives).
+void TestLateDepthSession() {
+    SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "0");
+    // Frame Generation stands by here (it never sees the depth to find it
+    // empty): the check is forced on.
+    SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK", "always");
+    for (const std::string timing : {"", "end-frame", "private"}) {
+        SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH", timing);
+        // Frame Generation on (the bridge is made for it), standing by: the
+        // runtime gets the game's frames as they are.
+        BeginCase(timing.empty() ? "late-depth" : "late-depth-" + timing);
+        App app = StartApp({kVulkan2Extension});
+        VulkanGame game = MakeVulkanGame(app);
+        SessionCreate create(game, app.system);
+        Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS &&
+                  Peer::Bridge().Active(),
+              "a bridged session (" + Unbridged(Peer::Log()) + ")");
+        BeginSession(app);
+        const Renderer vulkan{&game, nullptr};
+        Target left = MakeTarget(app, ColorInfo(), "the left eye");
+        Target right = MakeTarget(app, ColorInfo(), "the right eye");
+        Target depth = MakeTarget(app, DepthInfo(VK_FORMAT_D32_SFLOAT, 2), "depth");
+        // Each eye's slice: its upper half 0.1 nearer than its lower, which
+        // the stand-in reads (the centre).
+        const auto written = [](int frame, int eye) { return 0.2f + 0.05f * static_cast<float>(frame) + 0.01f * eye; };
+        g_runtime.read_depth = true;
+        int late_from = -1;
+        constexpr int kFrames = 10;
+        for (int frame = 0; frame < kFrames; ++frame) {
+            const std::vector<Color> colors{FrameColor(frame + 30, 0), FrameColor(frame + 30, 1)};
+            FrameOptions options;
+            options.depth = &depth;
+            options.depth_value = 0.0f; // what it holds at its release
+            const bool depth_mirrored = timing != "private";
+            const std::uint64_t used_before =
+                depth_mirrored ? SummaryValue(Peer::Bridge().Describe(depth.swapchain), "lateUsed") : 0;
+            Check(Frame(app, vulkan, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, options) == XR_SUCCESS,
+                  "late depth frame " + std::to_string(frame));
+            // The frame's hand-over copied the late copy (which the frame's
+            // acquire made, once the check had decided; at its end or at that
+            // acquire, as the game's queue got through the check's reads).
+            const bool late =
+                depth_mirrored && SummaryValue(Peer::Bridge().Describe(depth.swapchain), "lateUsed") > used_before;
+            if (late && late_from < 0) late_from = frame;
+            Check(!(late_from >= 0 && !late), "late depth: once taken late, every frame is (frame " +
+                                                  std::to_string(frame) + ")");
+            std::uint32_t released = 0;
+            {
+                std::scoped_lock lock(g_runtime_mutex);
+                const ShownFrame& shown = g_runtime.frames.back();
+                Check(shown.views.size() == 2, "late depth: two views");
+                for (int eye = 0; eye < 2 && shown.views.size() == 2; ++eye) {
+                    const ShownView& view = shown.views[eye];
+                    Check(Near(view.texel, colors[eye]), "late depth frame: the runtime shows " + Text(view.texel));
+                    if (timing == "private") {
+                        Check(!view.depth, "private depth: the views carry none");
+                        continue;
+                    }
+                    const float expected = late ? written(frame - 1, eye) : 0.0f;
+                    Check(view.depth && view.depth_value && *view.depth_value == expected,
+                          "late depth (" + timing + ") frame " + std::to_string(frame) + " eye " + std::to_string(eye) +
+                              ": the runtime's depth holds " +
+                              (view.depth_value ? std::to_string(*view.depth_value) : "nothing") + ", expected " +
+                              std::to_string(expected) + (late ? " (the frame before's)" : "") + "; " +
+                              Peer::Bridge().Describe(depth.swapchain));
+                }
+                const StandInSwapchain* chain = FindSwapchain(depth.swapchain);
+                Check(chain && chain->released, "late depth: the depth image is released to the runtime");
+                if (chain && chain->released) released = *chain->released;
+            }
+            // After xrEndFrame: the game's depth for this frame, each eye's slice.
+            for (int eye = 0; eye < 2; ++eye) {
+                WriteVulkanDepthHalves(game, reinterpret_cast<VkImage>(depth.images[released]), depth.info.width,
+                                       depth.info.height, static_cast<std::uint32_t>(eye), written(frame, eye) + 0.1f,
+                                       written(frame, eye));
+            }
+
+        }
+        g_runtime.read_depth = false;
+        const std::string log = Peer::Log();
+        if (timing.empty()) {
+            Check(late_from >= 3 && late_from <= 6,
+                  "late depth: the bridge takes it late within a few frames (from frame " + std::to_string(late_from) +
+                      "): " + Peer::Bridge().Describe(depth.swapchain));
+            Check(Contains(log, "the game writes its depth after its frame's end"), "late depth: the log says so");
+        } else {
+            Check(late_from < 0, "late depth (" + timing + "): never taken late");
+        }
+        if (timing == "end-frame") {
+            Check(Contains(log, "VECTORXR_VULKAN_BRIDGE_DEPTH=end-frame keeps taking it"),
+                  "late depth (end-frame): the log says where the depth is");
+        }
+        if (timing == "private") {
+            Check(Contains(log, "keeps the game's depth to itself") &&
+                      Contains(log, "private because VECTORXR_VULKAN_BRIDGE_DEPTH=private"),
+                  "late depth (private): the log says the depth is left out, and why");
+        }
+        CheckValidation("late depth " + timing);
+        Check(app.api.destroy_swapchain(depth.swapchain) == XR_SUCCESS, "the depth swapchain is destroyed");
+        StopApp(app);
+        DestroyGame(game);
+        EndCase();
+    }
+    SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH", "");
+    SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK_MS", "");
+    SetEnv("VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK", "");
+}
 // 13c. Star Citizen's shapes (its log, 2026-10-09): XR_KHR_vulkan_enable2, an
 // sRGB swapchain per eye the game only copies into (TRANSFER_DST alone), and
 // its interface on a quad swapchain (TRANSFER_DST alone too) shown over the
@@ -5431,6 +5663,147 @@ void TestNativeD3D12(const std::string& name) {
     EndCase();
 }
 
+// 14b. Depth whose sub-image lies outside its image, in each session that
+// forwards XR_KHR_composition_layer_depth here: the game's own Vulkan
+// session (VECTORXR_VULKAN_BRIDGE=off), a native Direct3D 12 one and a
+// Vulkan-bridged one. The stand-in refuses such a frame as PimaxXR does; the
+// layer leaves its projection's depth out of both views, the colour going on
+// (as the Direct3D 11 sessions' TestDepthRects in d3d11_bridge_layer_tests),
+// and valid depth reaches the runtime, again after the refused cases.
+void TestDepthRects(const std::string& kind) {
+    const bool d3d12 = kind == "native-d3d12";
+    const bool bridged = kind == "vulkan-bridge";
+    const std::string name = "depth-rects-" + kind;
+    BeginCase(name);
+    // Frame Generation does not engage: the runtime shows the game's own frames.
+    Peer::SetFrameGenEngagement(1'000'000, std::chrono::hours(1));
+    if (kind == "vulkan-native") SetEnv("VECTORXR_VULKAN_BRIDGE", "off");
+    App app = StartApp({d3d12 ? kD3D12Extension : kVulkan2Extension});
+    std::optional<VulkanGame> game;
+    D3D12Game game12;
+    std::optional<SessionCreate> create;
+    XrBaseInStructure application_struct{kApplicationStructType};
+    XrGraphicsBindingD3D12KHR binding12{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    XrSessionCreateInfo info12{XR_TYPE_SESSION_CREATE_INFO};
+    if (d3d12) {
+        XrGraphicsRequirementsD3D12KHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D12_KHR};
+        Check(app.api.d3d12_requirements &&
+                  app.api.d3d12_requirements(app.api.instance, app.system, &requirements) == XR_SUCCESS,
+              name + ": xrGetD3D12GraphicsRequirementsKHR");
+        Check(MakeD3D12Game(g_gpu.luid, game12), name + ": the Direct3D 12 game's device and queue");
+        binding12.next = &application_struct;
+        binding12.device = game12.device.Get();
+        binding12.queue = game12.queue.Get();
+        info12.next = &binding12;
+        info12.systemId = app.system;
+    } else {
+        game = MakeVulkanGame(app);
+        create.emplace(*game, app.system);
+    }
+    Check(app.api.create_session(app.api.instance, d3d12 ? &info12 : &create->info, &app.session) == XR_SUCCESS &&
+              Peer::Bridge().Active() == bridged,
+          name + ": xrCreateSession, " + (bridged ? "bridged" : "not bridged") + " (" + Unbridged(Peer::Log()) + ")");
+    Check(!d3d12 || Peer::GraphicsApi() == "D3D12", name + ": a Direct3D 12 session (" + Peer::GraphicsApi() + ")");
+    BeginSession(app);
+    const std::int64_t colour_format = d3d12 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : VK_FORMAT_R8G8B8A8_SRGB;
+    const std::int64_t depth_format = d3d12 ? DXGI_FORMAT_D32_FLOAT : VK_FORMAT_D32_SFLOAT;
+    Target left = MakeTarget(app, ColorInfo(colour_format), "the left eye", d3d12);
+    Target right = MakeTarget(app, ColorInfo(colour_format), "the right eye", d3d12);
+    const auto depth_target = [&](std::uint32_t width, std::uint32_t height, const char* what) {
+        XrSwapchainCreateInfo info = DepthInfo(depth_format, 2);
+        info.width = width;
+        info.height = height;
+        Target target = MakeTarget(app, info, what, d3d12);
+        Check(!Peer::Bridge().Unmirrored(target.swapchain), name + ": " + what + ": not kept private");
+        return target;
+    };
+    // The colour images are 64x48. An upscaler's smaller depth, a larger
+    // one, and one image for both eyes side by side.
+    Target smaller = depth_target(48, 36, "smaller depth");
+    Target larger = depth_target(80, 60, "larger depth");
+    Target side_by_side = depth_target(2 * kWidth, kHeight, "side-by-side depth");
+    constexpr std::int32_t kMax = std::numeric_limits<std::int32_t>::max();
+    struct Case {
+        const char* what;
+        const Target* depth;
+        std::array<XrRect2Di, 2> rects;
+        std::array<std::uint32_t, 2> slices;
+        bool kept;
+    };
+    const XrRect2Di colour_rect{{0, 0}, {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+    const XrRect2Di right_half{{static_cast<std::int32_t>(kWidth), 0}, colour_rect.extent};
+    const XrRect2Di right_half_past{{static_cast<std::int32_t>(kWidth) + 1, 0}, colour_rect.extent};
+    const std::vector<Case> cases{
+        {"valid, both slices", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, true},
+        {"the colour's rect on a smaller depth image (UEVR)", &smaller, {colour_rect, colour_rect}, {0, 1}, false},
+        {"one texel too wide, left eye only", &smaller, {{{{0, 0}, {49, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"valid at a nonzero origin on a larger image", &larger, {{{{8, 6}, {64, 48}}, {{16, 12}, {64, 48}}}}, {0, 1},
+         true},
+        {"one texel past the larger image's bottom", &larger, {{{{8, 13}, {64, 48}}, {{8, 12}, {64, 48}}}}, {0, 1},
+         false},
+        {"side by side, one slice", &side_by_side, {colour_rect, right_half}, {0, 0}, true},
+        {"side by side, the right eye one texel past", &side_by_side, {colour_rect, right_half_past}, {0, 0}, false},
+        {"a negative offset", &smaller, {{{{-1, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"a zero extent", &smaller, {{{{0, 0}, {0, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, false},
+        {"a slice past the image", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 2}, false},
+        {"an extent whose far edge overflows", &smaller, {{{{0, 0}, {48, 36}}, {{1, 1}, {kMax, kMax}}}}, {0, 1}, false},
+        {"valid again", &smaller, {{{{0, 0}, {48, 36}}, {{0, 0}, {48, 36}}}}, {0, 1}, true},
+    };
+    const auto refusal = [] {
+        std::scoped_lock lock(g_runtime_mutex);
+        return std::to_string(g_runtime.refused_frames) + " refused" +
+               (g_runtime.refusal.empty() ? "" : ", the first: " + g_runtime.refusal);
+    };
+    const Renderer renderer{game ? &*game : nullptr, d3d12 ? &game12 : nullptr};
+    int frame_index = 0;
+    for (const Case& test : cases) {
+        for (int frame = 0; frame < 2; ++frame) {
+            const std::string at = name + ": " + test.what + ", frame " + std::to_string(frame);
+            const std::vector<Color> colors{FrameColor(frame_index, 0), FrameColor(frame_index, 1)};
+            ++frame_index;
+            const std::size_t before = ShownCount();
+            FrameOptions options;
+            options.depth = test.depth;
+            options.edit_depth = [&](std::array<XrCompositionLayerDepthInfoKHR, 2>& depth) {
+                for (int eye = 0; eye < 2; ++eye) {
+                    depth[eye].subImage.imageRect = test.rects[eye];
+                    depth[eye].subImage.imageArrayIndex = test.slices[eye];
+                }
+            };
+            const XrResult result = Frame(app, renderer, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, options);
+            Check(result == XR_SUCCESS, at + ": xrEndFrame " + std::to_string(result) + " (" + refusal() + ")");
+            const std::vector<ShownFrame> shown = Shown(before);
+            Check(shown.size() == 1 && shown[0].views.size() == 2, at + ": one frame of two views shown");
+            if (shown.size() != 1 || shown[0].views.size() != 2) continue;
+            for (int eye = 0; eye < 2; ++eye) {
+                const ShownView& view = shown[0].views[eye];
+                Check(view.depth == test.kept,
+                      at + ": eye " + std::to_string(eye) + (test.kept ? " has" : " has no") + " depth");
+                Check(!test.kept || view.depth_swapchain == test.depth->swapchain,
+                      at + ": the view's depth is the game's swapchain");
+                Check(view.swapchain == (eye ? right.swapchain : left.swapchain), at + ": the view's colour goes on");
+                // The stand-in reads a Direct3D 12 session's images back.
+                Check(!(d3d12 || bridged) || Near(view.texel, colors[eye]),
+                      at + ": eye " + std::to_string(eye) + " shows " + (view.texel ? Text(*view.texel) : "nothing") +
+                          ", rendered " + Text(colors[eye]));
+            }
+        }
+    }
+    Check(refusal() == "0 refused", name + ": the runtime refused no frame (" + refusal() + ")");
+    const std::string log = Peer::Log();
+    Check(Count(log, "The game's depth sub-image lies outside its depth image") == 1,
+          name + ": the log tells once of depth outside its image");
+    Check(!Contains(log, "keeps the game's depth to itself"), name + ": no depth swapchain is private");
+    StopApp(app);
+    if (kind == "vulkan-native") SetEnv("VECTORXR_VULKAN_BRIDGE", "");
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    if (game) {
+        Check(GameRuns(*game), name + ": the game's device works");
+        DestroyGame(*game);
+    }
+    EndCase();
+}
+
 // 15. The bridge's device removed: the session is lost. Last: Direct3D 12
 // makes one device per adapter in a process.
 void TestDeviceLost() {
@@ -5684,6 +6057,7 @@ int main(int argc, char** argv) {
     g_unbridged_only = argc > 1 && std::string(argv[1]) == "unbridged";
     const bool depth_paths_only = argc > 1 && std::string(argv[1]) == "depth-paths";
     const bool teardown_only = argc > 1 && std::string(argv[1]) == "teardown";
+    const bool late_depth_only = argc > 1 && std::string(argv[1]) == "late-depth";
     const char* no_stall = std::getenv("FG_TEST_NO_STALL");
     const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
     const bool require = vulkan_test::RequireHardware();
@@ -5712,8 +6086,10 @@ int main(int argc, char** argv) {
     IsolateHost();
     Peer::UseFrameGenGpu(MakeStandInGpu);
 
-    if (depth_paths_only || teardown_only) {
-        if (teardown_only) {
+    if (depth_paths_only || teardown_only || late_depth_only) {
+        if (late_depth_only) {
+            TestLateDepthSession();
+        } else if (teardown_only) {
             TestBridgedSession(2);
             TestBridgedSession(1);
             TestDestroyInstanceWithSession();
@@ -5725,8 +6101,8 @@ int main(int argc, char** argv) {
         Peer::ReleaseLog(g_root / "released" / "vectorxr.log");
         std::error_code error;
         std::filesystem::remove_all(g_root, error);
-        std::cout << "vulkan bridge layer tests passed (" << (teardown_only ? "teardown" : "depth paths")
-                  << " only)\n";
+        std::cout << "vulkan bridge layer tests passed ("
+                  << (teardown_only ? "teardown" : late_depth_only ? "late depth" : "depth paths") << " only)\n";
         return 0;
     }
     // The cases that need no working bridge.
@@ -5738,6 +6114,8 @@ int main(int argc, char** argv) {
     TestBridgeOffWithD3D11();
     TestVulkanBindingNotFirst();
     TestNativeD3D12("native-d3d12");
+    TestDepthRects("vulkan-native");
+    TestDepthRects("native-d3d12");
     if (!g_unbridged_only) {
         // The bridge's.
         TestCachedCreateDevice();
@@ -5752,7 +6130,9 @@ int main(int argc, char** argv) {
         TestBridgedFrameGen("extrapolate");
         TestStarCitizenShapes();
         TestStarCitizenMotion();
+        TestLateDepthSession();
         TestDepthWritePaths();
+        TestDepthRects("vulkan-bridge");
         if (!skip_negative_controls) {
             TestStalledTeardown(false);
             TestStalledTeardown(true);

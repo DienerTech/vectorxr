@@ -144,6 +144,7 @@
     "priority": "Prioritätsreihenfolge – wenn sich Profile bei einer Anwendung überschneiden, gehört jede gemeinsame Belegung dem höheren Profil.",
     "moveUp": "Profil nach oben verschieben (höhere Priorität)",
     "moveDown": "Profil nach unten verschieben (niedrigere Priorität)",
+    "duplicateTitle": "Dieses Profil mit seinen Einstellungen und Belegungen als neues Profil darunter kopieren.",
     "enabledTitle": "Dieses Profil wendet eigene {module}-Einstellungen auf die zugewiesenen Anwendungen an.",
     "disabledTitle": "Dieses Profil wird zur Laufzeit ignoriert.",
     "on": "Profil ein",

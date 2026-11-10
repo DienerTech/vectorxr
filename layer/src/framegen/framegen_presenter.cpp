@@ -3,6 +3,7 @@
 #include "depthxr/framegen_presenter.h"
 
 #include "depthxr/config_path.h"
+#include "depthxr/game_context_lock.h"
 #include "depthxr/logger.h"
 #include "depthxr/process_info.h"
 
@@ -60,6 +61,15 @@ constexpr std::chrono::milliseconds kPauseCeiling{1000};
 // this share of the refresh rate of stay_above (what it runs at standing by
 // is not much faster: the generated frames' own cost is about that).
 constexpr double kProbeReach = 0.10;
+// A runtime whose xrEndFrame calls made at once take at least this share of
+// a refresh (smoothed, after kEndPacedSamples of them) holds frames there
+// until its slot; frames then go kEndMarginMs before the slot (RuntimeEnd),
+// more when the slot comes earlier than that, never within kEndMarginCeiling
+// of a whole refresh (made at once again).
+constexpr double kEndPacedShare = 0.5;
+constexpr std::uint32_t kEndPacedSamples = 8;
+constexpr double kEndMarginMs = 2.0;
+constexpr double kEndMarginCeiling = 0.9;
 // Pauses logged one by one per session; later ones only in summaries.
 constexpr std::uint32_t kLoggedPauses = 3;
 // Moves of the lead's ceiling from the history ring logged per session;
@@ -277,6 +287,37 @@ bool SupportedFrameChains(const XrFrameEndInfo& info, std::string& unsupported) 
 FrameGenExtent Extent(const XrCompositionLayerProjectionView& view) {
     return {static_cast<std::uint32_t>(std::max(0, view.subImage.imageRect.extent.width)),
             static_cast<std::uint32_t>(std::max(0, view.subImage.imageRect.extent.height))};
+}
+
+FrameGenFov Fov(const XrFovf& fov) {
+    return {fov.angleLeft, fov.angleRight, fov.angleUp, fov.angleDown};
+}
+
+// Edge fill: whether a view written by Frame Generation shows the game's
+// own field of view (an exact copy may then carry the game's depth, which
+// describes that image), not one widened by a margin.
+bool SameFov(const XrCompositionLayerProjectionView& a, const XrCompositionLayerProjectionView& b) {
+    return a.fov.angleLeft == b.fov.angleLeft && a.fov.angleRight == b.fov.angleRight &&
+           a.fov.angleUp == b.fov.angleUp && a.fov.angleDown == b.fov.angleDown;
+}
+
+// Edge fill: output images whose margins are this many pixels wider than a
+// frame asks for at most are kept (EnsureOutputs).
+constexpr std::uint32_t kEdgeFillSlack = 64;
+// Edge fill: margins made anew are rounded up to whole tiles of this many
+// pixels, the largest shading-rate tile: the frame then lies on the tiles
+// and the 2x2 coarse pixels of its draw as without the fill, and its own
+// pixels come out the same.
+constexpr std::uint32_t kEdgeFillRound = 32;
+
+// Edge fill's margins in degrees (research: VECTORXR_FRAMEGEN_EDGE_FILL=h[,v]).
+std::array<float, 2> EdgeFillDegrees() {
+    if (const std::optional<std::string> value = ReadResearchSwitch("VECTORXR_FRAMEGEN_EDGE_FILL")) {
+        if (const auto parsed = ParseFrameGenEdgeFillDegrees(*value)) {
+            return *parsed;
+        }
+    }
+    return {kFrameGenEdgeFillHorizontalDegrees, kFrameGenEdgeFillVerticalDegrees};
 }
 
 // One history slot of these views, estimated: each view's image, and
@@ -650,6 +691,7 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // Research: the Flow view tinting sub-pixel motion (again at each config
     // reload).
     flow_view_fine_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW") == "fine";
+    edge_fill_degrees_ = EdgeFillDegrees(); // again at each config reload
     // Research (the head-motion shimmer diagnosis, D), for the session: where
     // extrapolated frames' eyes go (VECTORXR_FRAMEGEN_SYNTH_EYE).
     eye_prediction_ = ParseFrameGenEyePrediction(ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_EYE").value_or(""));
@@ -729,6 +771,10 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
             ring_ceiling_env_ = false;
         }
     }
+    // VECTORXR_FRAMEGEN_END_HOLD=off: frames go to a runtime that holds them
+    // in xrEndFrame as soon as they are written (RuntimeEnd).
+    const char* end_hold = std::getenv("VECTORXR_FRAMEGEN_END_HOLD");
+    runtime_end_hold_ = !(end_hold && std::string(end_hold) == "off");
     std::string gpu_gate_setting;
     if (const char* ahead = std::getenv("VECTORXR_FRAMEGEN_GPU_AHEAD"); ahead && *ahead) {
         gpu_gate_setting = ahead;
@@ -1111,8 +1157,14 @@ void FrameGenPresenter::Stop() {
     runtime_waits_ = runtime_begins_ = runtime_ends_ = 0;
     presenter_frame_open_ = false;
     logged_order_guard_ = logged_watchdog_ = false;
+    runtime_end_block_ms_ = runtime_end_margin_ms_ = 0.0;
+    runtime_end_block_samples_ = 0;
+    runtime_end_return_.reset();
+    logged_runtime_end_hold_ = false;
+    summary_evidence_.reset();
     display_offset_periods_ = 0.0;
     display_offset_samples_ = 0;
+    display_offset_earlier_ = 0;
     slot_index_ = 0;
     slot_time_ = slot_period_ = 0;
     app_latency_ms_ = 0.0;
@@ -1130,6 +1182,7 @@ void FrameGenPresenter::Stop() {
     dynamic_engaged_at_ = {};
     dynamic_probing_ = false;
     passthrough_fps_ = 0.0;
+    dynamic_rate_check_fps_.reset();
     dynamic_reason_.clear();
     dynamic_engagements_ = dynamic_stand_downs_ = dynamic_probes_ = 0;
     standby_since_.reset();
@@ -1142,6 +1195,7 @@ void FrameGenPresenter::Stop() {
     guard_failing_ = {};
     guard_capture_done_ms_.clear();
     gpu_gate_armed_ = false;
+    summary_evidence_.reset();
     gpu_timeouts_in_row_ = 0;
     gpu_reached_mark_ = 0;
     last_capture_mark_ = 0;
@@ -1157,6 +1211,8 @@ void FrameGenPresenter::Stop() {
     gpu_wait_ms_.clear();
     end_call_ms_.clear();
     runtime_end_ms_.clear();
+    runtime_end_hold_ms_.clear();
+    runtime_wait_ms_.clear();
     synth_lock_ms_.clear();
     ring_short_write_ms_.clear();
     told_lead_sum_ = 0;
@@ -1238,10 +1294,21 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
     const bool engine_cockpit = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_COCKPIT") == "1";
     const bool engine_tint = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_TINT") == "1";
     const bool flow_view_fine = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_FLOW_VIEW") == "fine";
+    const std::array<float, 2> edge_fill_degrees = EdgeFillDegrees();
     std::scoped_lock lock(mutex_);
     ReconfigureEngineLocked(ParseFrameGenEngineMode(engine_mode.value_or("").c_str()), engine_filter, engine_cockpit,
                             engine_tint);
     flow_view_fine_ = flow_view_fine;
+    // Edge fill on or off, or its margins changed: the next frame written
+    // makes its output images anew (EnsureOutputs), and the log says so.
+    if (started_ && logger_ && (settings.edge_fill != settings_.edge_fill || edge_fill_degrees != edge_fill_degrees_)) {
+        logger_->Info(std::string("Frame Generation edge fill ") + (settings.edge_fill ? "on" : "off") + " (" +
+                      Number(edge_fill_degrees[0], 1) + " degrees left and right, " + Number(edge_fill_degrees[1], 1) +
+                      " up and down" +
+                      (gpu_ && !gpu_->SupportsEdgeFill() ? "; this graphics API's frames are written without it" : "") +
+                      ").");
+    }
+    edge_fill_degrees_ = edge_fill_degrees;
     // Just in time, the presenter thread keeps the mode it started with
     // (StayThreadedLocked): another one starts it again, after a fresh run of
     // steady frames, as turning Frame Generation off and on does. Frames
@@ -1636,6 +1703,11 @@ void FrameGenPresenter::SetRuntimeViewConfiguration(XrViewConfigurationType type
     runtime_view_configuration_ = type;
 }
 
+void FrameGenPresenter::SetRuntimeBlanksOpenFrames(bool blanks) {
+    std::scoped_lock lock(mutex_);
+    runtime_blanks_open_frames_ = blanks;
+}
+
 void FrameGenPresenter::SetInterpolateOnShaders(bool on) {
     std::scoped_lock lock(mutex_);
     interpolate_on_shaders_ = on;
@@ -1830,6 +1902,10 @@ bool FrameGenPresenter::UpdateInterpolateFlowLocked(Clock::time_point now, Frame
     return true;
 }
 
+void FrameGenPresenter::SetGameContextLock(GameContextLock* lock) {
+    game_context_lock_.store(lock, std::memory_order_release);
+}
+
 void FrameGenPresenter::SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age) {
     std::scoped_lock lock(mutex_);
     engage_streak_frames_ = steady_frames;
@@ -1892,6 +1968,11 @@ bool FrameGenPresenter::ResetFrames() {
     dropped_unbegun_ = 0;
     // A new session starts with no runtime frame in flight.
     runtime_waits_ = runtime_begins_ = runtime_ends_ = 0;
+    runtime_end_block_ms_ = runtime_end_margin_ms_ = 0.0;
+    runtime_end_block_samples_ = 0;
+    runtime_end_return_.reset();
+    logged_runtime_end_hold_ = false;
+    summary_evidence_.reset();
     presenter_frame_open_ = false;
     frames_.clear();
     healthy_streak_ = 0;
@@ -2242,8 +2323,10 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
             return;
         }
     }
-    // Lock order everywhere: submit, queue, GPU, presenter. The copy may wait
-    // on a fence, so it runs without the presenter lock.
+    // Lock order everywhere: the game's Direct3D 11 device (in its own
+    // session; the layer's release and xrEndFrame take it before theirs,
+    // GameContextLock), submit, queue, GPU, presenter. The copy may wait on a
+    // fence, so it runs without the presenter lock.
     std::unique_lock<std::mutex> queue_lock;
     if (queue_mutex_) {
         queue_lock = std::unique_lock<std::mutex>(*queue_mutex_);
@@ -2896,7 +2979,8 @@ void FrameGenPresenter::RecordCaptureTargetsLocked(const XrCompositionLayerProje
         color.rect = sub.imageRect;
         color.view = i;
         capture_targets_.push_back(color);
-        if (const auto* depth = DepthInfo(projection.views[i])) {
+        const auto* depth = settings_.use_game_depth ? DepthInfo(projection.views[i]) : nullptr;
+        if (depth) {
             CaptureTarget target;
             target.swapchain = depth->subImage.swapchain;
             target.array_index = depth->subImage.imageArrayIndex;
@@ -3384,7 +3468,9 @@ std::string FrameGenPresenter::DynamicSummaryLocked() const {
     }
     // standDownHoldS: how long the next stand-down passes frames straight
     // through (doubling after short engagements, DynamicStandDownLocked).
-    return std::string(", dynamic=") + (dynamic_standby_ ? (dynamic_probing_ ? "probing" : "standby") : "engaged") +
+    return std::string(", dynamic=") +
+           (dynamic_standby_ ? (dynamic_probing_ ? "probing" : dynamic_rate_check_fps_ ? "checking" : "standby")
+                             : "engaged") +
            (dynamic_reason_.empty() ? std::string() : " (" + dynamic_reason_ + ")") +
            ", standDownHoldS=" + Number(std::chrono::duration<double>(dynamic_hold_).count(), 1) +
            ", standDowns=" + std::to_string(dynamic_stand_downs_);
@@ -3743,6 +3829,33 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
             return;
         }
         const double rate = RateSince(app_frames_, now, multiplier_changed_at_);
+        if (dynamic_rate_check_fps_) {
+            // (e)'s check: the game's rate standing by, against its rate
+            // engaged. Clearly faster standing by, engaging slowed it: a
+            // stand-down, held as any. Not, its scene slowed it: engaged
+            // again at once, the guard judging from its rate now.
+            if (now - multiplier_changed_at_ < policy.settle + policy.engage_after) {
+                return;
+            }
+            const double engaged = *dynamic_rate_check_fps_;
+            dynamic_rate_check_fps_.reset();
+            if (rate > 0.0 && engaged < policy.game_rate_share * rate) {
+                DynamicStandDownLocked(now,
+                                       "the game ran at " + Number(engaged, 1) + " fps engaged against " +
+                                           Number(rate, 1) + " passing through",
+                                       false);
+                return;
+            }
+            if (logger_) {
+                logger_->Info("Frame Generation (dynamic): the game runs at " + Number(rate, 1) +
+                              " fps passing through too, not slowed by engaging (" + Number(engaged, 1) +
+                              " fps engaged).");
+            }
+            if (rate > 0.0 && rate < policy.engage_below * refresh) {
+                DynamicEngageLocked(now, rate, refresh);
+            }
+            return;
+        }
         const double share = dynamic_probing_ ? policy.stay_above : policy.engage_below;
         if (rate > 0.0 && rate < share * refresh) {
             if (!dynamic_below_since_) {
@@ -3803,8 +3916,16 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
     const std::uint64_t pauses = totals_.pauses - start.pauses;
     std::vector<double> capture_done = std::move(guard_capture_done_ms_);
     guard_capture_done_ms_.clear();
-    NoteGpuEvidenceLocked(app_frames, totals_.late_gpu - start.late_gpu, std::move(capture_done));
     const bool mostly_pauses = app_frames >= 4 && pauses * 2 >= app_frames;
+    // Nor is a window with a pause evidence for GPU-aware pacing, nor one a
+    // pause ends (judged at the frame after it): a GPU stall's frames before
+    // a pause are late and captured seconds after their refresh (DCS,
+    // 2026-10-22: "2444.7 ms after their refresh" armed it for the session).
+    const bool paused_after =
+        last_app_end_ && now - *last_app_end_ > std::chrono::nanoseconds(PauseLimitLocked());
+    const bool clean = pauses == 0 && !paused_after && totals_.non_renderable == start.non_renderable &&
+                       totals_.unrendered == start.unrendered && totals_.restarts == start.restarts;
+    NoteGpuEvidenceLocked(nullptr, clean, {app_frames, totals_.late_gpu - start.late_gpu, std::move(capture_done)});
     if ((pauses > 0 && !mostly_pauses) || totals_.non_renderable != start.non_renderable ||
         totals_.unrendered != start.unrendered || totals_.restarts != start.restarts) {
         return;
@@ -3825,12 +3946,18 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
     // window that still shows more. (b), (c) and (d) then judge nothing;
     // probes check whether standing by would hold.
     const bool winning = passthrough_fps_ > 0.0 && distinct >= passthrough_fps_ + policy.distinct_margin_fps;
-    const std::array<bool, 4> failing{
+    // (e) judges winning engagements too: generated frames fill every
+    // refresh however slow the game's own frames become, so distinct frames
+    // alone cannot tell a game that engaging slowed (DCS through the
+    // Direct3D 11 bridge, 2026-10-22: 44 fps passing through, 17 engaged,
+    // still 90 distinct, engaged until Frame Generation was turned off).
+    const std::array<bool, 5> failing{
         passthrough_fps_ > 0.0 && !winning,
         !winning && generated < policy.generated_share * gap,
         !winning && refreshes > 0 &&
             static_cast<double>(unready) > policy.unready_share * static_cast<double>(refreshes),
         !winning && timed > 0 && static_cast<double>(late) > policy.late_analyses_share * static_cast<double>(timed),
+        passthrough_fps_ > 0.0 && app_rate < policy.game_rate_share * passthrough_fps_,
     };
     for (std::size_t i = 0; i < failing.size(); ++i) {
         guard_failing_[i] = failing[i] ? guard_failing_[i] + 1 : 0;
@@ -3838,20 +3965,28 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
     auto percent = [](std::uint64_t part, std::uint64_t whole) {
         return Number(whole ? 100.0 * static_cast<double>(part) / static_cast<double>(whole) : 0.0, 0) + "%";
     };
-    const std::array<std::string, 4> reasons{
+    const std::array<std::string, 5> reasons{
         "it showed " + Number(distinct, 0) + " distinct frames/s against " + Number(passthrough_fps_, 0) +
             " passing through",
         "it generated too few frames (" + Number(generated, 1) + "/s of a " + Number(gap, 1) + "/s gap)",
         "real frames reached the GPU too late (" + percent(unready, refreshes) + " of refreshes)",
         "motion was measured too late (" + percent(late, timed) + " of analyses)",
+        "the game ran at " + Number(app_rate, 1) + " fps engaged against " + Number(passthrough_fps_, 1) +
+            " passing through",
     };
     // Two failing windows in a row: one can be a hitch. A cause failing now
     // (frames on the GPU too late, motion measured too late, too few
-    // generated) is named rather than its effect (no more distinct frames
-    // than the game alone).
-    const std::array<std::size_t, 3> causes{2, 3, 1};
+    // generated, the game slowed) is named rather than its effect (no more
+    // distinct frames than the game alone).
+    const std::array<std::size_t, 4> causes{2, 3, 1, 4};
     for (const std::size_t i : causes) {
         if (guard_failing_[i] >= 2) {
+            if (i == 4) {
+                // A heavier scene slows the game engaged or not: standing by
+                // tells which (UpdateDynamicLocked).
+                DynamicStandDownLocked(now, reasons[i], false, app_rate);
+                return;
+            }
             DynamicStandDownLocked(now, reasons[i], false);
             return;
         }
@@ -3895,6 +4030,7 @@ void FrameGenPresenter::DynamicEngageLocked(Clock::time_point now, double rate, 
     }
     guard_.valid = false;
     guard_failing_ = {};
+    dynamic_rate_check_fps_.reset();
     ++dynamic_engagements_;
     if (probe_failed) {
         dynamic_probing_ = false;
@@ -3912,7 +4048,8 @@ void FrameGenPresenter::DynamicEngageLocked(Clock::time_point now, double rate, 
     }
 }
 
-void FrameGenPresenter::DynamicStandDownLocked(Clock::time_point now, const std::string& reason, bool probe) {
+void FrameGenPresenter::DynamicStandDownLocked(Clock::time_point now, const std::string& reason, bool probe,
+                                               std::optional<double> check_engaged_fps) {
     const FrameGenDynamicPolicy& policy = dynamic_policy_;
     dynamic_standby_ = true;
     dynamic_below_since_.reset();
@@ -3922,6 +4059,16 @@ void FrameGenPresenter::DynamicStandDownLocked(Clock::time_point now, const std:
     guard_.valid = false;
     guard_failing_ = {};
     dynamic_reason_ = reason;
+    dynamic_rate_check_fps_ = check_engaged_fps;
+    if (check_engaged_fps) {
+        // No hold yet: standing by, the game's own rate decides (e).
+        dynamic_probing_ = false;
+        if (logger_) {
+            logger_->Info("Frame Generation (dynamic): " + reason +
+                          "; frames pass straight through while it checks the game's rate standing by.");
+        }
+        return;
+    }
     if (probe) {
         // No hold: the probe engages again as soon as the game falls short.
         dynamic_probing_ = true;
@@ -3959,6 +4106,7 @@ void FrameGenPresenter::DynamicReenableLocked(Clock::time_point now) {
     }
     dynamic_below_since_.reset();
     dynamic_probing_ = false;
+    dynamic_rate_check_fps_.reset();
     multiplier_changed_at_ = now;
     cadence_.clear();
     guard_.valid = false;
@@ -5466,6 +5614,11 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
         generated_layer.layerFlags = flags;
         generated_layer.viewCount = static_cast<std::uint32_t>(views.size());
         generated_layer.views = views.data();
+        // Not on an image widened by edge fill: the game's depth describes
+        // its own field of view.
+        for (std::size_t i = 0; depth && i < views.size() && i < projection.viewCount; ++i) {
+            depth = SameFov(views[i], projection.views[i]);
+        }
         if (depth && views.size() == projection.viewCount) {
             // The newest real frame's depth chain, valid during this end: its
             // depth image is the one the game just released.
@@ -5964,7 +6117,11 @@ void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const Pend
         if (timing.capture_end != Clock::time_point{}) {
             const double done = Milliseconds(timing.capture_end - due->real_due);
             AddSample(capture_done_ms_, done);
-            AddSample(guard_capture_done_ms_, done);
+            // Later than a pause, a GPU stall: not a game running frames
+            // ahead, so no evidence for GPU-aware pacing (NoteGpuEvidenceLocked).
+            if (done <= static_cast<double>(PauseLimitLocked()) / 1e6) {
+                AddSample(guard_capture_done_ms_, done);
+            }
             if (due->capture_pending_from != Clock::time_point{}) {
                 auto_capture_pending_ms_[auto_capture_pending_count_++ % auto_capture_pending_ms_.size()] =
                     std::max(0.0, Milliseconds(timing.capture_end - due->capture_pending_from));
@@ -6228,7 +6385,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             if (i < depth_decoded_.size()) {
                 decoded = std::exchange(depth_decoded_[i], std::nullopt);
             }
-            if (const auto* depth = DepthInfo(view)) {
+            if (const auto* depth = settings_.use_game_depth ? DepthInfo(view) : nullptr) {
                 const auto depth_record = swapchains_.find(depth->subImage.swapchain);
                 submission.request.depth =
                     depth_record != swapchains_.end() && depth_record->second.depth_capturable;
@@ -6267,8 +6424,12 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         EngineDeltaLocked(frame, submissions);
     }
     std::vector<OutputSpec> specs(projection.viewCount);
-    for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
-        specs[i] = {Extent(projection.views[i]), kinds[i]};
+    {
+        std::scoped_lock lock(mutex_);
+        for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
+            const FrameGenExtent extent = Extent(projection.views[i]);
+            specs[i] = {extent, kinds[i], EdgeMarginsLocked(projection.views[i].fov, extent)};
+        }
     }
     if (count && !EnsureOutputs(specs, count, error)) {
         std::scoped_lock lock(mutex_);
@@ -6291,6 +6452,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
 
     FrameGenExecuteResult executed;
     bool ok = true;
+    bool edges_filled = false; // FrameGenGpu::EdgesFilled after Execute
     double gpu_ms = -1.0;
     std::uint64_t working_bytes = 0;
     double execute_ms = 0.0; // the backend's Execute, on this thread
@@ -6300,6 +6462,12 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     FrameGenWorldDeltaStatus world_delta;
     std::string hardware_status;
     {
+        // The game's Direct3D 11 context (the game's own Direct3D 11
+        // session): its device's lock before any of these (GameContextLock).
+        GameContextHold context_hold;
+        if (GameContextLock* context_lock = game_context_lock_.load(std::memory_order_acquire)) {
+            context_hold = context_lock->Hold();
+        }
         // Vulkan queues need external synchronization with the runtime's own
         // submissions on the session queue. Lock order: queue, GPU,
         // presenter; the backend may wait on fences, so not under mutex_.
@@ -6315,10 +6483,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             for (std::size_t set = 0; set < count && ok; ++set) {
                 const Output& output = output_sets_[set][i];
                 submissions[i].request.output = output.kind;
-                submissions[i].outputs.push_back({output.swapchain, output.index, 0,
-                                                  {{0, 0}, {static_cast<std::int32_t>(output.extent.width),
-                                                            static_cast<std::int32_t>(output.extent.height)}},
-                                                  output.format});
+                submissions[i].outputs.push_back(OutputImage(output));
                 ok = gpu_->Track(output.swapchain, xr_.images, error);
             }
         }
@@ -6333,6 +6498,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         }
         const auto execute_start = Clock::now();
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
+        edges_filled = ok && gpu_ && gpu_->EdgesFilled();
         execute_ms = Milliseconds(Clock::now() - execute_start);
         if (gpu_) {
             gpu_ms = gpu_->LastGpuMilliseconds();
@@ -6593,9 +6759,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         views.assign(projection.views, projection.views + projection.viewCount);
         for (std::size_t i = 0; i < views.size(); ++i) {
             views[i].next = nullptr; // a generated image has no matching depth
-            views[i].subImage.swapchain = output_sets_[set][i].swapchain;
-            views[i].subImage.imageRect = submissions[i].outputs[set].rect;
-            views[i].subImage.imageArrayIndex = 0;
+            ShowOutput(views[i], output_sets_[set][i], edges_filled);
             if (i < executed.depth.size() && executed.depth[i]) {
                 // Seen from where the eye will be (FrameGenViewRequest::shift);
                 // the runtime still corrects the rotation.
@@ -6829,6 +6993,43 @@ void FrameGenPresenter::WriteCaptureNotes(const std::string& directory, const Ca
     }
 }
 
+FrameGenEdgeMargins FrameGenPresenter::EdgeMarginsLocked(const XrFovf& fov, FrameGenExtent extent) const {
+    if (!settings_.edge_fill || !gpu_ || !gpu_->SupportsEdgeFill()) {
+        return {};
+    }
+    return FrameGenEdgeFillMargins(Fov(fov), extent, edge_fill_degrees_[0], edge_fill_degrees_[1]);
+}
+
+FrameGenImage FrameGenPresenter::OutputImage(const Output& output) {
+    FrameGenImage image{output.swapchain, output.index, 0,
+                        {{0, 0}, {static_cast<std::int32_t>(output.extent.width), static_cast<std::int32_t>(output.extent.height)}},
+                        output.format};
+    image.content = {static_cast<std::int32_t>(output.margins.left), static_cast<std::int32_t>(output.margins.up)};
+    return image;
+}
+
+void FrameGenPresenter::ShowOutput(XrCompositionLayerProjectionView& view, const Output& output, bool filled) {
+    view.subImage.swapchain = output.swapchain;
+    view.subImage.imageArrayIndex = 0;
+    view.subImage.imageRect = {{0, 0}, {static_cast<std::int32_t>(output.extent.width),
+                                        static_cast<std::int32_t>(output.extent.height)}};
+    if (output.margins.Any() && !filled) {
+        // The backend copied the frame in (FrameGenGpu::EdgesFilled): its
+        // margin holds whatever it held, so only the frame's own region is
+        // shown, with the game's field of view.
+        view.subImage.imageRect = {{static_cast<std::int32_t>(output.margins.left), static_cast<std::int32_t>(output.margins.up)},
+                                   {static_cast<std::int32_t>(output.extent.width - output.margins.left - output.margins.right),
+                                    static_cast<std::int32_t>(output.extent.height - output.margins.up - output.margins.down)}};
+    } else if (output.margins.Any()) {
+        // The image's own projection: the frame's tangents carried on across
+        // the margins, which the runtime turns into view on a fast turn.
+        const FrameGenExtent frame{output.extent.width - output.margins.left - output.margins.right,
+                                   output.extent.height - output.margins.up - output.margins.down};
+        const FrameGenFov widened = FrameGenEdgeFillFov(Fov(view.fov), frame, output.margins);
+        view.fov = {widened.left, widened.right, widened.up, widened.down};
+    }
+}
+
 bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std::size_t sets, std::string& error,
                                       bool keep_replaced) {
     const std::uint32_t count = static_cast<std::uint32_t>(specs.size());
@@ -6876,10 +7077,37 @@ bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std:
     for (std::size_t set = 0; set < sets; ++set) {
         for (std::uint32_t i = 0; i < count; ++i) {
             Output& output = output_sets_[set][i];
-            const FrameGenExtent extent = specs[i].extent;
+            // With edge fill, the frame and its margins. Margins a little
+            // wider than asked keep their images: a field of view that wavers
+            // (a runtime's per-frame eye poses) never makes them anew.
+            FrameGenEdgeMargins margins = specs[i].margins;
+            const auto close = [](std::uint32_t kept, std::uint32_t asked) {
+                return kept >= asked && kept <= asked + kEdgeFillSlack;
+            };
+            if (output.swapchain && margins.Any() && output.margins.Any() &&
+                output.extent.width == specs[i].extent.width + output.margins.left + output.margins.right &&
+                output.extent.height == specs[i].extent.height + output.margins.up + output.margins.down &&
+                close(output.margins.left, margins.left) && close(output.margins.right, margins.right) &&
+                close(output.margins.up, margins.up) && close(output.margins.down, margins.down)) {
+                margins = output.margins;
+            } else if (margins.Any()) {
+                // Made anew: each margin rounded up to whole tiles
+                // (kEdgeFillRound), within the largest image.
+                const auto round = [](std::uint32_t margin, std::uint32_t frame, std::uint32_t other) {
+                    const std::uint32_t rounded =
+                        margin ? (margin + kEdgeFillRound - 1) / kEdgeFillRound * kEdgeFillRound : 0u;
+                    return frame + other + rounded <= kFrameGenEdgeFillMaxExtent ? rounded : margin;
+                };
+                margins.left = round(margins.left, specs[i].extent.width, margins.right);
+                margins.right = round(margins.right, specs[i].extent.width, margins.left);
+                margins.up = round(margins.up, specs[i].extent.height, margins.down);
+                margins.down = round(margins.down, specs[i].extent.height, margins.up);
+            }
+            const FrameGenExtent extent{specs[i].extent.width + margins.left + margins.right,
+                                        specs[i].extent.height + margins.up + margins.down};
             const FrameGenOutputKind kind = specs[i].kind;
             if (output.swapchain && output.extent.width == extent.width && output.extent.height == extent.height &&
-                output.requested == kind) {
+                output.margins == margins && output.requested == kind) {
                 continue;
             }
             if (output.swapchain) {
@@ -6939,6 +7167,7 @@ bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std:
             }
             std::scoped_lock lock(mutex_);
             output.extent = extent;
+            output.margins = margins;
             output.format = format;
             output.requested = kind;
             // An sRGB fallback for a UNORM or float source must also encode.
@@ -6989,7 +7218,21 @@ bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std:
                           ", imagesPerSwapchain=" + std::to_string(output_sets_.front().front().image_count) +
                           ", estimated video memory " + Number((working + swapchains) / megabytes, 0) +
                           " MB (working " + Number(working / megabytes, 0) + " MB" + (working_bytes_ ? "" : " estimated") +
-                          ", output swapchains " + Number(swapchains / megabytes, 0) + " MB).");
+                          ", output swapchains " + Number(swapchains / megabytes, 0) + " MB)" +
+                          [&] {
+                              // Edge fill: each view's margins (left/right/up/down pixels).
+                              std::string fill;
+                              for (const Output& output : output_sets_.front()) {
+                                  if (!output.margins.Any()) continue;
+                                  fill += std::string(fill.empty() ? ", edge fill margins " : "; ") +
+                                          std::to_string(output.margins.left) + "/" + std::to_string(output.margins.right) +
+                                          "/" + std::to_string(output.margins.up) + "/" +
+                                          std::to_string(output.margins.down) + " px of " +
+                                          std::to_string(output.extent.width) + "x" + std::to_string(output.extent.height);
+                              }
+                              return fill;
+                          }() +
+                          ".");
             LogMemoryBudgetLocked();
         }
     }
@@ -7200,7 +7443,8 @@ bool FrameGenPresenter::ColorReleasedSinceLocked(const FrameCopy& copy) const {
     return false;
 }
 
-FrameGenPresenter::AsIs FrameGenPresenter::CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time) const {
+FrameGenPresenter::AsIs FrameGenPresenter::CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time,
+                                                             bool past_written) const {
     // A copy without its projection (a swapchain or space it used was
     // destroyed) shows nothing of the scene either.
     const auto current = [&](const FrameCopy& candidate) {
@@ -7219,6 +7463,7 @@ FrameGenPresenter::AsIs FrameGenPresenter::CurrentAsIsLocked(const FrameCopy& co
             continue;
         }
         if (!frame.as_is) {
+            if (past_written) continue;
             return {};
         }
         if (current(frame.copy)) {
@@ -7332,10 +7577,15 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
                 // position, so such a runtime only rotates them. An exact
                 // copy of the real frame keeps it (while the game has not
                 // released a newer depth image: DropStaleDepthLocked).
+                // Nor on an image widened by edge fill (SameFov).
+                bool depth = generated_depth && layer.views.size() == generated->size();
+                for (std::size_t view = 0; depth && view < layer.views.size(); ++view) {
+                    depth = SameFov(layer.views[view], (*generated)[view]);
+                }
                 layer.views = *generated;
                 layer.depth.resize(layer.views.size(), XrCompositionLayerDepthInfoKHR{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR});
                 layer.has_depth.resize(layer.views.size(), 0);
-                if (!generated_depth) {
+                if (!depth) {
                     std::fill(layer.has_depth.begin(), layer.has_depth.end(), std::uint8_t{0});
                 }
                 layer.projection.space = generated_space;
@@ -7391,13 +7641,20 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
 XrResult FrameGenPresenter::RuntimeWait(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameWaitInfo* info,
                                         XrFrameState* state) {
     XrResult result = XR_SUCCESS;
+    const auto called = Clock::now();
     {
         const PresenterCall call(*this, "xrWaitFrame");
         result = calls.wait(session, info, state);
     }
     if (XR_SUCCEEDED(result)) {
+        const double call_ms = Milliseconds(Clock::now() - called);
         std::scoped_lock lock(mutex_);
         ++runtime_waits_;
+        AddSample(runtime_wait_ms_, call_ms);
+        // Blocked as NotePhaseLocked counts it: by the period this wait reported.
+        const double period_ms = state ? static_cast<double>(state->predictedDisplayPeriod) / 1e6 : 0.0;
+        ++totals_.runtime_waits_timed;
+        totals_.runtime_waits_blocked += call_ms >= std::max(1.0, period_ms / 10.0) ? 1 : 0;
     }
     return result;
 }
@@ -7443,13 +7700,69 @@ XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSess
         }
     }
     const auto entered = Clock::now();
+    // A runtime holding frames in xrEndFrame until its slot holds its
+    // swapchain lock meanwhile (PimaxXR): the frame goes shortly before the
+    // slot instead, the runtime's next after its last return.
+    std::optional<Clock::time_point> call_at;
+    double period_ms = 0.0;
+    {
+        std::scoped_lock lock(mutex_);
+        period_ms = static_cast<double>(last_period_) / 1e6;
+        if (runtime_end_hold_ && paced && period_ms > 0.0 && runtime_end_return_ &&
+            runtime_end_block_samples_ >= kEndPacedSamples &&
+            runtime_end_block_ms_ >= kEndPacedShare * period_ms &&
+            runtime_end_margin_ms_ < kEndMarginCeiling * period_ms) {
+            const auto period = std::chrono::nanoseconds(last_period_);
+            auto slot = *runtime_end_return_ + period;
+            while (slot <= entered) slot += period;
+            call_at = slot - std::chrono::duration_cast<Clock::duration>(
+                                 std::chrono::duration<double, std::milli>(std::max(runtime_end_margin_ms_, kEndMarginMs)));
+            if (!logged_runtime_end_hold_ && logger_) {
+                logged_runtime_end_hold_ = true;
+                logger_->Info("Frame Generation: the runtime holds frames in xrEndFrame until its refresh (" +
+                              Number(runtime_end_block_ms_, 1) + " ms of " + Number(period_ms, 1) +
+                              "), and its swapchain calls wait for it meanwhile (PimaxXR with \"Prefer framerate "
+                              "over latency\"): frames now go shortly before the refresh, so the game's swapchain "
+                              "calls are not held (VECTORXR_FRAMEGEN_END_HOLD=off turns this off).");
+            }
+        }
+    }
+    const bool held = call_at && *call_at > entered;
+    if (held) {
+        thread_local struct EndTimer {
+            HANDLE handle = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            ~EndTimer() {
+                if (handle) CloseHandle(handle);
+            }
+        } timer;
+        SleepUntil(timer.handle, *call_at);
+    }
+    const auto called = Clock::now();
     {
         const PresenterCall call(*this, "xrEndFrame");
         result = calls.submit(session, info);
     }
     {
         std::scoped_lock lock(mutex_);
-        AddSample(runtime_end_ms_, Milliseconds(Clock::now() - entered));
+        const auto returned = Clock::now();
+        const double call_ms = Milliseconds(returned - called);
+        AddSample(runtime_end_ms_, call_ms);
+        runtime_end_return_ = returned;
+        if (held) {
+            AddSample(runtime_end_hold_ms_, Milliseconds(called - entered));
+            // Returned at once: the slot came before the frame (or the
+            // runtime no longer holds frames), so frames go earlier; else
+            // back towards the margin.
+            runtime_end_margin_ms_ = call_ms < 0.5 ? runtime_end_margin_ms_ * 1.5 + 0.5
+                                                    : std::max(kEndMarginMs, runtime_end_margin_ms_ * 0.98);
+        } else if (paced && !call_at) {
+            runtime_end_block_ms_ =
+                runtime_end_block_samples_ == 0 ? call_ms : runtime_end_block_ms_ * 0.9 + call_ms * 0.1;
+            if (runtime_end_block_samples_ < kEndPacedSamples) ++runtime_end_block_samples_;
+            // Made at once (the margin grew to a refresh) and held to the slot
+            // again: the slot is where it was.
+            if (period_ms > 0.0 && call_ms >= kEndPacedShare * period_ms) runtime_end_margin_ms_ = kEndMarginMs;
+        }
         // Counted even when the runtime rejects the frame: it is over either way.
         if (runtime_ends_ < runtime_begins_) {
             ++runtime_ends_;
@@ -7473,9 +7786,21 @@ void FrameGenPresenter::NoteDisplayOffsetLocked(XrTime submitted, XrTime returne
     if (period <= 0 || returned <= 0 || submitted <= 0) {
         return;
     }
-    const double sample = static_cast<double>(submitted - returned) / static_cast<double>(period);
+    double sample = static_cast<double>(submitted - returned) / static_cast<double>(period);
     if (sample < -2.0 || sample > 3.0) {
         return; // not a convention, just a stray time
+    }
+    if (sample < 0.0) {
+        // Ended for an earlier time than it was given: a layer above scaling
+        // the prediction down (OpenXR Toolkit's prediction dampening, which
+        // never restores the time it changed). Telling engaged frames a later
+        // time would undo what the user set there: counted as no offset.
+        if (++display_offset_earlier_ == 30 && logger_) {
+            logger_->Info("Frame Generation: the game ends frames for earlier times than it was given (" +
+                          Number(sample, 2) + " periods; a layer above VectorXR scales its predictions down, as "
+                          "OpenXR Toolkit's prediction dampening does); engaged frames keep the times they are given.");
+        }
+        sample = 0.0;
     }
     display_offset_periods_ =
         display_offset_samples_ == 0 ? sample : display_offset_periods_ * 0.9 + sample * 0.1;
@@ -8171,17 +8496,29 @@ void FrameGenPresenter::NoteGpuWaitLocked(double waited_ms, bool reached, bool p
     }
 }
 
-void FrameGenPresenter::NoteGpuEvidenceLocked(std::uint64_t real_frames, std::uint64_t late_gpu,
-                                              std::vector<double> capture_done_ms) {
-    if (gpu_gate_armed_ || !gpu_gate_enabled_) {
+void FrameGenPresenter::NoteGpuEvidenceLocked(std::optional<GpuEvidence>* pending, bool clean, GpuEvidence window) {
+    // With `pending`, a window is taken once the next is clean too (a
+    // summary's ends before the pause that follows a stall shows).
+    std::optional<GpuEvidence> taken;
+    if (!pending) {
+        if (clean) taken = std::move(window);
+    } else if (clean) {
+        taken = std::exchange(*pending, std::move(window));
+    } else {
+        pending->reset();
+    }
+    if (!taken || gpu_gate_armed_ || !gpu_gate_enabled_) {
         return;
     }
-    const std::optional<double> capture_done = Median(std::move(capture_done_ms));
-    const bool late_frames = real_frames > 0 && late_gpu * 100 > real_frames;
+    // Late frames say the game runs ahead on its GPU only while that GPU
+    // finishes them: a stalled one (a hitch) finishes none in the window.
+    const bool finishing = taken->capture_done_ms.size() * 2 >= taken->real_frames;
+    const std::optional<double> capture_done = Median(std::move(taken->capture_done_ms));
+    const bool late_frames = taken->real_frames > 0 && taken->late_gpu * 100 > taken->real_frames && finishing;
     if (!late_frames && !(capture_done && *capture_done > 0.0)) {
         return;
     }
-    ArmGpuGateLocked(late_frames ? std::to_string(late_gpu) + " of " + std::to_string(real_frames) +
+    ArmGpuGateLocked(late_frames ? std::to_string(taken->late_gpu) + " of " + std::to_string(taken->real_frames) +
                                        " real frames were not on the GPU when first needed"
                                  : "its frames were captured " + Number(*capture_done, 1) +
                                        " ms after their refresh, typically");
@@ -8594,7 +8931,11 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
             FindProjection(info, &projection_index);
             layers.assign(info.layers, info.layers + info.layerCount);
             generated_views = between[skip];
-            const bool depth = skip < between_exact.size() && between_exact[skip];
+            bool depth = skip < between_exact.size() && between_exact[skip];
+            // Not on an image widened by edge fill (SameFov).
+            for (std::size_t i = 0; depth && i < generated_views.size() && i < projection->viewCount; ++i) {
+                depth = SameFov(generated_views[i], projection->views[i]);
+            }
             for (std::size_t i = 0; i < generated_views.size() && i < projection->viewCount; ++i) {
                 generated_views[i].next = depth ? projection->views[i].next : nullptr;
             }
@@ -8780,7 +9121,21 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
     const Totals& start = summary_totals_;
     const auto delta = [&](std::uint64_t Totals::*field) { return totals_.*field - start.*field; };
     const double standby = StandbySecondsLocked(now);
-    NoteGpuEvidenceLocked(delta(&Totals::app_frames), delta(&Totals::late_gpu), capture_done_ms_);
+    // Evidence for GPU-aware pacing as the benefit guard takes it: none from
+    // a window with a pause, a frame without a projection, an unrendered
+    // refresh or a restart, nor a capture later than a pause (a GPU stall's,
+    // DCS 2026-10-22: "captured 2444.7 ms after their refresh" armed it for
+    // the session from this window). Thirty seconds of it are enough.
+    {
+        const double pause_ms = static_cast<double>(PauseLimitLocked()) / 1e6;
+        GpuEvidence evidence{delta(&Totals::app_frames), delta(&Totals::late_gpu), {}};
+        std::copy_if(capture_done_ms_.begin(), capture_done_ms_.end(), std::back_inserter(evidence.capture_done_ms),
+                     [&](double done) { return done <= pause_ms; });
+        NoteGpuEvidenceLocked(&summary_evidence_,
+                              delta(&Totals::pauses) == 0 && delta(&Totals::non_renderable) == 0 &&
+                                  delta(&Totals::unrendered) == 0 && delta(&Totals::restarts) == 0,
+                              std::move(evidence));
+    }
     if (logger_) {
         LogMemoryBudgetLocked();
         // A fixed or Auto rate is the most the game is let run: a slower
@@ -8803,11 +9158,18 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
         // nothing to write. endCallMs: the game's xrEndFrame in Frame
         // Generation. runtimeEndMs: the runtime's xrEndFrame for the frames
         // Frame Generation submits (long where the runtime waits for its
-        // queue). synthLockMs: the presenter thread's wait for the GPU
+        // queue). runtimeEndHeldMs: frames held back before it, for a
+        // runtime that holds them there until its slot. runtimeWaitMs: the
+        // runtime's xrWaitFrame (every caller's), and runtimeWaitsBlocked:
+        // of those waits, the ones that blocked (none: a runtime pacing in
+        // xrEndFrame instead, as PimaxXR does with "Prefer framerate over
+        // latency"; few: a caller coming late). synthLockMs: the presenter thread's wait for the GPU
         // lock before writing. ringExhausted: refreshes whose real frame's
         // images newer captures had replaced (written unmoved, or the frame
         // before). staleSkipped: refreshes not submitted, nothing current to
         // show (a frame shown as it is had newer images in its swapchains).
+        // staleShownAhead (when any): such refreshes shown with a later frame
+        // as it is instead, for a runtime blanking frames left open.
         // leadAvg/leadMax: the lead told to the game's frames; leadHist: how
         // many frames were told each lead ("lead:frames"). toldAheadMs
         // (median/90th percentile): gameAheadMs measured from the presenter
@@ -8914,6 +9276,10 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             std::to_string(delta(&Totals::gpu_wait_timeouts)) +
             (gpu_gate_enabled_ && gpu_gate_armed_ ? "" : gpu_gate_enabled_ ? " (not armed)" : " (off)") +
             ", endCallMs=" + MedianAndMax(end_call_ms_) + ", runtimeEndMs=" + MedianAndMax(runtime_end_ms_) +
+            ", runtimeEndHeldMs=" + MedianAndMax(runtime_end_hold_ms_) +
+            ", runtimeWaitMs=" + MedianAndMax(runtime_wait_ms_) +
+            ", runtimeWaitsBlocked=" + std::to_string(delta(&Totals::runtime_waits_blocked)) + "/" +
+            std::to_string(delta(&Totals::runtime_waits_timed)) +
             ", synthLockMs=" + MedianAndMax(synth_lock_ms_) +
             (jit_ ? ", justInTime=1, covers=" + std::to_string(jit_covers_) + ", unwritten=" +
                         std::to_string(delta(&Totals::unwritten_wait)) + "/" +
@@ -8925,7 +9291,10 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
                         ", staleMotion=" + std::to_string(delta(&Totals::stale_motion)) +
                         ", ring=" + std::to_string(JitRingLocked(quad_mode_)) +
                         ", ringExhausted=" + std::to_string(delta(&Totals::ring_exhausted)) + ring_text +
-                        ", staleSkipped=" + std::to_string(delta(&Totals::stale_skipped))
+                        ", staleSkipped=" + std::to_string(delta(&Totals::stale_skipped)) +
+                        (delta(&Totals::stale_shown_ahead)
+                             ? ", staleShownAhead=" + std::to_string(delta(&Totals::stale_shown_ahead))
+                             : std::string())
                   : std::string()) +
             ", runtimeHalved=" + std::to_string(delta(&Totals::halving_halved)) + "/" +
             std::to_string(delta(&Totals::halving_measured)) + (runtime_halving_ ? " (halving)" : "") +
@@ -8960,6 +9329,8 @@ void FrameGenPresenter::NewSummaryWindowLocked(Clock::time_point now, double sta
     gpu_wait_ms_.clear();
     end_call_ms_.clear();
     runtime_end_ms_.clear();
+    runtime_end_hold_ms_.clear();
+    runtime_wait_ms_.clear();
     synth_lock_ms_.clear();
     ring_short_write_ms_.clear();
     told_lead_sum_ = 0;
@@ -9568,15 +9939,20 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         if (composition.eyes.size() != quad->eyes.size()) {
             return false;
         }
-        for (const FrameGenComposeEye& eye : composition.eyes) {
+        std::scoped_lock lock(mutex_);
+        for (std::size_t e = 0; e < composition.eyes.size(); ++e) {
+            const FrameGenComposeEye& eye = composition.eyes[e];
             if (eye.peripheral >= frame.kinds.size() || eye.focus >= frame.kinds.size()) {
                 return false;
             }
-            specs.push_back({composition.output, frame.kinds[eye.focus]});
+            specs.push_back({composition.output, frame.kinds[eye.focus],
+                             EdgeMarginsLocked(quad->eyes[e].fov, composition.output)});
         }
     } else {
+        std::scoped_lock lock(mutex_);
         for (std::size_t i = 0; i < layer.views.size(); ++i) {
-            specs.push_back({Extent(layer.views[i]), frame.kinds[i]});
+            const FrameGenExtent extent = Extent(layer.views[i]);
+            specs.push_back({extent, frame.kinds[i], EdgeMarginsLocked(layer.views[i].fov, extent)});
         }
     }
     std::string error;
@@ -9646,11 +10022,10 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             }
             output.waited = true;
         }
-        images.push_back({output.swapchain, output.index, 0,
-                          {{0, 0}, {static_cast<std::int32_t>(output.extent.width), static_cast<std::int32_t>(output.extent.height)}},
-                          output.format});
+        images.push_back(OutputImage(output));
     }
     bool ok = false;
+    bool edges_filled = false; // FrameGenGpu::EdgesFilled after the write
     {
         const auto asked = Clock::now();
         std::scoped_lock gpu_lock(gpu_mutex_);
@@ -9698,6 +10073,8 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
                                                         quad->composition, images, error)
                              : gpu_->Synthesize(frame.analyzed, choice.mode, choice.fraction, images, error));
         }
+        // Edge fill: a frame the backend copied in has no margin drawn.
+        edges_filled = ok && gpu_ && gpu_->EdgesFilled();
     }
     const bool extrapolate = choice.mode == FrameGenSynthesisMode::kExtrapolate;
     if (!ok) {
@@ -9736,10 +10113,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     for (std::size_t i = 0; i < views.size(); ++i) {
         const Output& output = output_sets_.front()[i];
         views[i].next = nullptr;
-        views[i].subImage.swapchain = output.swapchain;
-        views[i].subImage.imageArrayIndex = 0;
-        views[i].subImage.imageRect = {{0, 0}, {static_cast<std::int32_t>(output.extent.width),
-                                                static_cast<std::int32_t>(output.extent.height)}};
+        ShowOutput(views[i], output, edges_filled);
         const std::size_t moved_as = quad ? quad->composition.eyes[i].peripheral : i;
         if (eye_time != 0.0f && moved_as < frame.velocity.size()) {
             const std::array<float, 3>& velocity = frame.velocity[moved_as];
@@ -10096,8 +10470,25 @@ void FrameGenPresenter::CompositorLoop() {
             // images are still the newest in their swapchains, else a newer
             // frame the layer composed, early, else nothing. What is shown is
             // what a refresh nothing is written for shows again.
+            // A runtime that shows a blank refresh for a frame left open
+            // (SetRuntimeBlanksOpenFrames) gets the next frame the layer
+            // composed, past frames written first, while one is current: its
+            // own images and views, early (a written frame shown after it
+            // steps back a frame, which beats a blank refresh).
             const auto show_as_is = [&](FrameCopy copy, std::uint64_t id, XrTime made_for) {
-                const AsIs current = CurrentAsIsLocked(copy, id, made_for);
+                AsIs current = CurrentAsIsLocked(copy, id, made_for);
+                if (!current.copy && runtime_blanks_open_frames_) {
+                    current = CurrentAsIsLocked(copy, id, made_for, true);
+                    if (current.copy) {
+                        ++totals_.stale_shown_ahead;
+                        if (logger_ && !logged_open_frame_shown_) {
+                            logged_open_frame_shown_ = true;
+                            logger_->Info("Frame Generation: a refresh with nothing current to show goes with the next "
+                                          "frame shown as it is, early: this runtime shows a blank refresh for a frame "
+                                          "left open (PimaxXR 0.4.4).");
+                        }
+                    }
+                }
                 if (!current.copy) {
                     submit = false;
                     ++totals_.stale_skipped;
@@ -10179,10 +10570,16 @@ void FrameGenPresenter::CompositorLoop() {
             } else {
                 // Composing quad views, with nothing the layer composed since
                 // the last frame written: that frame again, as the runtime
-                // shows it.
+                // shows it (a runtime blanking frames left open: a later
+                // frame shown as it is, as above, if any).
                 path = 8;
-                submit = false;
-                ++totals_.stale_skipped;
+                if (runtime_blanks_open_frames_) {
+                    const auto shown = jit_shown_ ? find_kept(std::get<0>(*jit_shown_)) : jit_frames_.end();
+                    show_as_is(FrameCopy{}, 0, shown != jit_frames_.end() ? shown->time : jit_content_time_);
+                } else {
+                    submit = false;
+                    ++totals_.stale_skipped;
+                }
             }
             DropStaleDepthLocked(content);
             const bool usable = content.valid && content.has_projection && content.projection_index < content.layers.size();
@@ -10466,6 +10863,7 @@ FrameGenStatus FrameGenPresenter::Status() const {
                        totals_.unwritten_source;
     status.ring_exhausted = totals_.ring_exhausted;
     status.stale_skipped = totals_.stale_skipped;
+    status.stale_shown_ahead = totals_.stale_shown_ahead;
     status.analyses_timed = totals_.analyses_timed;
     status.analyses_late = totals_.analyses_late;
     status.quad = quad_mode_ && compositor_running_;
@@ -10486,8 +10884,11 @@ FrameGenStatus FrameGenPresenter::Status() const {
                                   ? FrameGenDepthState::kEmpty
                                   : FrameGenDepthState::kUnusable)
                            : FrameGenDepthState::kInUse;
+        status.depth_uniform = depth_sent_ && depth_readable_ && evidence.binocular > 0.0 &&
+                               evidence.source_varied == 0.0 && evidence.other_varied == 0.0;
     }
     return status;
+
 }
 
 FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started) {

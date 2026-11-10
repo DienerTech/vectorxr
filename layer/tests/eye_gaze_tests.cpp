@@ -109,11 +109,14 @@ XrResult XRAPI_CALL State(XrSession, const XrActionStateGetInfo*, XrActionStateP
 XrResult XRAPI_CALL Sources(XrSession, const XrBoundSourcesForActionEnumerateInfo*, uint32_t, uint32_t* count, XrPath*) {
     ++source_queries; *count = 1; return XR_SUCCESS;
 }
+// The gaze, turned `gaze_turn` radians about the head's up axis.
+float gaze_turn = 0.0f;
+XrTime gaze_time = 123456;
 XrResult XRAPI_CALL Locate(XrSpace space, XrSpace, XrTime time, XrSpaceLocation* out) {
     ++gaze_locates;
-    Expect(space == Handle<XrSpace>(8) && time == 123456, "private gaze space and requested time must reach runtime");
+    Expect(space == Handle<XrSpace>(8) && time == gaze_time, "private gaze space and requested time must reach runtime");
     out->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-    out->pose.orientation.w = 1;
+    out->pose.orientation = {0.0f, std::sin(gaze_turn / 2.0f), 0.0f, std::cos(gaze_turn / 2.0f)};
     return XR_SUCCESS;
 }
 XrResult XRAPI_CALL DestroyAction(XrAction) { return XR_SUCCESS; }
@@ -122,6 +125,42 @@ XrResult XRAPI_CALL Poll(XrInstance, XrEventDataBuffer* out) {
     if (!event_pending) return XR_EVENT_UNAVAILABLE;
     *out = event; event_pending = false; return XR_SUCCESS;
 }
+// Native quad views (XR_VARJO_quad_views forwarded): the runtime's
+// combined-eye space and the foveated-rendering request the layer adds to
+// the application's locate.
+const auto combined_eye = Handle<XrSpace>(40);
+const auto native_view = Handle<XrSpace>(41);
+XrSpaceLocationFlags combined_eye_flags = 0;
+int combined_eye_locates = 0;
+std::optional<XrBool32> requested_foveation;
+// PimaxXR 0.4.4's locateSpace (space.cpp): COMBINED_EYE_VARJO carries
+// ORIENTATION_TRACKED alone while its eye tracker has gaze, and a pose that
+// is not valid (Pose::IsPoseValid: both VALID bits) locates with flags 0.
+XrResult XRAPI_CALL PimaxCombinedEyeLocate(XrSpace space, XrSpace base, XrTime, XrSpaceLocation* out) {
+    ++combined_eye_locates;
+    Expect(space == combined_eye && base == native_view, "rendering gaze is the combined eye in VIEW");
+    constexpr XrSpaceLocationFlags valid = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    out->locationFlags = (combined_eye_flags & valid) == valid ? combined_eye_flags : 0;
+    out->pose.orientation.w = 1;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL NativeQuadLocateViews(XrSession, const XrViewLocateInfo* info, XrViewState* state, uint32_t capacity,
+                                          uint32_t* count, XrView* views) {
+    requested_foveation.reset();
+    for (auto* chain = static_cast<const XrBaseInStructure*>(info->next); chain; chain = chain->next) {
+        if (chain->type == XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO) {
+            requested_foveation = reinterpret_cast<const XrViewLocateFoveatedRenderingVARJO*>(chain)->foveatedRenderingActive;
+        }
+    }
+    *count = 4;
+    state->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
+    for (uint32_t i = 0; views && i < capacity && i < 4; ++i) {
+        views[i].pose.orientation.w = 1;
+        views[i].fov = {-0.5f, 0.5f, 0.5f, -0.5f};
+    }
+    return XR_SUCCESS;
+}
+
 // A stand-in runtime for Varjo focus sharpening's output swapchains.
 int sharpen_creates = 0, sharpen_destroys = 0, sharpen_acquires = 0, sharpen_waits = 0, sharpen_releases = 0;
 uint32_t sharpen_next_image = 0;
@@ -179,11 +218,11 @@ XrResult SyncApp(const void* next = nullptr) {
     info.countActiveActionSets = 1; info.activeActionSets = &active;
     return Layer().SyncActions(session, &info);
 }
-void FocusEvent(XrSessionState state, XrSession target = session) {
+void FocusEvent(XrSessionState state, XrSession target = session, XrTime time = 123456) {
     event = {XR_TYPE_EVENT_DATA_BUFFER};
     auto& change = reinterpret_cast<XrEventDataSessionStateChanged&>(event);
     change.type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED; change.session = target; change.state = state;
-    change.time = 123456; event_pending = true;
+    change.time = time; event_pending = true;
     XrEventDataBuffer out{XR_TYPE_EVENT_DATA_BUFFER};
     Expect(Layer().PollEvent(instance, &out) == XR_SUCCESS && std::memcmp(&out, &event, sizeof(event)) == 0,
            "session event must reach application unchanged");
@@ -214,6 +253,8 @@ public:
         suggestions = attachments = syncs = state_queries = source_queries = gaze_locates = 0;
         suggestion_result = attachment_result = sync_result = XR_SUCCESS;
         reject_private = event_pending = runtime_gaze_active = false;
+        gaze_turn = 0.0f;
+        gaze_time = 123456;
         runtime_bindings.clear(); runtime_sets.clear(); runtime_active_sets.clear(); runtime_next = nullptr;
         runtime_attached.clear(); runtime_owner.clear();
     }
@@ -225,6 +266,13 @@ public:
         QuadViewsResolvedSettings settings{}; settings.tracking_mode = QuadViewsTrackingMode::Eye;
         double yaw{}, pitch{};
         return Layer().LocateEyeGazeFocusOffsets(session, Handle<XrSpace>(9), 123456, settings, &yaw, &pitch);
+    }
+    // The gaze for a frame at `time`.
+    static bool GazeAt(XrTime time) {
+        gaze_time = time;
+        QuadViewsResolvedSettings settings{}; settings.tracking_mode = QuadViewsTrackingMode::Eye;
+        double yaw{}, pitch{};
+        return Layer().LocateEyeGazeFocusOffsets(session, Handle<XrSpace>(9), time, settings, &yaw, &pitch);
     }
     static bool GoodAppSync() { return Layer().last_app_action_sync_time_.has_value(); }
     static bool GoodPrivateSync() { return Layer().last_eye_gaze_self_sync_time_.has_value(); }
@@ -247,6 +295,55 @@ public:
         l.UpdateEyeGazeResources(previous);
     }
     static bool Ready() { return Layer().eye_gaze_resources_ready_; }
+    // An application's own native quad locate (no foveated-rendering
+    // request) with Eye tracking on, on runtime `runtime_name`: what
+    // foveatedRenderingActive the layer asks the runtime for.
+    static std::optional<XrBool32> NativeQuadFoveationRequest(const char* runtime_name) {
+        auto& l = Layer();
+        const auto settings = l.resolved_settings_;
+        const auto generation = l.resolved_settings_generation_;
+        const auto resolved_session = l.resolved_settings_session_;
+        const bool loaded = l.has_loaded_config_;
+        l.has_loaded_config_ = true;
+        l.resolved_settings_ = {};
+        l.resolved_settings_.core.enabled = true;
+        l.resolved_settings_.quadviews.enabled = true;
+        l.resolved_settings_.quadviews.tracking_mode = QuadViewsTrackingMode::Eye;
+        l.resolved_settings_generation_ = l.config_generation_;
+        l.resolved_settings_session_ = l.active_session_;
+        l.quadviews_session_active_ = true;
+        l.varjo_compatible_quadviews_active_ = true;
+        l.varjo_foveated_rendering_extension_requested_ = true;
+        l.varjo_native_combined_eye_space_ = combined_eye;
+        l.varjo_native_view_space_ = native_view;
+        l.runtime_name_ = runtime_name;
+        l.next_locate_space_ = &PimaxCombinedEyeLocate;
+        l.next_locate_views_ = &NativeQuadLocateViews;
+        XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+        info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO;
+        info.displayTime = 5000;
+        info.space = Handle<XrSpace>(9);
+        XrViewState state{XR_TYPE_VIEW_STATE};
+        std::array<XrView, 4> views{};
+        for (XrView& view : views) view = {XR_TYPE_VIEW};
+        uint32_t count = 0;
+        Expect(l.LocateViews(session, &info, &state, 4, &count, views.data()) == XR_SUCCESS && count == 4,
+               "a native quad locate must succeed");
+        l.has_loaded_config_ = loaded;
+        l.resolved_settings_ = settings;
+        l.resolved_settings_generation_ = generation;
+        l.resolved_settings_session_ = resolved_session;
+        l.quadviews_session_active_.reset();
+        l.varjo_compatible_quadviews_active_ = false;
+        l.varjo_native_combined_eye_space_ = XR_NULL_HANDLE;
+        l.varjo_native_view_space_ = XR_NULL_HANDLE;
+        l.next_locate_space_ = &Locate;
+        l.next_locate_views_ = nullptr;
+        return requested_foveation;
+    }
+    // As xrCreateSession notes its session, with the runtime's clock then.
+    static void SessionCreated(XrTime time) { Layer().NoteSessionCreatedLocked(time); }
+    static XrSessionState Observed() { return Layer().observed_session_state_; }
     // A swapchain of the quad views session with enumerated images, as
     // CreateSwapchain and EnumerateSwapchainImages track it.
     static void QuadSwapchain(uintptr_t handle, XrSwapchainUsageFlags usage) {
@@ -642,6 +739,90 @@ int main() {
                "gaze inactive for the whole delay must be reported once per session");
         runtime_gaze_active = true;
         Expect(Peer::Gaze(), "gaze that arrives later must be used");
+        // A tracker that stops while its runtime still reports gaze valid
+        // (PimaxXR's Droolon / aSeeVR path keeps its last sample once ready)
+        // leaves the inset stuck. Two seconds of frames with the very same
+        // gaze are taken as gaze lost; repeated locates of one frame are not
+        // counted, and any change brings the gaze back.
+        Peer::Prepare(); Peer::Resources(); AttachApp(); FocusEvent(XR_SESSION_STATE_FOCUSED);
+        sync_result = XR_SUCCESS; runtime_gaze_active = true; gaze_turn = 0.05f;
+        bool live = true;
+        for (XrTime frame = 0; frame <= 180 && live; ++frame) {
+            live = Peer::GazeAt(1'000'000 + frame * 11'111'111) && Peer::GazeAt(1'000'000 + frame * 11'111'111);
+            Expect(live || frame == 180, "a gaze repeated for under two seconds of frames must be used");
+        }
+        Expect(!live, "the same gaze for two seconds of frames must be taken as lost");
+        gaze_turn = 0.051f;
+        Expect(Peer::GazeAt(3'000'000'000), "a gaze that moves again must be used");
+
+        // Diagnostic only (Oct 29 M3, headset off): before it froze bit for bit
+        // the gaze wobbled by about 0.002 rad for ~26 s, which the count above
+        // never sees. Ten seconds of a valid gaze within 0.003 rad of one point
+        // are logged once; the gaze is still used. A gaze that moves is not.
+        Peer::Prepare(); Peer::Resources(); AttachApp(); FocusEvent(XR_SESSION_STATE_FOCUSED);
+        sync_result = XR_SUCCESS; runtime_gaze_active = true;
+        const std::size_t still_before = Occurrences(Peer::Log(), "the gaze has stayed within");
+        for (XrTime frame = 0; frame <= 920; ++frame) {
+            gaze_turn = 0.2f + 0.001f * static_cast<float>(frame % 3 - 1);
+            Expect(Peer::GazeAt(5'000'000'000 + frame * 11'111'111), "a still but changing gaze must still be used");
+        }
+        Expect(Occurrences(Peer::Log(), "the gaze has stayed within") == still_before + 1,
+               "ten seconds of a near-still valid gaze must be logged once");
+        Peer::Prepare(); Peer::Resources(); AttachApp(); FocusEvent(XR_SESSION_STATE_FOCUSED);
+        sync_result = XR_SUCCESS; runtime_gaze_active = true;
+        for (XrTime frame = 0; frame <= 1800; ++frame) {
+            // Fixations of about a second, 0.01 rad apart, with sub-mrad jitter.
+            gaze_turn = 0.2f + 0.01f * static_cast<float>((frame / 90) % 2) + 0.0005f * static_cast<float>(frame % 2);
+            Expect(Peer::GazeAt(20'000'000'000 + frame * 11'111'111), "a live gaze must be used");
+        }
+        Expect(Occurrences(Peer::Log(), "the gaze has stayed within") == still_before + 1,
+               "a gaze that moves must not be logged as still");
+
+        // PimaxXR's native quad views (enable_quad_views): its combined-eye
+        // space never locates with flags (ORIENTATION_TRACKED alone is not a
+        // valid pose), so it says nothing about gaze. Eye tracking must ask
+        // the runtime for its gaze foveation and leave validity to it (it
+        // falls back to fixed focus FOVs without gaze); Varjo's runtime still
+        // gets the tracked bit's answer.
+        Peer::Prepare();
+        combined_eye_flags = XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+        auto request = Peer::NativeQuadFoveationRequest("PimaxXR (Unofficial)");
+        Expect(combined_eye_locates == 1 && request && *request == XR_TRUE,
+               "PimaxXR's flagless combined eye must not switch its gaze foveation off");
+        combined_eye_flags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+        request = Peer::NativeQuadFoveationRequest("Varjo OpenXR Runtime");
+        Expect(request && *request == XR_FALSE, "Varjo's untracked combined eye must still ask for the fixed focus");
+        combined_eye_flags |= XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+        request = Peer::NativeQuadFoveationRequest("Varjo OpenXR Runtime");
+        Expect(request && *request == XR_TRUE, "Varjo's tracked combined eye must ask for gaze foveation");
+        combined_eye_flags = XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+        request = Peer::NativeQuadFoveationRequest("Varjo OpenXR Runtime");
+        Expect(request && *request == XR_FALSE, "a flagless combined eye on Varjo must keep its answer");
+
+        // PimaxXR keeps its session event queue across sessions and stamps
+        // every event (XrSession)1: the last session's STOPPING, IDLE and
+        // EXITING, never read, come first in the next session. They pass to
+        // the application as sent but are not the new session's state.
+        Peer::Prepare(); Peer::LogTo(logs / "stale-events.log"); Peer::SessionCreated(1000);
+        FocusEvent(XR_SESSION_STATE_STOPPING, session, 400);
+        FocusEvent(XR_SESSION_STATE_IDLE, session, 500);
+        FocusEvent(XR_SESSION_STATE_EXITING, session, 600);
+        Expect(Peer::Observed() == XR_SESSION_STATE_UNKNOWN,
+               "the previous session's events must not become this session's state");
+        FocusEvent(XR_SESSION_STATE_IDLE, session, 1500);
+        Expect(Peer::Observed() == XR_SESSION_STATE_IDLE, "the session's own IDLE must be taken");
+        FocusEvent(XR_SESSION_STATE_READY, session, 1600);
+        FocusEvent(XR_SESSION_STATE_FOCUSED, session, 1700);
+        Expect(Peer::Observed() == XR_SESSION_STATE_FOCUSED, "the session's later events must be taken");
+        Expect(Occurrences(Peer::Log(), "from before this session") == 3, "each stale event must be logged");
+        // Without the runtime's clock: whatever comes before the first IDLE.
+        Peer::Prepare(); Peer::SessionCreated(0);
+        FocusEvent(XR_SESSION_STATE_EXITING, session, 600);
+        Expect(Peer::Observed() == XR_SESSION_STATE_UNKNOWN, "an EXITING before the first IDLE must not be taken");
+        FocusEvent(XR_SESSION_STATE_IDLE, session, 1500);
+        FocusEvent(XR_SESSION_STATE_READY, session, 1600);
+        Expect(Peer::Observed() == XR_SESSION_STATE_READY, "events from the first IDLE on must be taken");
+
         Peer::LogTo(logs / "eye-gaze.log");
         std::error_code error;
         std::filesystem::remove_all(logs, error);

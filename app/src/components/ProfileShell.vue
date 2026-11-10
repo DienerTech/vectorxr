@@ -23,10 +23,13 @@ const props = defineProps<{
   // earlier profiles win contested bindings for a shared application.
   reorderable?: boolean
   profileCount?: number
+  // Shows a Duplicate button beside Remove.
+  duplicable?: boolean
 }>()
 
 defineEmits<{
   remove: []
+  duplicate: []
   syncName: []
   move: [direction: -1 | 1]
 }>()
@@ -109,6 +112,15 @@ const hasNoAssignedApplications = computed(
           {{ profile.enabled ? t('app.profile.on') : t('app.profile.off') }}
           <span v-if="enabledChangeNote" class="restart-required-mark" :title="enabledChangeNote">&#8635;</span>
         </label>
+        <button
+          v-if="duplicable"
+          class="button-secondary rounded-[0.75rem] px-3.5 py-2 text-sm font-medium"
+          type="button"
+          :title="t('app.profile.duplicateTitle')"
+          @click="$emit('duplicate')"
+        >
+          {{ t('common.duplicate') }}
+        </button>
         <button class="button-secondary rounded-[0.75rem] px-3.5 py-2 text-sm font-medium" type="button" @click="$emit('remove')">
           {{ t('common.remove') }}
         </button>

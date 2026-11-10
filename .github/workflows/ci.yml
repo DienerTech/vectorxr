@@ -9,23 +9,18 @@ on:
 permissions:
   contents: read
 
+# The layer's tests split across two runners that run at once: those that create no graphics device (beside
+# the app's checks) and those that do, which run one at a time on WARP. "App tests and build", the check the
+# master ruleset requires, passes only when both do.
 jobs:
   app:
-    name: App tests and build
+    name: App and layer CPU tests
     runs-on: windows-2022
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
-
-      - name: Checkout pinned vcpkg registry
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: microsoft/vcpkg
-          ref: aae277acf4e7de287ddb5e208b5316614de6aad7
-          path: .vcpkg
           persist-credentials: false
 
       - name: Set up Node
@@ -40,21 +35,8 @@ jobs:
         with:
           toolchain: 1.94.1
 
-      - name: Install OpenXR loader
-        shell: pwsh
-        run: |
-          $vcpkgRoot = Join-Path $env:GITHUB_WORKSPACE ".vcpkg"
-          & "$vcpkgRoot\bootstrap-vcpkg.bat" -disableMetrics
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to bootstrap the pinned vcpkg registry."
-          }
-
-          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $env:VCPKG_ROOT = $vcpkgRoot
-          & "$vcpkgRoot\vcpkg.exe" install openxr-loader:x64-windows
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install the pinned OpenXR loader dependency."
-          }
+      - name: Layer build dependencies
+        uses: ./.github/actions/layer-dependencies
 
       - name: Install dependencies
         working-directory: app
@@ -68,12 +50,55 @@ jobs:
         working-directory: app
         run: npm run build
 
-      - name: Build and test OpenXR layer
+      - name: Build OpenXR layer and run its CPU tests
         shell: pwsh
         run: |
-          ./scripts/Build-Layer.ps1
+          ./scripts/Build-Layer.ps1 -Tests Cpu
           ./scripts/Stage-ReleasePayload.ps1
 
       - name: Check Tauri app
         working-directory: app/src-tauri
         run: cargo check --locked
+
+  layer-graphics:
+    name: Layer graphics tests
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Layer build dependencies
+        uses: ./.github/actions/layer-dependencies
+
+      - name: Build OpenXR layer and run its graphics tests
+        shell: pwsh
+        run: ./scripts/Build-Layer.ps1 -Tests Graphics
+
+      # The bridge layer tests keep each case's layer log under %TEMP%; a
+      # failing timing check needs it to be told apart from a slow runner.
+      - name: Upload layer test logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: layer-graphics-test-logs
+          path: ~/AppData/Local/Temp/vectorxr-*/logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  required:
+    name: App tests and build
+    needs: [app, layer-graphics]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Both halves passed
+        env:
+          APP: ${{ needs.app.result }}
+          GRAPHICS: ${{ needs.layer-graphics.result }}
+        run: |
+          echo "App and layer CPU tests: $APP; layer graphics tests: $GRAPHICS"
+          test "$APP" = success && test "$GRAPHICS" = success
