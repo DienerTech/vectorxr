@@ -11,7 +11,11 @@ param(
     # tests' wall-clock pacing room: 3 on a 4-processor CI runner (on four of this desktop's processors 3 passed
     # and 4 made the presenter tests late). 1 runs them one after another.
     [ValidateRange(1, 64)]
-    [int]$TestJobs = [Math]::Max(1, [Math]::Min([Math]::Floor([Environment]::ProcessorCount * 3 / 4), 8))
+    [int]$TestJobs = [Math]::Max(1, [Math]::Min([Math]::Floor([Environment]::ProcessorCount * 3 / 4), 8)),
+    # Which tests run: All, only those that create no graphics device (Cpu), or only those that do (Graphics,
+    # which run one at a time). CI runs Cpu and Graphics on separate runners at once.
+    [ValidateSet("All", "Cpu", "Graphics")]
+    [string]$Tests = "All"
 )
 
 Set-StrictMode -Version Latest
@@ -159,13 +163,19 @@ if ($LASTEXITCODE -ne 0) {
     throw "CMake configure failed (exit code $LASTEXITCODE)."
 }
 
-& $cmake --build $buildPath --config $Configuration
+# Projects build side by side (MSBuild /m); one at a time took most of CI's build time.
+& $cmake --build $buildPath --config $Configuration --parallel
 if ($LASTEXITCODE -ne 0) {
     throw "CMake build failed (exit code $LASTEXITCODE)."
 }
 
 if (-not $SkipTests) {
-    & $ctest --test-dir $buildPath -C $Configuration --output-on-failure --parallel $TestJobs
+    $testFilter = switch ($Tests) {
+        "Cpu" { @("-LE", "graphics") }
+        "Graphics" { @("-L", "graphics") }
+        default { @() }
+    }
+    & $ctest --test-dir $buildPath -C $Configuration --output-on-failure --parallel $TestJobs @testFilter
     if ($LASTEXITCODE -ne 0) {
         throw "Layer tests failed (exit code $LASTEXITCODE)."
     }

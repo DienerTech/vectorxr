@@ -91,10 +91,58 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         endif()
     endif()
 
+    # Pinned archives (the Vulkan headers, DXC) are downloaded once into a
+    # cache directory, DEPTHXR_DOWNLOAD_CACHE or <build>/_downloads, and
+    # FetchContent extracts the cached file. Downloads are retried: GitHub's
+    # release downloads sometimes answer 5xx for a while.
+    function(depthxr_cached_archive out_var name url sha256)
+        if(DEFINED ENV{DEPTHXR_DOWNLOAD_CACHE} AND NOT "$ENV{DEPTHXR_DOWNLOAD_CACHE}" STREQUAL "")
+            file(TO_CMAKE_PATH "$ENV{DEPTHXR_DOWNLOAD_CACHE}" _dir)
+        else()
+            set(_dir "${CMAKE_BINARY_DIR}/_downloads")
+        endif()
+        set(_file "${_dir}/${name}")
+        string(TOLOWER "${sha256}" _want)
+        if(EXISTS "${_file}")
+            file(SHA256 "${_file}" _have)
+            if(NOT _have STREQUAL _want)
+                file(REMOVE "${_file}")
+            endif()
+        endif()
+        if(NOT EXISTS "${_file}")
+            set(_attempts 5)
+            foreach(_attempt RANGE 1 ${_attempts})
+                file(DOWNLOAD "${url}" "${_file}.part" STATUS _status TLS_VERIFY ON)
+                list(GET _status 0 _code)
+                list(GET _status 1 _message)
+                if(_code EQUAL 0)
+                    file(SHA256 "${_file}.part" _have)
+                    if(NOT _have STREQUAL _want)
+                        file(REMOVE "${_file}.part")
+                        message(FATAL_ERROR "${url} has SHA256 ${_have}, not the pinned ${_want}")
+                    endif()
+                    file(RENAME "${_file}.part" "${_file}")
+                    break()
+                endif()
+                file(REMOVE "${_file}.part")
+                if(_attempt EQUAL _attempts)
+                    message(FATAL_ERROR "Downloading ${url} failed ${_attempts} times: ${_message}")
+                endif()
+                math(EXPR _delay "15 * ${_attempt}")
+                message(STATUS "Downloading ${name} failed (${_message}); retrying in ${_delay} s")
+                execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep ${_delay})
+            endforeach()
+        endif()
+        set(${out_var} "${_file}" PARENT_SCOPE)
+    endfunction()
+
     set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "" FORCE)
     include(FetchContent)
+    depthxr_cached_archive(_vulkan_headers_archive vulkan-headers-b379292b2ab6df5771ba9870d53cf8b2c9295daf.tar.gz
+        https://github.com/KhronosGroup/Vulkan-Headers/archive/b379292b2ab6df5771ba9870d53cf8b2c9295daf.tar.gz
+        2ad177c0e468ac2eb3db9b5be6b8a18a6730d339378ac670e5fbda3503ac7d64)
     FetchContent_Declare(vulkan_headers
-        URL https://github.com/KhronosGroup/Vulkan-Headers/archive/b379292b2ab6df5771ba9870d53cf8b2c9295daf.tar.gz
+        URL "${_vulkan_headers_archive}"
         URL_HASH SHA256=2ad177c0e468ac2eb3db9b5be6b8a18a6730d339378ac670e5fbda3503ac7d64
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
     FetchContent_MakeAvailable(vulkan_headers)
@@ -123,8 +171,11 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     find_program(DEPTHXR_FXC fxc HINTS ${_framegen_fxc_hints} REQUIRED)
     set(DEPTHXR_DXC "")
     if(DEPTHXR_FRAMEGEN_SPIRV)
+        depthxr_cached_archive(_dxc_archive dxc_2025_07_14.zip
+            https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505.1/dxc_2025_07_14.zip
+            9ad895a6b039e3a8f8c22a1009f866800b840a74b50db9218d13319e215ea8a4)
         FetchContent_Declare(dxc_release
-            URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505.1/dxc_2025_07_14.zip
+            URL "${_dxc_archive}"
             URL_HASH SHA256=9ad895a6b039e3a8f8c22a1009f866800b840a74b50db9218d13319e215ea8a4
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
         FetchContent_MakeAvailable(dxc_release)
@@ -922,9 +973,14 @@ if(DEPTHXR_BUILD_TESTS)
         depthxr_thread_census_tests
         depthxr_action_set_attachment_tests)
     get_property(_layer_tests DIRECTORY PROPERTY TESTS)
+    # Labelled too, so CI runs the two kinds on separate runners at once
+    # (Build-Layer.ps1 -Tests Cpu or Graphics): ctest -L graphics / -LE graphics.
     foreach(_test IN LISTS _layer_tests)
         if(NOT _test IN_LIST _cpu_only_tests)
             set_property(TEST ${_test} PROPERTY RUN_SERIAL TRUE)
+            set_property(TEST ${_test} APPEND PROPERTY LABELS graphics)
+        else()
+            set_property(TEST ${_test} APPEND PROPERTY LABELS cpu)
         endif()
     endforeach()
 endif()

@@ -29,14 +29,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Checkout pinned vcpkg registry
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: microsoft/vcpkg
-          ref: aae277acf4e7de287ddb5e208b5316614de6aad7
-          path: .vcpkg
-          persist-credentials: false
-
       - name: Verify tagged commit belongs to master
         if: github.event_name == 'push'
         shell: pwsh
@@ -71,48 +63,8 @@ jobs:
         working-directory: app
         run: npm test
 
-      - name: Install OpenXR loader
-        shell: pwsh
-        run: |
-          $vcpkgRoot = Join-Path $env:GITHUB_WORKSPACE ".vcpkg"
-          # Both steps download from GitHub, whose release downloads sometimes
-          # answer 504 for a while: try each a few times before failing.
-          function Invoke-WithRetry([string]$What, [int]$Attempts, [scriptblock]$Step) {
-            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-              & $Step | Out-Host
-              if ($LASTEXITCODE -eq 0) { return $true }
-              if ($attempt -lt $Attempts) {
-                $delay = 20 * $attempt
-                Write-Host "$What failed (attempt $attempt of $Attempts); retrying in $delay s."
-                Start-Sleep -Seconds $delay
-              }
-            }
-            return $false
-          }
-
-          $bootstrapped = Invoke-WithRetry "Bootstrapping the pinned vcpkg registry" 3 {
-            & "$vcpkgRoot\bootstrap-vcpkg.bat" -disableMetrics
-          }
-          if (-not $bootstrapped) {
-            # The runner image ships a vcpkg tool: use it with the pinned
-            # registry rather than fail on the tool's download.
-            $preinstalled = if ($env:VCPKG_INSTALLATION_ROOT) { Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe" }
-            if (-not $preinstalled -or -not (Test-Path $preinstalled)) {
-              throw "Failed to bootstrap the pinned vcpkg registry, and the runner has no vcpkg tool to fall back on."
-            }
-            Write-Host "Using the runner's vcpkg tool ($preinstalled) with the pinned registry."
-            Copy-Item -LiteralPath $preinstalled -Destination (Join-Path $vcpkgRoot "vcpkg.exe") -Force
-            & "$vcpkgRoot\vcpkg.exe" version
-          }
-
-          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $env:VCPKG_ROOT = $vcpkgRoot
-          $installed = Invoke-WithRetry "Installing the pinned OpenXR loader dependency" 5 {
-            & "$vcpkgRoot\vcpkg.exe" install openxr-loader:x64-windows
-          }
-          if (-not $installed) {
-            throw "Failed to install the pinned OpenXR loader dependency."
-          }
+      - name: Layer build dependencies
+        uses: ./.github/actions/layer-dependencies
 
       - name: Build and stage OpenXR layer
         shell: pwsh
