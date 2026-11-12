@@ -12945,16 +12945,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
         next_path_to_string_ = reinterpret_cast<PFN_xrPathToString>(function);
     }
 
-    // This instance's clock conversion (when it enabled the extension), so
-    // xrCreateSession's stamp uses this runtime's, never a previous one's.
+    // The clock conversion is taken at the session's Turbo setup
+    // (ConfigureTurboExperiment), as in 0.20.1: an instance's first
+    // xrCreateSession stamps without it (its stale-event check falls back to
+    // the session's first IDLE), never with a previous instance's.
     turbo_convert_counter_time_ = nullptr;
-    if (turbo_clock_enabled_) {
-        function = nullptr;
-        if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrConvertWin32PerformanceCounterToTimeKHR",
-                                                      &function))) {
-            turbo_convert_counter_time_ = function;
-        }
-    }
 
     function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrGetCurrentInteractionProfile", &function))) {
