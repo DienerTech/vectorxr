@@ -266,6 +266,15 @@ int wmain(int argc, wchar_t** argv) {
                "instances: the layer negotiates");
         const auto create = reinterpret_cast<CreateFn>(request.createApiLayerInstance);
         const PFN_xrGetInstanceProcAddr get = request.getInstanceProcAddr;
+        // A layer above asking before any instance exists (Cheeky Foveated
+        // DLSS's extension probe): an error, not a call through an empty pointer.
+        {
+            PFN_xrVoidFunction early = reinterpret_cast<PFN_xrVoidFunction>(&Expect);
+            const XrResult early_result =
+                get ? get(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &early) : XR_SUCCESS;
+            Expect(XR_FAILED(early_result) && early == nullptr,
+                   "instances: a function asked for before any instance is refused, not called through");
+        }
         const auto runtime_function = [](PFN_xrVoidFunction function) {
             return function == reinterpret_cast<PFN_xrVoidFunction>(RtSucceed) ||
                    function == reinterpret_cast<PFN_xrVoidFunction>(RtPollEvent);
@@ -405,6 +414,19 @@ int wmain(int argc, wchar_t** argv) {
         Expect(CreateInstance(create, "Game", "XR_APILAYER_MBUCCHIA_quad_views_foveated", with_qvf) == XR_SUCCESS,
                "instances: an instance above Quad-Views-Foveated is created");
         destroy_through_layer(with_qvf, "the instance above Quad-Views-Foveated");
+        // Cheeky Foveated DLSS's layer below is named in its log too.
+        XrInstance with_cheeky = XR_NULL_HANDLE;
+        Expect(CreateInstance(create, "Game", "XR_APILAYER_CHEEKY_foveated_dlss", with_cheeky) == XR_SUCCESS,
+               "instances: an instance above Cheeky Foveated DLSS is created");
+        destroy_through_layer(with_cheeky, "the instance above Cheeky Foveated DLSS");
+        // With every instance gone the runtime's DLL may be unloaded (MSFS 2024
+        // leaving VR, issue 138): nothing taken from it is called again.
+        {
+            PFN_xrVoidFunction after = reinterpret_cast<PFN_xrVoidFunction>(&Expect);
+            const XrResult after_result = get(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &after);
+            Expect(XR_FAILED(after_result) && after == nullptr,
+                   "instances: after the last instance, the chain below it is not called");
+        }
         Expect(FreeLibrary(layer) != FALSE, "instances: the layer is freed");
         // The logs as written once the layer has gone.
         const std::string log = ReadLogs(app_data);
@@ -414,6 +436,8 @@ int wmain(int argc, wchar_t** argv) {
                "instances: the pass-through is said in the log");
         Expect(log.find("Quad-Views-Foveated is loaded below VectorXR") != std::string::npos,
                "instances: Quad-Views-Foveated below the layer is named in the log");
+        Expect(log.find("Cheeky Foveated DLSS's OpenXR layer is loaded below VectorXR") != std::string::npos,
+               "instances: Cheeky Foveated DLSS below the layer is named in the log");
     }
 
     std::cout << "Layer load tests passed: loaded, negotiated and unloaded three times without the VC++ runtime DLLs; "

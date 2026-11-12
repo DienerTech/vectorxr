@@ -119,6 +119,12 @@ class OpenXrLayer {
     struct InstanceCreateDiagnostics {
         // "absent", "above" or "below" VectorXR.
         std::string quad_views_foveated{"absent"};
+        // Cheeky Foveated DLSS's OpenXR layer: "absent", "above" or "below"
+        // VectorXR. Above, it takes the application's quad-view request for
+        // its own quad views, so VectorXR sees a stereo application.
+        std::string cheeky_layer{"absent"};
+        // Cheeky's in-game DLSS modules loaded in the process (names, or empty).
+        std::string cheeky_modules;
         bool turbo_clock_enabled{false};
         bool app_requested_quad_views{false};
         bool app_requested_varjo_foveated_rendering{false};
@@ -1961,6 +1967,10 @@ class OpenXrLayer {
     // stays off.
     bool openxr_toolkit_below_{false};
     bool openxr_toolkit_framegen_logged_{false};
+    // Cheeky Foveated DLSS's OpenXR layer is above VectorXR for this instance:
+    // it took the application's quad-view request (it does quad views itself),
+    // so a stereo session is Cheeky's doing, not the application's setting.
+    bool cheeky_layer_above_{false};
     // Frame Generation was asked for but is kept off for that reason; the
     // OSD says so instead of a plain Off (read on the OSD's thread).
     std::atomic<bool> framegen_off_for_toolkit_{false};
