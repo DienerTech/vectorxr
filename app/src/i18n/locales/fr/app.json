@@ -190,6 +190,10 @@
     "retryAria": "Réessayer de charger l'invitation Discord",
     "loadingStatus": "Chargement de l'invitation Discord."
   },
+  "patreon": {
+    "join": "Rejoindre sur Patreon ↗",
+    "openFailed": "Impossible d'ouvrir le navigateur. Veuillez réessayer."
+  },
   "healthCheck": {
     "eyebrow": "État du système",
     "title": "Vérification de l'état",

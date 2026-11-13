@@ -190,6 +190,10 @@
     "retryAria": "Tentar carregar o convite do Discord de novo",
     "loadingStatus": "Carregando o convite do Discord."
   },
+  "patreon": {
+    "join": "Apoiar no Patreon ↗",
+    "openFailed": "Não foi possível abrir o navegador. Tente de novo."
+  },
   "healthCheck": {
     "eyebrow": "Integridade do sistema",
     "title": "Verificação de integridade",

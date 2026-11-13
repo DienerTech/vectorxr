@@ -17,6 +17,7 @@
     { "term": "Steam", "strict": false, "note": "Third-party store." },
     { "term": "Windows", "strict": true, "note": "Operating system." },
     { "term": "Discord", "strict": true, "note": "Community server." },
+    { "term": "Patreon", "strict": true, "note": "Membership platform." },
     { "term": "GitHub", "strict": true, "note": "Code host." },
     { "term": "NVIDIA", "strict": true, "note": "GPU vendor." },
     { "term": "AMD", "strict": true, "note": "GPU vendor." },

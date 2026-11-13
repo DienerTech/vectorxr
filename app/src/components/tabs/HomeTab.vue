@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import HealthLoading from '../HealthLoading.vue'
 import DiscordJoinButton from '../DiscordJoinButton.vue'
+import PatreonPromo from '../PatreonPromo.vue'
 import { t } from '../../i18n/index.ts'
 
 import type { OpenXrLayerEntry, OpenXrLayerSnapshot } from '../../lib/commands'
@@ -205,6 +206,7 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
           <p class="mt-1 text-sm leading-5 text-muted">{{ t('home.community.supportBody') }}</p>
           <button class="button-accent mt-2 rounded-[0.65rem] px-3 py-1.5 text-sm font-medium" type="button" @click="openSupport">{{ t('home.community.supportButton') }}</button>
           <p v-if="supportLinkError" role="status" class="mt-2 text-xs text-muted">{{ supportLinkError }}</p>
+          <PatreonPromo class="mt-3" />
         </div>
       </div>
     </article>

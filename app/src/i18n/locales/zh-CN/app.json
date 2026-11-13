@@ -186,6 +186,10 @@
     "retryAria": "重试加载 Discord 邀请",
     "loadingStatus": "正在加载 Discord 邀请。"
   },
+  "patreon": {
+    "join": "在 Patreon 加入 ↗",
+    "openFailed": "无法打开浏览器。请重试。"
+  },
   "healthCheck": {
     "eyebrow": "系统运行状况",
     "title": "运行状况检查",

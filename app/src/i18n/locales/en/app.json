@@ -190,6 +190,10 @@
     "retryAria": "Retry loading Discord invite",
     "loadingStatus": "Loading Discord invite."
   },
+  "patreon": {
+    "join": "Join on Patreon ↗",
+    "openFailed": "Could not open the browser. Please try again."
+  },
   "healthCheck": {
     "eyebrow": "System Health",
     "title": "Health Check",

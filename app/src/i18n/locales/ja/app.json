@@ -186,6 +186,10 @@
     "retryAria": "Discord の招待の読み込みを再試行",
     "loadingStatus": "Discord の招待を読み込んでいます。"
   },
+  "patreon": {
+    "join": "Patreon で参加 ↗",
+    "openFailed": "ブラウザーを開けませんでした。もう一度お試しください。"
+  },
   "healthCheck": {
     "eyebrow": "システムの状態",
     "title": "状態チェック",

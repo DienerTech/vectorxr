@@ -1,3 +1,8 @@
 {
-  "discordInvite": "https://discord.gg/UyCt3M4n7N"
+  "discordInvite": "https://discord.gg/UyCt3M4n7N",
+  "patreon": {
+    "enabled": false,
+    "url": null,
+    "message": null
+  }
 }

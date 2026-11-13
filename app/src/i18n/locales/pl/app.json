@@ -198,6 +198,10 @@
     "retryAria": "Ponów ładowanie zaproszenia Discord",
     "loadingStatus": "Ładowanie zaproszenia Discord."
   },
+  "patreon": {
+    "join": "Dołącz w serwisie Patreon ↗",
+    "openFailed": "Nie można otworzyć przeglądarki. Spróbuj ponownie."
+  },
   "healthCheck": {
     "eyebrow": "Kondycja systemu",
     "title": "Sprawdzanie kondycji",

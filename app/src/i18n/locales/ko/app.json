@@ -186,6 +186,10 @@
     "retryAria": "Discord 초대 로드 다시 시도",
     "loadingStatus": "Discord 초대를 로드하는 중입니다."
   },
+  "patreon": {
+    "join": "Patreon에서 참여 ↗",
+    "openFailed": "브라우저를 열 수 없습니다. 다시 시도하십시오."
+  },
   "healthCheck": {
     "eyebrow": "시스템 상태",
     "title": "상태 검사",

@@ -186,6 +186,10 @@
     "retryAria": "重試載入 Discord 邀請",
     "loadingStatus": "正在載入 Discord 邀請。"
   },
+  "patreon": {
+    "join": "在 Patreon 加入 ↗",
+    "openFailed": "無法開啟瀏覽器。請再試一次。"
+  },
   "healthCheck": {
     "eyebrow": "系統健康狀態",
     "title": "健康狀態檢查",
