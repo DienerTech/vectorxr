@@ -27,6 +27,10 @@
       "subtitle": "Sprawdzanie kolejności niejawnych warstw i zarządzanie nią",
       "status": "System"
     },
+    "guides": {
+      "label": "Poradniki",
+      "subtitle": "Jak działa każda funkcja i jak ją włączyć i wyłączyć"
+    },
     "about": {
       "label": "Informacje",
       "subtitle": "Informacje o projekcie, poprawki i wsparcie"

@@ -25,6 +25,10 @@
       "subtitle": "Inspecione e gerencie a ordem das camadas implícitas",
       "status": "Sistema"
     },
+    "guides": {
+      "label": "Guias",
+      "subtitle": "Como cada recurso funciona e como ativá-lo e desativá-lo"
+    },
     "about": {
       "label": "Sobre",
       "subtitle": "Informações do projeto, notas da versão e suporte"

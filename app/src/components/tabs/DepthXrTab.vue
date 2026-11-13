@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref } from 'vue'
+import GuideLink from '../GuideLink.vue'
 
 import { t } from '../../i18n/index.ts'
 import ConvergenceField from '../ConvergenceField.vue'
@@ -115,6 +116,7 @@ const profileWarnings = computed(() => {
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
             {{ t('depth.intro') }}
           </p>
+          <GuideLink guide="depth" class="mt-2" />
         </div>
         <button
           class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"

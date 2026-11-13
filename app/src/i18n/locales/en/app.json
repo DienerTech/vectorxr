@@ -25,6 +25,10 @@
       "subtitle": "Inspect and manage implicit layer order",
       "status": "System"
     },
+    "guides": {
+      "label": "Guides",
+      "subtitle": "How each feature works, and how to turn it on and off"
+    },
     "about": {
       "label": "About",
       "subtitle": "Project info, patch notes, and support"

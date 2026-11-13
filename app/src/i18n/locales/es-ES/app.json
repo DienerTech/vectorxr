@@ -25,6 +25,10 @@
       "subtitle": "Inspecciona y administra el orden de las capas implícitas",
       "status": "Sistema"
     },
+    "guides": {
+      "label": "Guías",
+      "subtitle": "Cómo funciona cada función y cómo activarla y desactivarla"
+    },
     "about": {
       "label": "Acerca de",
       "subtitle": "Información del proyecto, notas de la versión y soporte"

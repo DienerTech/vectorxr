@@ -25,6 +25,10 @@
       "subtitle": "Reihenfolge impliziter Layer prüfen und verwalten",
       "status": "System"
     },
+    "guides": {
+      "label": "Anleitungen",
+      "subtitle": "Wie jede Funktion arbeitet und wie Sie sie ein- und ausschalten"
+    },
     "about": {
       "label": "Info",
       "subtitle": "Projektinfos, Patchnotes und Unterstützung"

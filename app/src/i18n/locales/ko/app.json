@@ -24,6 +24,10 @@
       "subtitle": "암시적 레이어 순서 검사 및 관리",
       "status": "시스템"
     },
+    "guides": {
+      "label": "가이드",
+      "subtitle": "각 기능의 작동 방식과 켜고 끄는 방법"
+    },
     "about": {
       "label": "정보",
       "subtitle": "프로젝트 정보, 패치 노트 및 지원"

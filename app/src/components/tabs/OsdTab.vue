@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import GuideLink from '../GuideLink.vue'
 import { useOsdPreviewWindow } from '../../lib/osdPreviewWindow'
 import { osdDiagnostics } from '../../lib/osdDiagnostics'
 import { osdCompactLayout } from '../../lib/osdCompactLayout'
@@ -179,6 +180,7 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
             <span class="chip-success rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]">{{ t('osd.liveAfterSave') }}</span>
           </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">{{ t('osd.intro') }}</p>
+          <GuideLink guide="osd" class="mt-2" />
         </div>
         <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="osd.enabled" type="checkbox" class="h-4 w-4 accent-depthxr-copper" />

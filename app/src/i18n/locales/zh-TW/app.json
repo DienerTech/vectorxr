@@ -24,6 +24,10 @@
       "subtitle": "檢查並管理隱含層順序",
       "status": "系統"
     },
+    "guides": {
+      "label": "指南",
+      "subtitle": "每項功能如何運作，以及如何開啟和關閉"
+    },
     "about": {
       "label": "關於",
       "subtitle": "專案資訊、修補說明與支持"

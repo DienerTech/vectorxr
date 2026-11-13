@@ -24,6 +24,10 @@
       "subtitle": "检查和管理隐式层顺序",
       "status": "系统"
     },
+    "guides": {
+      "label": "指南",
+      "subtitle": "每项功能如何运作，以及如何开启和关闭"
+    },
     "about": {
       "label": "关于",
       "subtitle": "项目信息、补丁说明和支持"
