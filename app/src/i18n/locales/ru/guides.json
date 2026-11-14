@@ -10,6 +10,7 @@
     "experimental": "Экспериментально"
   },
   "back": "Все руководства",
+  "backTo": "Назад: {page}",
   "openTab": "Открыть: {page}",
   "readGuide": "Читать руководство",
   "headings": {

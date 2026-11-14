@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import GuideDiagram from '../GuideDiagram.vue'
 import WalkthroughPlayer from '../WalkthroughPlayer.vue'
 import { t, type MessageKey } from '../../i18n/index.ts'
 import { en } from '../../i18n/locales/en/index.ts'
 import { walkthroughs } from '../../lib/walkthroughs'
-import { emphasisRuns, guideEntry, guideGroups, guides, openGuideId, showGuide, type GuideId } from '../../lib/guides'
+import { emphasisRuns, guideEntry, guideGroups, guideOrigin, guides, openGuideId, showGuide, type GuideId } from '../../lib/guides'
 import type { AppTab } from '../../lib/model'
 
 // Short user guides: a list of cards, and one guide at a time. The sections,
@@ -62,6 +62,17 @@ watch(openGuideId, async () => {
 function open(id: GuideId) {
   showGuide(id)
 }
+
+// Back to the page whose "Read the guide" link opened this guide.
+function back(tab: AppTab) {
+  emit('navigate', tab)
+}
+
+// Once the person leaves, the way back no longer applies: the guide stays
+// open, with All guides as its way out.
+onBeforeUnmount(() => {
+  guideOrigin.value = null
+})
 </script>
 
 <template>
@@ -98,7 +109,15 @@ function open(id: GuideId) {
     </article>
 
     <article v-else class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel" :data-guide-open="current.id">
-      <div class="flex flex-wrap items-center justify-between gap-3">
+      <div v-if="guideOrigin" class="flex flex-wrap items-center justify-between gap-3">
+        <button class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-sm font-medium" type="button" data-guide-back @click="back(guideOrigin)">
+          ← {{ t('guides.backTo', { page: tabLabel(guideOrigin) }) }}
+        </button>
+        <button class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-sm font-medium" type="button" @click="showGuide(null)">
+          {{ t('guides.back') }}
+        </button>
+      </div>
+      <div v-else class="flex flex-wrap items-center justify-between gap-3">
         <button class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-sm font-medium" type="button" @click="showGuide(null)">
           ← {{ t('guides.back') }}
         </button>

@@ -10,6 +10,7 @@
     "experimental": "Eksperymentalne"
   },
   "back": "Wszystkie poradniki",
+  "backTo": "Wróć do: {page}",
   "openTab": "Otwórz: {page}",
   "readGuide": "Przeczytaj poradnik",
   "headings": {

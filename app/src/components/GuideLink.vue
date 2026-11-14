@@ -2,14 +2,14 @@
 // "Read the guide" on a feature's page: opens that feature's guide on the
 // Guides page.
 import { t } from '../i18n/index.ts'
-import { showGuide, type GuideId } from '../lib/guides'
+import { guideEntry, showGuide, type GuideId } from '../lib/guides'
 import { useConfigStore } from '../stores/configStore'
 
 const props = defineProps<{ guide: GuideId }>()
 const store = useConfigStore()
 
 function open() {
-  showGuide(props.guide)
+  showGuide(props.guide, guideEntry(props.guide)?.tab ?? null)
   store.setActiveTab('guides')
 }
 </script>

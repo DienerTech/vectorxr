@@ -10,6 +10,7 @@
     "experimental": "实验性"
   },
   "back": "全部指南",
+  "backTo": "返回{page}",
   "openTab": "打开{page}",
   "readGuide": "阅读指南",
   "headings": {

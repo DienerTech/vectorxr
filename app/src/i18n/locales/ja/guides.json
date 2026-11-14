@@ -10,6 +10,7 @@
     "experimental": "試験的"
   },
   "back": "すべてのガイド",
+  "backTo": "{page} に戻る",
   "openTab": "{page} を開く",
   "readGuide": "ガイドを読む",
   "headings": {

@@ -10,6 +10,7 @@
     "experimental": "실험적"
   },
   "back": "모든 가이드",
+  "backTo": "{page}(으)로 돌아가기",
   "openTab": "{page} 열기",
   "readGuide": "가이드 읽기",
   "headings": {

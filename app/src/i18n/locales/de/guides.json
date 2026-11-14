@@ -10,6 +10,7 @@
     "experimental": "Experimentell"
   },
   "back": "Alle Anleitungen",
+  "backTo": "Zurück zu {page}",
   "openTab": "{page} öffnen",
   "readGuide": "Anleitung lesen",
   "headings": {

@@ -31,9 +31,9 @@ export const guideGroups: GuideGroup[] = ['start', 'enhancements', 'tools']
 export const guides: GuideEntry[] = [
   { id: 'start', group: 'start', tab: 'core', badges: [] },
   { id: 'anticheat', group: 'start', tab: 'layers', badges: [] },
-  { id: 'quadviews', group: 'enhancements', tab: 'quadviews', badges: ['experimental'] },
+  { id: 'quadviews', group: 'enhancements', tab: 'quadviews', badges: [] },
   { id: 'turbo', group: 'enhancements', tab: 'turbo', badges: [] },
-  { id: 'framegen', group: 'enhancements', tab: 'framegen', badges: ['experimental'] },
+  { id: 'framegen', group: 'enhancements', tab: 'framegen', badges: [] },
   { id: 'pivot', group: 'enhancements', tab: 'pivotxr', badges: [] },
   { id: 'depth', group: 'enhancements', tab: 'depthxr', badges: [] },
   { id: 'osd', group: 'tools', tab: 'osd', badges: [] },
@@ -47,8 +47,13 @@ export function guideEntry(id: GuideId): GuideEntry | undefined {
 // so another page's "Read the guide" link can open one directly.
 export const openGuideId = shallowRef<GuideId | null>(null)
 
-export function showGuide(id: GuideId | null) {
+// The page a guide was opened from by its "Read the guide" link, so the guide
+// can go back to it; null when it was opened from the Guides page.
+export const guideOrigin = shallowRef<AppTab | null>(null)
+
+export function showGuide(id: GuideId | null, from: AppTab | null = null) {
   openGuideId.value = id
+  guideOrigin.value = id ? from : null
 }
 
 // Splits "**bold**" markup in a guide message into plain and strong runs, so
