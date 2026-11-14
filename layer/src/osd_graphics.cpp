@@ -112,7 +112,7 @@ public:
            !check(commands->Close(),"D3D12 initial close")||!check(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)),"D3D12 fence"))return false;
         event=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!event){error="D3D12 fence event failed";return false;}
         D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=OsdBitmap::width*4*768;
+        D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=OsdBitmap::width*4*OsdBitmap::texture_height;
         desc.Height=1;desc.DepthOrArraySize=1;desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         if(!check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&staging)),"D3D12 staging"))return false;
         D3D12_RANGE read{0,0};return check(staging->Map(0,&read,reinterpret_cast<void**>(&mapped)),"D3D12 map");

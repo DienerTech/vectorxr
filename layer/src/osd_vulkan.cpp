@@ -79,7 +79,7 @@ public:
         image_rows.assign(count,OsdBitmap::texture_height);staging_rows=OsdBitmap::texture_height;
         xr=api.images(s,count,&count,reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
         if(XR_FAILED(xr)){error="Vulkan image enumeration XrResult="+std::to_string(xr);return false;}
-        VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};buffer.size=OsdBitmap::width*4*768;buffer.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;buffer.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
+        VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};buffer.size=OsdBitmap::width*4*OsdBitmap::texture_height;buffer.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;buffer.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
         if(!Check(vkCreateBuffer(binding.device,&buffer,nullptr,&staging),"vkCreateBuffer",error))return false;
         VkMemoryRequirements requirements{};vkGetBufferMemoryRequirements(binding.device,staging,&requirements);
         VkPhysicalDeviceMemoryProperties props{};memoryProperties(binding.physicalDevice,&props);
