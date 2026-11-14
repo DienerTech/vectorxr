@@ -68,10 +68,10 @@ function back(tab: AppTab) {
   emit('navigate', tab)
 }
 
-// Once the person leaves, the way back no longer applies: the guide stays
-// open, with All guides as its way out.
+// Leaving the page closes the guide, so the sidebar's Guides always opens
+// the list; a "Read the guide" link opens its guide as it switches pages.
 onBeforeUnmount(() => {
-  guideOrigin.value = null
+  showGuide(null)
 })
 </script>
 
