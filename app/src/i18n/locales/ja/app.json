@@ -187,6 +187,7 @@
     "loadingStatus": "Discord の招待を読み込んでいます。"
   },
   "patreon": {
+    "title": "Patreon メンバーになる",
     "join": "Patreon で参加 ↗",
     "openFailed": "ブラウザーを開けませんでした。もう一度お試しください。"
   },

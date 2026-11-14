@@ -199,6 +199,7 @@
     "loadingStatus": "Ładowanie zaproszenia Discord."
   },
   "patreon": {
+    "title": "Zostań członkiem w serwisie Patreon",
     "join": "Dołącz w serwisie Patreon ↗",
     "openFailed": "Nie można otworzyć przeglądarki. Spróbuj ponownie."
   },

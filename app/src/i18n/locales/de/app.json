@@ -191,6 +191,7 @@
     "loadingStatus": "Discord-Einladung wird geladen."
   },
   "patreon": {
+    "title": "Patreon-Mitglied werden",
     "join": "Auf Patreon beitreten ↗",
     "openFailed": "Der Browser konnte nicht geöffnet werden. Versuchen Sie es erneut."
   },

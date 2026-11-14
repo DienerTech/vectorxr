@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import HealthLoading from '../HealthLoading.vue'
 import DiscordJoinButton from '../DiscordJoinButton.vue'
 import PatreonPromo from '../PatreonPromo.vue'
+import { useCommunityStore } from '../../stores/communityStore'
 import { t } from '../../i18n/index.ts'
 
 import type { OpenXrLayerEntry, OpenXrLayerSnapshot } from '../../lib/commands'
@@ -11,6 +12,7 @@ import { findVectorXrLayer } from '../../lib/health'
 import type { AppTab, ModuleId, VectorXRConfig } from '../../lib/model'
 
 const supportLinkError = ref('')
+const community = useCommunityStore()
 
 async function openSupport() {
   try {
@@ -195,19 +197,19 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
     <article class="rounded-[1.25rem] border px-5 py-4 shadow-panel surface-panel">
       <p class="eyebrow text-xs uppercase tracking-[0.24em]">{{ t('home.community.eyebrow') }}</p>
       <h2 class="mt-1 text-lg font-semibold">{{ t('home.community.title') }}</h2>
-      <div class="mt-2 grid gap-4 sm:grid-cols-2">
-        <div>
+      <div class="mt-2 grid gap-4 sm:grid-cols-2" :class="community.state.patreon ? 'lg:grid-cols-3' : ''">
+        <div class="flex flex-col">
           <h3 class="font-semibold">{{ t('home.community.discordTitle') }}</h3>
           <p class="mt-1 text-sm leading-5 text-muted">{{ t('home.community.discordBody') }}</p>
-          <DiscordJoinButton class="mt-2" button-class="rounded-[0.65rem] px-3 py-1.5 text-sm font-medium" />
+          <DiscordJoinButton class="mt-auto pt-2" button-class="rounded-[0.65rem] px-3 py-1.5 text-sm font-medium" />
         </div>
-        <div>
+        <div class="flex flex-col">
           <h3 class="font-semibold">{{ t('home.community.supportTitle') }}</h3>
-          <p class="mt-1 text-sm leading-5 text-muted">{{ t('home.community.supportBody') }}</p>
-          <button class="button-accent mt-2 rounded-[0.65rem] px-3 py-1.5 text-sm font-medium" type="button" @click="openSupport">{{ t('home.community.supportButton') }}</button>
+          <p class="mb-2 mt-1 text-sm leading-5 text-muted">{{ t('home.community.supportBody') }}</p>
+          <button class="button-accent mt-auto self-start rounded-[0.65rem] px-3 py-1.5 text-sm font-medium" type="button" @click="openSupport">{{ t('home.community.supportButton') }}</button>
           <p v-if="supportLinkError" role="status" class="mt-2 text-xs text-muted">{{ supportLinkError }}</p>
-          <PatreonPromo class="mt-3" />
         </div>
+        <PatreonPromo variant="column" />
       </div>
     </article>
   </div>

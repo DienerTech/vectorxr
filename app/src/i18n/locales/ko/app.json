@@ -187,6 +187,7 @@
     "loadingStatus": "Discord 초대를 로드하는 중입니다."
   },
   "patreon": {
+    "title": "Patreon 멤버 되기",
     "join": "Patreon에서 참여 ↗",
     "openFailed": "브라우저를 열 수 없습니다. 다시 시도하십시오."
   },

@@ -187,6 +187,7 @@
     "loadingStatus": "正在載入 Discord 邀請。"
   },
   "patreon": {
+    "title": "成為 Patreon 會員",
     "join": "在 Patreon 加入 ↗",
     "openFailed": "無法開啟瀏覽器。請再試一次。"
   },
