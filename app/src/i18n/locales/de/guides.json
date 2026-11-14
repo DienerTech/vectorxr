@@ -1,0 +1,393 @@
+{
+  "title": "Anleitungen",
+  "intro": "Kurze Anleitungen dazu, was jeder Teil von VectorXR macht, wann er hilft, wie Sie ihn für ein Spiel einschalten und wie Sie ihn wieder ausschalten. Neu bei VectorXR? Beginnen Sie mit der ersten.",
+  "groups": {
+    "start": "Hier beginnen",
+    "enhancements": "Erweiterungen",
+    "tools": "Anzeige und Werkzeuge"
+  },
+  "badges": {
+    "experimental": "Experimentell"
+  },
+  "back": "Alle Anleitungen",
+  "backTo": "Zurück zu {page}",
+  "openTab": "{page} öffnen",
+  "readGuide": "Anleitung lesen",
+  "headings": {
+    "what": "Was es macht",
+    "when": "Wann es hilft",
+    "setup": "Für ein Spiel einschalten",
+    "check": "Prüfen, ob es funktioniert",
+    "off": "Ausschalten",
+    "problems": "Wenn etwas falsch aussieht"
+  },
+  "diagram": {
+    "game": "Ihr Spiel",
+    "layer": "VectorXR-Layer",
+    "runtime": "OpenXR-Laufzeit",
+    "headset": "Headset",
+    "app": "VectorXR-App",
+    "settingsFile": "Gespeicherte Einstellungen",
+    "realFrame": "Spielbild",
+    "generatedFrame": "Generiertes Bild",
+    "refresh": "Headset-Bildwechsel",
+    "focus": "Scharf, wo Sie hinsehen",
+    "periphery": "Weniger Details am Rand",
+    "before": "Vorher",
+    "after": "Nachher",
+    "headTurn": "Ihr Kopf dreht sich",
+    "viewTurns": "Die Ansicht dreht weiter",
+    "leftEye": "Linkes Auge",
+    "rightEye": "Rechtes Auge",
+    "depthPlane": "Tiefenebene",
+    "wait": "Wartet auf die Laufzeit",
+    "render": "Spiel rendert",
+    "osdPanel": "OSD-Anzeige"
+  },
+  "items": {
+    "start": {
+      "title": "Was ist VectorXR?",
+      "summary": "Was VectorXR ist, was ein OpenXR-Layer ist, wie es entscheidet, was in einem Spiel gilt, und alle Wege, es auszuschalten.",
+      "sections": {
+        "what": {
+          "heading": "Was VectorXR ist",
+          "body": "VectorXR erweitert PC-VR-Spiele, die OpenXR nutzen: schärferes Rendern, wo Sie hinsehen, flüssigere Bewegung, bessere Kopfdrehung für Sitz-Simulationen und mehr. Es besteht aus zwei Teilen. In der **Desktop-App** (diesem Fenster) wählen Sie die Einstellungen. Der **VectorXR-Layer** wendet sie im laufenden Spiel an.",
+          "points": {
+            "a": "**Das Schließen dieser App schaltet VectorXR nicht aus.** Der Layer läuft in jedem OpenXR-Spiel und liest Ihre gespeicherten Einstellungen selbst. Wie Sie es ausschalten, steht im letzten Abschnitt dieser Anleitung.",
+            "b": "Änderungen wirken erst, wenn Sie in der Leiste unten auf **Änderungen speichern** klicken.",
+            "c": "Alles bleibt auf Ihrem PC. Die Einstellungen liegen unter %LOCALAPPDATA%\\VectorXR."
+          }
+        },
+        "layer": {
+          "heading": "Was ein OpenXR-Layer ist",
+          "body": "OpenXR ist der Standard, über den VR-Spiele mit der Software Ihres Headsets sprechen, der **OpenXR-Laufzeit** (SteamVR, Pimax Play, Varjo Base, Virtual Desktop und andere). Ein **OpenXR-Layer** sitzt zwischen Spiel und Laufzeit. Jedes Bild, das das Spiel sendet, läuft durch ihn hindurch. So kann er die Ansicht anpassen, Bilder hinzufügen oder eine Anzeige zeichnen, bevor die Laufzeit das Bild im Headset zeigt.",
+          "points": {
+            "a": "Windows lädt die in der Registrierung eingetragenen Layer in jedes OpenXR-Spiel, in fester Reihenfolge. Die Seite **OpenXR-Layer** zeigt sie alle.",
+            "b": "Ein Layer ändert nur, was Sie für dieses Spiel eingeschaltet haben. Sind alle Erweiterungen aus, laufen die Bilder unverändert durch.",
+            "c": "Andere Werkzeuge wie OpenXR Toolkit sind ebenfalls Layer. Zwei Layer mit derselben Aufgabe können sich stören, nutzen Sie also jeweils nur einen."
+          }
+        },
+        "decide": {
+          "heading": "Wie VectorXR entscheidet, was gilt",
+          "body": "Jede Erweiterung prüft drei Dinge in dieser Reihenfolge:",
+          "steps": {
+            "1": "**VectorXR aktiviert** in den Einstellungen. Ist es aus, gilt in keinem Spiel etwas.",
+            "2": "Ein **eigenes Profil** für dieses Spiel. Das erste aktive Profil, das das Spiel nennt, gewinnt, auch wenn das Standardprofil aus ist.",
+            "3": "Das **Standardprofil**. Es gilt für Spiele ohne aktives eigenes Profil. Jedes Standardprofil ist anfangs aus."
+          }
+        },
+        "firstGame": {
+          "heading": "Ihr erstes Spiel einrichten",
+          "steps": {
+            "1": "Starten Sie das Spiel einmal mit installiertem VectorXR und beenden Sie es wieder.",
+            "2": "Öffnen Sie das **Anwendungsregister**, klicken Sie auf **Aktualisieren** und registrieren Sie das Spiel aus der Liste der Apps, die VectorXR gesehen hat.",
+            "3": "Öffnen Sie in der Seitenleiste eine Erweiterung, klicken Sie auf **Profil hinzufügen** und wählen Sie das Spiel.",
+            "4": "Passen Sie die Einstellungen an und klicken Sie auf **Änderungen speichern**. Manche Erweiterungen brauchen einen Neustart des Spiels; ihre Anleitungen sagen, welche."
+          }
+        },
+        "off": {
+          "heading": "So schalten Sie es aus",
+          "body": "VectorXR lässt sich auf jeder Ebene rückgängig machen:",
+          "points": {
+            "a": "**Eine Erweiterung für ein Spiel:** Schalten Sie das Profil des Spiels auf der Seite der Erweiterung aus.",
+            "b": "**Eine Erweiterung überall:** Schalten Sie ihr Standardprofil und ihre eigenen Profile aus.",
+            "c": "**Alles, vorübergehend:** Schalten Sie **VectorXR aktiviert** in den Einstellungen oder im Menü des Infobereichsymbols aus. Das meiste stoppt sofort. Quadviews und die Taktung von Frame Generation bleiben bis zum Neustart des Spiels.",
+            "d": "**Aus der Kette nehmen:** Deaktivieren Sie den VectorXR-Layer auf der Seite **OpenXR-Layer**. Spiele laden ihn dann gar nicht mehr.",
+            "e": "**Entfernen:** Deinstallieren Sie VectorXR in Windows. Das entfernt die App und meldet den Layer ab."
+          }
+        }
+      }
+    },
+    "anticheat": {
+      "title": "Onlinespiele und Anti-Cheat",
+      "summary": "Was Sie wissen sollten, bevor Sie VectorXR in Mehrspieler-Spielen wie Star Citizen nutzen.",
+      "sections": {
+        "what": {
+          "heading": "Auf eigenes Risiko",
+          "body": "Die Nutzung von VectorXR in Onlinespielen mit Anti-Cheat, auch in Star Citizen, erfolgt auf eigenes Risiko, auch für Ihr Spielkonto. Offizielle Versionen sind codesigniert, und VectorXR lief in Tests unter Easy Anti-Cheat, aber kein Spieleentwickler hat es freigegeben, und Anti-Cheat-Regeln können sich mit jedem Spiel- oder VectorXR-Update jederzeit ändern."
+        },
+        "off": {
+          "body": "Um VectorXR ganz aus einem Spiel herauszuhalten, geben Sie ihm keine Profile und lassen die Standardprofile aus. Um es aus allen Spielen herauszuhalten, deaktivieren Sie den VectorXR-Layer auf der Seite **OpenXR-Layer**."
+        },
+        "problems": {
+          "body": "Melden Sie Probleme an VectorXR statt an den Spieleentwickler und hängen Sie die ZIP-Datei von **Debugdaten exportieren** auf der Startseite an."
+        }
+      }
+    },
+    "quadviews": {
+      "title": "Quadviews",
+      "summary": "Volle Details nur dort rendern, wo Sie hinsehen, und weniger am Rand, in Spielen, die Quad Views unterstützen.",
+      "sections": {
+        "what": {
+          "body": "Quadviews rendert jedes Auge als zwei Bilder: ein scharfes dort, wo Sie hinsehen, und eines mit niedrigerer Auflösung für den Rest. Mit Eye-Tracking folgt der scharfe Bereich Ihren Augen, ohne folgt er Ihrem Kopf. Die GPU zeichnet deutlich weniger Pixel, sodass Sie Qualität oder Bildrate im Spiel erhöhen können."
+        },
+        "when": {
+          "body": "Das Spiel selbst muss OpenXR Quad Views unterstützen. **DCS** ist der wichtigste getestete Titel (Options > VR > Use Quad View). Quadviews einzuschalten bringt ein normales Stereo-Spiel nicht dazu, vier Ansichten zu rendern. Es ist experimentell und für Direct3D-11-Spiele."
+        },
+        "setup": {
+          "steps": {
+            "1": "Schalten Sie in DCS **Use Quad View** ein (und **Use Eye Tracking**, wenn Ihr Headset es hat).",
+            "2": "Schalten Sie andere Quad-Views-Anbieter aus: Pimax' **Native Pimax Quad Views**, den Layer Quad-Views-Foveated und OpenXR Toolkit für DCS.",
+            "3": "Registrieren Sie DCS, fügen Sie ein Quadviews-Profil dafür hinzu und klicken Sie auf **Änderungen speichern**.",
+            "4": "Starten Sie DCS neu."
+          }
+        },
+        "check": {
+          "body": "Legen Sie auf der Seite das **Tastenkürzel im Headset** fest und drücken Sie es im Spiel. Die Diagnoseansicht umrandet den scharfen Bereich und färbt die detailärmeren Ränder, sodass Sie sehen, wo er liegt und wie er Ihnen folgt. **So lesen Sie das Overlay** erklärt jede Farbe."
+        },
+        "off": {
+          "body": "Schalten Sie das Profil des Spiels aus und speichern Sie. Quadviews bleibt bis zum Neustart des Spiels aktiv."
+        },
+        "problems": {
+          "points": {
+            "a": "**Das Spiel rendert weiter in Stereo:** Ein anderer Layer, oft OpenXR Toolkit, liegt über VectorXR. Die Seite OpenXR-Layer zeigt eine Warnung.",
+            "b": "**Der scharfe Bereich ist an der falschen Stelle:** Prüfen Sie die Eye-Tracking-Einstellungen auf der Seite und im Spiel."
+          }
+        }
+      }
+    },
+    "turbo": {
+      "title": "Turbo",
+      "summary": "Verhindern, dass die Bildwartezeiten der Laufzeit Spiele bremsen, deren Hauptthread im Warten feststeckt.",
+      "sections": {
+        "what": {
+          "body": "Manche Spiele verbringen einen Teil jedes Bildes mit Warten auf die OpenXR-Laufzeit, statt am nächsten Bild zu arbeiten. Turbo ändert dieses Timing, damit das Spiel früher anfangen kann, was seine Bildrate erhöhen kann. Die Turbo-Sicherheit achtet auf Probleme und hält Turbo für ein Setup aus, das sich falsch verhält."
+        },
+        "when": {
+          "body": "Nutzen Sie es nur in Spielen, in denen ein A/B-Test im Headset einen Gewinn zeigt. Es ist kompatibilitätsempfindlich, lassen Sie das Standardprofil also aus. Kombinieren Sie es nicht mit einem anderen Taktungswerkzeug wie dem Turbo Mode von OpenXR Toolkit oder mit Reprojektion der Laufzeit wie Motion Smoothing oder ASW. Turbo bleibt aus, solange Frame Generation läuft."
+        },
+        "setup": {
+          "steps": {
+            "1": "Registrieren Sie das Spiel und fügen Sie ein eigenes Turbo-Profil dafür hinzu. Lassen Sie das Standardprofil aus.",
+            "2": "Lassen Sie die **Turbo-Sicherheit** an und beginnen Sie mit **Auto · Stabilität zuerst**.",
+            "3": "Klicken Sie unter **Turbo-Umschaltung im Spiel** auf **Belegung bearbeiten…**, wählen Sie eine Taste oder einen Knopf und dann **Änderungen speichern**.",
+            "4": "Vergleichen Sie im Spiel Turbo an und aus in derselben Szene mit Ihrer Belegung."
+          }
+        },
+        "check": {
+          "body": "Die **Leistungsdiagnose** auf der Turbo-Seite vergleicht Bildrate, Bildzeiten und Wartezeiten mit Turbo an und aus. Die Bildschirmanzeige zeigt den Zustand von Turbo, etwa **Async** oder **Sequenced**."
+        },
+        "off": {
+          "body": "Drücken Sie Ihre Belegung, um es im Spiel auszuschalten, oder schalten Sie das Profil aus und speichern Sie."
+        },
+        "problems": {
+          "body": "Schalten Sie Turbo aus, wenn Sie ein Warte-Overlay, schwarze Bilder, ständiges Ruckeln oder fehlerhafte Reprojektion sehen. Hat die Sicherheit ein Setup gesperrt, erklärt ihre Seite den Grund und lässt Sie die Sperre aufheben und neu testen."
+        }
+      }
+    },
+    "framegen": {
+      "title": "Frame Generation",
+      "summary": "Generierte Bilder zwischen die Bilder des Spiels einfügen, damit das Headset bei jedem Bildwechsel ein neues Bild bekommt.",
+      "sections": {
+        "what": {
+          "body": "Frame Generation misst, wie sich das Bild zwischen den Bildern des Spiels bewegt, und erzeugt neue Bilder dazwischen. Ein Spiel mit 45 fps kann so ein 90-Hz-Headset füllen. **Interpolate** (der Standard) hat die wenigsten Artefakte, verzögert aber um etwa ein Spielbild. **Extrapolate** verzögert nicht, zeigt aber mehr Artefakte an Kanten."
+        },
+        "when": {
+          "body": "Nutzen Sie es, wenn das Spiel von sich aus mindestens die halbe Bildwiederholrate des Headsets hält, etwa 45 fps bei 90 Hz. Darunter nehmen die Artefakte schnell zu. Es ist experimentell und hauptsächlich auf NVIDIA-RTX-GPUs getestet."
+        },
+        "setup": {
+          "steps": {
+            "1": "Schalten Sie die Glättung der Laufzeit für das Spiel aus: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW oder Meta ASW.",
+            "2": "Lassen Sie das Headset mit voller Bildwiederholrate laufen. Halbieren Sie sie nicht in der Laufzeit.",
+            "3": "Registrieren Sie das Spiel, fügen Sie ein Frame Generation-Profil dafür hinzu, behalten Sie die Standardeinstellungen und klicken Sie auf **Änderungen speichern**. Probieren Sie auf einer NVIDIA-RTX-GPU **NVIDIA-Hardware** als Bewegungsquelle.",
+            "4": "Starten Sie das Spiel neu. Das Einschalten von Frame Generation wirkt beim nächsten Start."
+          }
+        },
+        "check": {
+          "body": "Bei eingeschalteter Bildschirmanzeige erscheint **FG AN** neben der Bildrate. Die Liste **Steuerung im Headset** auf der Seite zeigt den Status jedes laufenden Spiels, und **Tönung generierter Bilder** markiert die generierten Bilder."
+        },
+        "off": {
+          "body": "Schalten Sie das Profil des Spiels aus und speichern Sie. Generierte Bilder stoppen sofort, und die Bilder laufen unverändert durch. Die optionale Belegung **A/B-Umschaltung** schaltet sie im Spiel aus und an."
+        },
+        "problems": {
+          "points": {
+            "a": "**Wabernde Kanten oder Schlieren:** Probieren Sie Interpolate oder NVIDIA-Hardware als Bewegungsquelle.",
+            "b": "**FG BEREIT:** Das Spiel hält die Bildwiederholrate bereits, oder die Laufzeit hält die Bilder auf halber Rate.",
+            "c": "**FG N/V:** Die Bilder dieses Spiels lassen sich nicht nutzen. Das OSD und die Seite nennen den Grund."
+          }
+        }
+      }
+    },
+    "pivot": {
+      "title": "Pivot",
+      "summary": "Die Ansicht weiter drehen, als Ihr Nacken sich dreht, für Sitz- und Flugsimulator-VR.",
+      "sections": {
+        "what": {
+          "body": "Pivot fügt beim Drehen des Kopfes zusätzliche Drehung hinzu, sodass eine kleine Drehung über die Schulter blicken kann. **Enhanced Motion** vervielfacht Ihre Kopfdrehungen, stufenlos oder in Schritten. **Snap Views** springen zu festen Ansichten, die Sie mit Belegungen wählen. Lehnen bewegt Sie weiterhin 1:1."
+        },
+        "when": {
+          "body": "Es ist für Spiele im Sitzen gedacht, etwa Flug- und Rennsimulationen, in denen Sie nach hinten schauen müssen, ohne sich im Sitz zu verdrehen."
+        },
+        "setup": {
+          "steps": {
+            "1": "Registrieren Sie das Spiel und fügen Sie ein Pivot-Profil dafür hinzu.",
+            "2": "Wählen Sie **Enhanced Motion** und eine Aktivierungsart. **Immer aktiv** braucht keine Belegung. **Umschalten** und **Halten** brauchen eine Taste oder einen Knopf.",
+            "3": "Legen Sie **Ursprung setzen** auf dieselbe Eingabe wie das Zentrieren im Spiel, damit beide wissen, wo Sie sitzen.",
+            "4": "Klicken Sie auf **Änderungen speichern** und stimmen Sie Multiplikator und Totzone für jede Achse ab."
+          }
+        },
+        "check": {
+          "body": "Die Pivot-Zeile der Bildschirmanzeige beginnt mit **Bewegung:** und zeigt **Aktiv**, während Pivot die Ansicht dreht."
+        },
+        "off": {
+          "body": "Setzen Sie es im Spiel mit Ihrer Aktivierungsbelegung aus, oder schalten Sie das Profil aus und speichern Sie."
+        },
+        "problems": {
+          "body": "Driftet die Ansicht aus der Mitte, drücken Sie nach dem Zentrieren im Spiel oder einer neuen Sitzposition erneut Ursprung setzen. Wirkt es zu stark, erhöhen Sie die Totzone, damit der normale Blick über die Instrumente 1:1 bleibt."
+        }
+      }
+    },
+    "depth": {
+      "title": "Tiefe",
+      "summary": "Stereotiefe und Weltmaßstab des 3D-Bildes abstimmen.",
+      "sections": {
+        "what": {
+          "body": "Tiefe ändert, wie weit Ihre virtuellen Augen auseinander liegen und wo sich die beiden Bilder decken. **Stereotiefe / Weltmaßstab** lässt die Welt größer oder kompakter wirken. **Konvergenz / Tiefenebene** legt die Entfernung fest, die am entspanntesten wirkt. **Depth Lock** verhindert, dass die Laufzeit Ihre Abstimmung rückgängig macht."
+        },
+        "when": {
+          "body": "Nutzen Sie es, wenn ein Cockpit winzig oder übergroß wirkt oder der 3D-Effekt zu schwach oder zu stark ist. Jedes Spiel kann eine eigene Einstellung brauchen."
+        },
+        "setup": {
+          "steps": {
+            "1": "Schalten Sie die eigene IPD- oder Weltmaßstab-Vorgabe des Spiels aus (in DCS **Force IPD Distance**) und starten Sie das Spiel neu.",
+            "2": "Registrieren Sie das Spiel und fügen Sie ein Tiefe-Profil dafür hinzu. Beginnen Sie mit Konvergenz bei 0.",
+            "3": "Verschieben Sie die Stereotiefe, bis der Maßstab stimmt, und passen Sie dann die Konvergenz in kleinen Schritten an.",
+            "4": "Klicken Sie nach jeder Änderung, die Sie behalten möchten, auf **Änderungen speichern**."
+          }
+        },
+        "check": {
+          "body": "Belegen Sie die **A/B-Umschaltung Tiefe**, um Tiefe im Headset aus- und einzuschalten und zu vergleichen. Die **Tiefen-Kombinationskarte** auf der Seite zeigt, in welcher Kombination Sie sind."
+        },
+        "off": {
+          "body": "Drücken Sie Ihre Belegung für die A/B-Umschaltung Tiefe, oder schalten Sie das Profil aus und speichern Sie."
+        },
+        "problems": {
+          "body": "Scheint Tiefe nichts zu bewirken, überschreibt die eigene IPD- oder Maßstabseinstellung des Spiels sie. Öffnen Sie **Problembehandlung für Tiefe** auf der Seite. Fühlt sich etwas unangenehm an, gehen Sie Richtung 0 zurück."
+        }
+      }
+    },
+    "osd": {
+      "title": "Bildschirmanzeige",
+      "summary": "Eine Anzeige im Headset mit Bildrate, Bildzeiten und dem, was VectorXR gerade tut.",
+      "sections": {
+        "what": {
+          "body": "Die Bildschirmanzeige (OSD) ist eine kleine Anzeige, die Ihrem Kopf folgt. Sie zeigt die Bildrate und Bildzeiten des Spiels und den Zustand von Turbo, Frame Generation, Pivot und den anderen Erweiterungen. Es gibt ein Layout **Kompakt** und ein Layout **Erweitert**."
+        },
+        "setup": {
+          "steps": {
+            "1": "Öffnen Sie die **Bildschirmanzeige** und schalten Sie sie ein.",
+            "2": "Wählen Sie eine Vorgabe: **Erweitert**, **Leistung** oder **Minimal**.",
+            "3": "Ziehen Sie die Anzeige in der Vorschau an ihren Platz, wählen Sie die Inhalte und klicken Sie auf **Änderungen speichern**.",
+            "4": "Im Spiel blendet **Ctrl+Alt+F10** sie ein oder aus, und **Ctrl+Alt+F11** wechselt das Layout."
+          }
+        },
+        "off": {
+          "body": "Schalten Sie das OSD auf seiner Seite aus und speichern Sie, oder blenden Sie es mit seiner Belegung für die Sitzung aus."
+        }
+      }
+    }
+  },
+  "walkthrough": {
+    "play": "Abspielen",
+    "pause": "Pause",
+    "replay": "Noch einmal",
+    "back": "Zurück",
+    "next": "Weiter",
+    "mute": "Musik stummschalten",
+    "unmute": "Musik abspielen",
+    "volume": "Musiklautstärke",
+    "stepOf": "Schritt {current} von {total}",
+    "labels": {
+      "stillRunning": "Läuft weiter",
+      "passThrough": "Bilder laufen unverändert durch",
+      "appClosed": "App geschlossen",
+      "inTheApp": "In der App",
+      "whereYouLook": "Wohin Sie sehen",
+      "pixelsDrawn": "Gezeichnete Pixel",
+      "turboOff": "Ohne Turbo",
+      "turboOn": "Mit Turbo",
+      "heldOff": "Turbo-Sicherheit: für dieses Setup ausgesetzt",
+      "motion": "Bewegung zwischen zwei Spielbildern",
+      "interpolate": "Am saubersten, etwa 1 Bild später",
+      "extrapolate": "Keine Verzögerung, mehr Kantenartefakte",
+      "neck": "Weiter geht Ihr Nacken nicht",
+      "deadzone": "In der Totzone: 1:1",
+      "biggerWorld": "Engere Augen: eine größere Welt",
+      "compactWorld": "Weitere Augen: eine kompaktere Welt",
+      "frames_one": "{count} Bild",
+      "frames_other": "{count} Bilder"
+    }
+  },
+  "walkthroughs": {
+    "start": {
+      "title": "Ansehen: So funktioniert VectorXR",
+      "steps": {
+        "1": "Ihr Spiel zeichnet Bilder und sendet sie, viele Male pro Sekunde, an Ihr Headset.",
+        "2": "Dazwischen sitzt die Software Ihres Headsets, die OpenXR-Laufzeit: SteamVR, Pimax Play, Varjo Base, Virtual Desktop und andere.",
+        "3": "VectorXR ist ein OpenXR-Layer. Windows lädt ihn in jedes OpenXR-Spiel, zwischen Spiel und Laufzeit, damit er jedes Bild auf dem Weg verbessern kann.",
+        "4": "Diese App bearbeitet nur Einstellungen. Wenn Sie auf Änderungen speichern klicken, landen sie in einer Datei, und der Layer liest sie von dort.",
+        "5": "Das Schließen dieser App schaltet VectorXR nicht aus. Der Layer ist Teil des laufenden Spiels und arbeitet mit Ihren gespeicherten Einstellungen weiter.",
+        "6": "Zum Ausschalten schalten Sie VectorXR aktiviert in den Einstellungen oder im Menü des Infobereichs aus, dann laufen die Bilder unverändert durch. Um ihn ganz aus den Spielen herauszunehmen, deaktivieren Sie ihn auf der Seite OpenXR-Layer."
+      }
+    },
+    "quadviews": {
+      "title": "Ansehen: So funktioniert Quadviews",
+      "steps": {
+        "1": "Ihr Headset zeigt ein weites Bild, aber Ihre Augen sehen immer nur an einer kleinen Stelle scharf.",
+        "2": "Quadviews rendert ein kleines scharfes Bild dort, wo Sie hinsehen, und den Rest mit niedrigerer Auflösung.",
+        "3": "Mit Eye-Tracking folgt der scharfe Bereich Ihren Augen. Ohne folgt er Ihrem Kopf.",
+        "4": "Die GPU zeichnet deutlich weniger Pixel, die Sie in Qualität oder Bildrate des Spiels stecken können.",
+        "5": "Schalten Sie in DCS Use Quad View ein, fügen Sie dafür ein Quadviews-Profil hinzu, speichern Sie und starten Sie das Spiel neu."
+      }
+    },
+    "turbo": {
+      "title": "Ansehen: So funktioniert Turbo",
+      "steps": {
+        "1": "Manche Spiele warten bei jedem Bild auf die OpenXR-Laufzeit, bevor sie mit dem nächsten beginnen.",
+        "2": "Turbo ändert dieses Timing, damit das Spiel früher anfängt und mehr Bilder in dieselbe Zeit passen.",
+        "3": "Die Turbo-Sicherheit achtet auf Probleme und hält Turbo für ein Setup aus, das sich falsch verhält.",
+        "4": "Belegen Sie die Turbo-Umschaltung im Spiel und vergleichen Sie Turbo an und aus in derselben Szene. Behalten Sie es nur, wo es hilft.",
+        "5": "Fügen Sie auf der Turbo-Seite ein eigenes Profil für das Spiel hinzu, lassen Sie die Turbo-Sicherheit an und speichern Sie."
+      }
+    },
+    "framegen": {
+      "title": "Ansehen: So funktioniert Frame Generation",
+      "steps": {
+        "1": "Ihr Spiel rendert 45 Bilder pro Sekunde, ein 90-Hz-Headset zeigt aber 90 an.",
+        "2": "Frame Generation misst, wie sich das Bild zwischen den Bildern des Spiels bewegt.",
+        "3": "Es erzeugt für jeden Bildwechsel dazwischen ein neues Bild, damit Bewegung flüssig aussieht.",
+        "4": "Interpolate hat die wenigsten Artefakte, zeigt jedes Spielbild aber etwa ein Bild später. Extrapolate verzögert nicht, zeigt aber mehr Kantenartefakte.",
+        "5": "Schalten Sie die Glättung der Laufzeit aus, fügen Sie ein Profil für das Spiel hinzu, speichern Sie und starten Sie es neu. Dann erscheint FG AN neben der Bildrate im OSD."
+      }
+    },
+    "pivot": {
+      "title": "Ansehen: So funktioniert Pivot",
+      "steps": {
+        "1": "Im Sitz-Simulator heißt nach hinten schauen, den Nacken so weit wie möglich zu drehen.",
+        "2": "Pivot fügt beim Drehen des Kopfes zusätzliche Drehung hinzu, sodass eine kleine Drehung viel weiter blickt.",
+        "3": "In der Totzone folgt die Ansicht Ihrem Kopf 1:1, sodass sich der Blick über die Instrumente normal anfühlt.",
+        "4": "Snap Views springen per Knopf zu festen Ansichten, die Sie wählen. Lehnen bewegt Sie weiterhin 1:1.",
+        "5": "Fügen Sie ein Pivot-Profil hinzu, wählen Sie eine Aktivierungsart und legen Sie Ursprung setzen auf dieselbe Eingabe wie das Zentrieren im Spiel."
+      }
+    },
+    "depth": {
+      "title": "Ansehen: So funktioniert Tiefe",
+      "steps": {
+        "1": "Ihre beiden Augen sehen die Welt von leicht verschiedenen Stellen. Das macht sie dreidimensional.",
+        "2": "Stereotiefe ändert, wie weit Ihre virtuellen Augen auseinander liegen, sodass die Welt größer oder kompakter wirkt.",
+        "3": "Die Konvergenz legt die Entfernung fest, in der sich die beiden Bilder decken: die, die am entspanntesten wirkt.",
+        "4": "Schalten Sie die eigene IPD-Vorgabe des Spiels aus, fügen Sie ein Tiefe-Profil hinzu und vergleichen Sie mit der A/B-Umschaltung Tiefe."
+      }
+    },
+    "osd": {
+      "title": "Ansehen: So funktioniert die Bildschirmanzeige",
+      "steps": {
+        "1": "Die Bildschirmanzeige ist eine kleine Anzeige im Headset, die Ihrem Kopf folgt.",
+        "2": "Sie zeigt Bildrate und Bildzeiten und was Turbo, Frame Generation und Pivot gerade tun.",
+        "3": "Wählen Sie eine Vorgabe und ziehen Sie die Anzeige in der Vorschau an ihren Platz.",
+        "4": "Im Spiel blendet Ctrl+Alt+F10 sie ein oder aus, und Ctrl+Alt+F11 wechselt das Layout.",
+        "5": "Schalten Sie sie auf der Seite Bildschirmanzeige ein, wählen Sie eine Vorgabe und speichern Sie."
+      }
+    }
+  }
+}

@@ -24,6 +24,10 @@
       "subtitle": "暗黙的レイヤーの順序を確認・管理",
       "status": "システム"
     },
+    "guides": {
+      "label": "ガイド",
+      "subtitle": "各機能のしくみと、オンとオフの切り替え方"
+    },
     "about": {
       "label": "バージョン情報",
       "subtitle": "プロジェクト情報、パッチ ノート、サポート"
@@ -181,6 +185,11 @@
     "openFailed": "ブラウザーを開けませんでした。もう一度お試しください。",
     "retryAria": "Discord の招待の読み込みを再試行",
     "loadingStatus": "Discord の招待を読み込んでいます。"
+  },
+  "patreon": {
+    "title": "Patreon メンバーになる",
+    "join": "Patreon で参加 ↗",
+    "openFailed": "ブラウザーを開けませんでした。もう一度お試しください。"
   },
   "healthCheck": {
     "eyebrow": "システムの状態",

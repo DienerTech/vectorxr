@@ -737,6 +737,40 @@ std::string QuadViewsFoveatedPosition(const XrApiLayerNextInfo* next_info) {
     return GetModuleHandleW(L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll") ? "above" : "absent";
 }
 
+// Cheeky Foveated DLSS's OpenXR layer (its manifest's and DLL's name), above
+// or below VectorXR. It provides its own quad views over a stereo runtime
+// (it takes XR_VARJO_quad_views off the request it sends on, and treats an
+// OpenXR 1.1 application as able to select them), its own frame generation
+// and a DLSS-NR pass on the submitted images.
+std::string CheekyFoveatedDlssLayerPosition(const XrApiLayerNextInfo* next_info) {
+    for (const XrApiLayerNextInfo* below = next_info ? next_info->next : nullptr; below; below = below->next) {
+        if (LayerName(*below) == "XR_APILAYER_CHEEKY_foveated_dlss") {
+            return "below";
+        }
+    }
+    return GetModuleHandleW(L"CheekyOpenXRLayer.dll") ? "above" : "absent";
+}
+
+// Cheeky's in-game DLSS integration (standalone dxgi.dll/version.dll proxy,
+// ReShade add-on, OptiScaler ASI or UEVR plugin), loaded before the game's
+// OpenXR instance. It hooks the game's NGX/Streamline DLSS calls and
+// Direct3D 12 command queues; VectorXR does not touch those.
+std::string CheekyFoveatedDlssModules() {
+    std::string modules;
+    for (const wchar_t* name : {L"CheekyFoveatedDLSSHost.dll", L"CheekyFoveatedDLSSRuntime.dll",
+                                L"CheekyFoveatedDLSS.dll", L"CheekyFoveatedDLSS.addon64", L"CheekyFoveatedDLSS.asi"}) {
+        if (GetModuleHandleW(name)) {
+            if (!modules.empty()) {
+                modules += ' ';
+            }
+            for (const wchar_t* c = name; *c; ++c) {
+                modules += static_cast<char>(*c);
+            }
+        }
+    }
+    return modules;
+}
+
 // The loader loads every layer's library before it creates the chain, so a
 // loaded Toolkit that is not below VectorXR is above it.
 std::string OpenXrToolkitPosition(const XrInstanceCreateInfo& create_info, const XrApiLayerNextInfo* next_info) {
@@ -1161,6 +1195,8 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     }
     diagnostics.openxr_toolkit = OpenXrToolkitPosition(*instance_create_info, next_info);
     diagnostics.quad_views_foveated = QuadViewsFoveatedPosition(next_info);
+    diagnostics.cheeky_layer = CheekyFoveatedDlssLayerPosition(next_info);
+    diagnostics.cheeky_modules = CheekyFoveatedDlssModules();
     diagnostics.app_requested_quad_views =
         ApplicationRequestedExtension(instance_create_info, XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
     diagnostics.app_requested_varjo_foveated_rendering =

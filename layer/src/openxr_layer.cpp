@@ -2288,6 +2288,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     openxr_toolkit_quadviews_logged_ = false;
     openxr_toolkit_below_ = diagnostics.openxr_toolkit == "below";
     openxr_toolkit_framegen_logged_ = false;
+    cheeky_layer_above_ = diagnostics.cheeky_layer == "above";
     layers_below_ = diagnostics.layers_below;
     resolved_settings_generation_ = ~0ull; // resolve again with the Toolkit's position
     ResetSessionState();
@@ -2370,6 +2371,20 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                          "quad views itself and VectorXR sees a stereo application.");
         } else if (diagnostics.quad_views_foveated == "below") {
             logger_.Info("Quad-Views-Foveated is loaded below VectorXR: it sees the views VectorXR sends on.");
+        }
+        if (diagnostics.cheeky_layer == "above") {
+            logger_.Info("Cheeky Foveated DLSS's OpenXR layer is loaded above VectorXR: it does quad views itself "
+                         "(it removes XR_VARJO_quad_views from the request VectorXR gets), so VectorXR's Quadviews "
+                         "sees a stereo application. VectorXR's Frame Generation gets Cheeky's DLSS-NR output.");
+        } else if (diagnostics.cheeky_layer == "below") {
+            logger_.Info("Cheeky Foveated DLSS's OpenXR layer is loaded below VectorXR: it gets the views and frames "
+                         "VectorXR sends on, including Frame Generation's. Use one frame generation at a time "
+                         "(Cheeky's or VectorXR's).");
+        }
+        if (!diagnostics.cheeky_modules.empty()) {
+            logger_.Info("Cheeky Foveated DLSS in-game modules loaded: " + diagnostics.cheeky_modules +
+                         " (it hooks the game's DLSS and Direct3D 12 queues; VectorXR's own Direct3D work passes "
+                         "through those hooks).");
         }
         if (diagnostics.openxr_toolkit != "absent") {
             logger_.Info("OpenXR Toolkit is loaded " +
@@ -2669,11 +2684,18 @@ XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name,
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    if (std::string_view(name) == "xrGetInstanceProcAddr") {
-        return next_get_instance_proc_addr_(instance, name, function);
+    // A layer above VectorXR can ask for a function before any instance has
+    // been created through VectorXR, when there is no chain below it to ask
+    // yet: Cheeky Foveated DLSS's layer probes xrEnumerateInstanceExtensionProperties
+    // this way before it creates its instance. Calling through the empty
+    // pointer crashed the game at startup; the layer above gets an error and
+    // treats the extensions as unknown, as from a layer that cannot answer.
+    const PFN_xrGetInstanceProcAddr next = next_get_instance_proc_addr_;
+    if (!next) {
+        *function = nullptr;
+        return XR_ERROR_HANDLE_INVALID;
     }
-
-    return next_get_instance_proc_addr_(instance, name, function);
+    return next(instance, name, function);
 }
 
 bool OpenXrLayer::RetireIdleInstance(const std::string& next_application_name, RetiredInstance* retired) {
@@ -2804,6 +2826,16 @@ XrResult OpenXrLayer::EndInstance(XrInstance instance, bool in_runtime) {
         next_attach_session_action_sets_ = nullptr;
         next_sync_actions_ = nullptr;
         next_get_system_properties_ = nullptr;
+        // Every function taken from the runtime's instance goes with it (the
+        // runtime's DLL may be unloaded before the next instance; issue 138).
+        next_get_instance_properties_ = nullptr;
+        next_get_visibility_mask_khr_ = nullptr;
+        // The chain below may go with it too: a layer above asking before the
+        // next instance gets an error (GetInstanceProcAddr), not a call into it.
+        next_get_instance_proc_addr_ = nullptr;
+        next_path_to_string_ = nullptr;
+        next_get_current_interaction_profile_ = nullptr;
+        turbo_convert_counter_time_ = nullptr;
         next_enumerate_environment_blend_modes_ = nullptr;
         next_enumerate_view_configurations_ = nullptr;
         next_get_view_configuration_properties_ = nullptr;
@@ -3497,8 +3529,12 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
             logger_.Info(
                 std::string("Quadviews INACTIVE (application began a STEREO session; it did not select the "
                             "foveated-inset configuration). ") +
-                std::string(QuadViewsInactiveReason(application_can_select_quad_views_,
-                                                    quad_view_configuration_offered_)));
+                (cheeky_layer_above_ && !application_can_select_quad_views_
+                     ? std::string("Cheeky Foveated DLSS's OpenXR layer is above VectorXR and took the "
+                                   "application's quad-view request for its own quad views. To use VectorXR's "
+                                   "Quadviews, move Cheeky's layer below VectorXR in the VectorXR app's layer order.")
+                     : std::string(QuadViewsInactiveReason(application_can_select_quad_views_,
+                                                           quad_view_configuration_offered_))));
         }
     }
     return result;
@@ -12909,6 +12945,12 @@ void OpenXrLayer::CaptureInstanceFunctions() {
         next_path_to_string_ = reinterpret_cast<PFN_xrPathToString>(function);
     }
 
+    // The clock conversion is taken at the session's Turbo setup
+    // (ConfigureTurboExperiment), as in 0.20.1: an instance's first
+    // xrCreateSession stamps without it (its stale-event check falls back to
+    // the session's first IDLE), never with a previous instance's.
+    turbo_convert_counter_time_ = nullptr;
+
     function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrGetCurrentInteractionProfile", &function))) {
         next_get_current_interaction_profile_ = reinterpret_cast<PFN_xrGetCurrentInteractionProfile>(function);
@@ -13138,6 +13180,11 @@ void OpenXrLayer::ResetInstanceState() {
     vulkan_bridge_extensions_ = false;
     eye_gaze_extension_enabled_ = false;
     next_get_visibility_mask_khr_ = nullptr;
+    // The runtime's clock conversion belongs to the instance it was taken
+    // from: after xrDestroyInstance the runtime's DLL can be unloaded (MSFS
+    // 2024 leaving and re-entering VR on Virtual Desktop), and calling the old
+    // pointer at the next xrCreateSession crashed the game (issue 138).
+    turbo_convert_counter_time_ = nullptr;
     defer_quadviews_swapchain_releases_ = false;
     runtime_name_.clear();
     runtime_version_.clear();

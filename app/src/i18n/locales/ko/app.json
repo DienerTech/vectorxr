@@ -24,6 +24,10 @@
       "subtitle": "암시적 레이어 순서 검사 및 관리",
       "status": "시스템"
     },
+    "guides": {
+      "label": "가이드",
+      "subtitle": "각 기능의 작동 방식과 켜고 끄는 방법"
+    },
     "about": {
       "label": "정보",
       "subtitle": "프로젝트 정보, 패치 노트 및 지원"
@@ -181,6 +185,11 @@
     "openFailed": "브라우저를 열 수 없습니다. 다시 시도하십시오.",
     "retryAria": "Discord 초대 로드 다시 시도",
     "loadingStatus": "Discord 초대를 로드하는 중입니다."
+  },
+  "patreon": {
+    "title": "Patreon 멤버 되기",
+    "join": "Patreon에서 참여 ↗",
+    "openFailed": "브라우저를 열 수 없습니다. 다시 시도하십시오."
   },
   "healthCheck": {
     "eyebrow": "시스템 상태",

@@ -24,6 +24,10 @@
       "subtitle": "檢查並管理隱含層順序",
       "status": "系統"
     },
+    "guides": {
+      "label": "指南",
+      "subtitle": "每項功能如何運作，以及如何開啟和關閉"
+    },
     "about": {
       "label": "關於",
       "subtitle": "專案資訊、修補說明與支持"
@@ -181,6 +185,11 @@
     "openFailed": "無法開啟瀏覽器。請再試一次。",
     "retryAria": "重試載入 Discord 邀請",
     "loadingStatus": "正在載入 Discord 邀請。"
+  },
+  "patreon": {
+    "title": "成為 Patreon 會員",
+    "join": "在 Patreon 加入 ↗",
+    "openFailed": "無法開啟瀏覽器。請再試一次。"
   },
   "healthCheck": {
     "eyebrow": "系統健康狀態",

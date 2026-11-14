@@ -24,6 +24,10 @@
       "subtitle": "检查和管理隐式层顺序",
       "status": "系统"
     },
+    "guides": {
+      "label": "指南",
+      "subtitle": "每项功能如何运作，以及如何开启和关闭"
+    },
     "about": {
       "label": "关于",
       "subtitle": "项目信息、补丁说明和支持"
@@ -181,6 +185,11 @@
     "openFailed": "无法打开浏览器。请重试。",
     "retryAria": "重试加载 Discord 邀请",
     "loadingStatus": "正在加载 Discord 邀请。"
+  },
+  "patreon": {
+    "title": "成为 Patreon 会员",
+    "join": "在 Patreon 加入 ↗",
+    "openFailed": "无法打开浏览器。请重试。"
   },
   "healthCheck": {
     "eyebrow": "系统运行状况",

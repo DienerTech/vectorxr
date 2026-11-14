@@ -1,5 +1,31 @@
 [
   {
+    "version": "0.20.2",
+    "date": "2026-11-14",
+    "title": "Guides, and Crash Fixes for Virtual Desktop and DLSS 5 Mods",
+    "summary": "A fix release for 0.20.1. A new Guides page explains what each part of VectorXR does, how to turn it on for a game, and how to turn it off again. Games no longer crash when they start VR again after leaving it, as MSFS 2024 did on Virtual Desktop, and games start with Cheeky's Foveated DLSS mod installed.",
+    "items": [
+      {
+        "html": "<strong>Guides</strong>",
+        "items": [
+          "<strong>A new Guides page</strong> in the sidebar has a short guide to each enhancement and the On-Screen Display: what it does, when it helps, how to turn it on for a game, how to check that it's working, and how to turn it off.",
+          "<strong>Start here.</strong> <strong>What is VectorXR?</strong> explains the app and the layer, how VectorXR decides what to apply to a game, and every way to turn it off. A second guide covers online games and anti-cheat.",
+          "<strong>Animated walkthroughs</strong> step through each feature, with optional music that starts muted.",
+          "<strong>Read the guide</strong> on each enhancement's page opens its guide, and <strong>Back</strong> returns to the page.",
+          "<strong>In every app language.</strong>"
+        ]
+      },
+      {
+        "html": "<strong>Fixes</strong>",
+        "items": [
+          "<strong>No crash when a game starts VR again.</strong> A game that left VR and went back in could crash to the desktop, as MSFS 2024 did on Virtual Desktop. This came in with 0.20.1.",
+          "<strong>Games start with Cheeky's Foveated DLSS mod.</strong> Its OpenXR layer asks for functions before the game has started OpenXR, and a game crashed at startup when that layer was above VectorXR.",
+          "<strong>Clearer logs beside DLSS 5 mods.</strong> The log names Cheeky's OpenXR layer and whether it's above or below VectorXR. When it's above, it takes the game's quad-views request for its own quad views, and the Quadviews line in the log now says so."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.20.1",
     "date": "2026-11-08",
     "title": "Depth for Direct3D 11 Games, PimaxXR Fixes, and Duplicate Pivot Profiles",
@@ -9,7 +35,7 @@
         "html": "<strong>Frame Generation</strong>",
         "items": [
           "<strong>Depth for Direct3D 11 games.</strong> Frame Generation can now use the depth that Direct3D 11 games provide, including UEVR titles, for steadier generated frames.",
-        "<strong>Use game depth option.</strong> If a game stutters, hangs or shows depth artifacts with Frame Generation, turn off <strong>Use game depth</strong> in the profile's advanced settings and restart the game. Frame Generation then works without depth.",
+          "<strong>Use game depth option.</strong> If a game stutters, hangs or shows depth artifacts with Frame Generation, turn off <strong>Use game depth</strong> in the profile's advanced settings and restart the game. Frame Generation then works without depth.",
           "<strong>No more stalls on PimaxXR.</strong> With Frame Generation engaged, PimaxXR could hold up the game's own rendering, and the game's frame rate dropped sharply. Frame Generation now works around it.",
           "<strong>Smoother output on PimaxXR 0.4.4 and earlier,</strong> which could skip a refresh when no new frame was ready.",
           "<strong>Frame Generation stays off when OpenXR Toolkit is below VectorXR,</strong> because Toolkit can't handle the extra frames there. The OSD and the OpenXR Layers page now say when this applies; move OpenXR Toolkit above VectorXR there to use both.",

@@ -2366,6 +2366,22 @@ fn installer_language_in(directory: &Path) -> Option<String> {
     valid.then(|| code.to_string())
 }
 
+// A local override for the published community config (community.json), so a
+// build can preview a change, such as the Patreon promotion, before it is
+// published. Lives beside settings.json; absent in normal use.
+#[tauri::command]
+fn load_community_override() -> Result<Option<String>, String> {
+    let path = resolve_config_path().with_file_name("community.override.json");
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= 64 * 1024 => {
+            fs::read_to_string(&path).map(Some).map_err(|error| error.to_string())
+        }
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     let trimmed_url = url.trim();
@@ -4118,6 +4134,7 @@ fn main() {
             load_log_snapshot,
             open_file_directory,
             open_external_url,
+            load_community_override,
             installer_language,
             load_seen_apps,
             clear_seen_apps,

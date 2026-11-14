@@ -1,0 +1,395 @@
+{
+  "title": "Poradniki",
+  "intro": "Krótkie poradniki o tym, co robi każda część VectorXR, kiedy pomaga, jak ją włączyć dla gry i jak ją znowu wyłączyć. Dopiero zaczynasz z VectorXR? Zacznij od pierwszego.",
+  "groups": {
+    "start": "Zacznij tutaj",
+    "enhancements": "Ulepszenia",
+    "tools": "Wyświetlanie i narzędzia"
+  },
+  "badges": {
+    "experimental": "Eksperymentalne"
+  },
+  "back": "Wszystkie poradniki",
+  "backTo": "Wróć do: {page}",
+  "openTab": "Otwórz: {page}",
+  "readGuide": "Przeczytaj poradnik",
+  "headings": {
+    "what": "Co to robi",
+    "when": "Kiedy pomaga",
+    "setup": "Włącz dla gry",
+    "check": "Sprawdź, czy działa",
+    "off": "Wyłącz",
+    "problems": "Jeśli coś wygląda źle"
+  },
+  "diagram": {
+    "game": "Twoja gra",
+    "layer": "Warstwa VectorXR",
+    "runtime": "Środowisko OpenXR",
+    "headset": "Gogle",
+    "app": "Aplikacja VectorXR",
+    "settingsFile": "Zapisane ustawienia",
+    "realFrame": "Klatka gry",
+    "generatedFrame": "Klatka wygenerowana",
+    "refresh": "Odświeżenia gogli",
+    "focus": "Ostro tam, gdzie patrzysz",
+    "periphery": "Mniej detali na brzegach",
+    "before": "Przed",
+    "after": "Po",
+    "headTurn": "Obracasz głowę",
+    "viewTurns": "Widok obraca się dalej",
+    "leftEye": "Lewe oko",
+    "rightEye": "Prawe oko",
+    "depthPlane": "Płaszczyzna głębi",
+    "wait": "Czekanie na środowisko",
+    "render": "Gra renderuje",
+    "osdPanel": "Panel OSD"
+  },
+  "items": {
+    "start": {
+      "title": "Czym jest VectorXR?",
+      "summary": "Czym jest VectorXR, czym jest warstwa OpenXR, jak VectorXR decyduje, co zastosować w grze, i wszystkie sposoby, by go wyłączyć.",
+      "sections": {
+        "what": {
+          "heading": "Czym jest VectorXR",
+          "body": "VectorXR dodaje funkcje do gier VR na PC, które korzystają z OpenXR: ostrzejszy obraz tam, gdzie patrzysz, płynniejszy ruch, lepszy obrót głowy w symulatorach na siedząco i więcej. Ma dwie części. W **aplikacji na komputer** (to okno) wybierasz ustawienia. **Warstwa VectorXR** stosuje je w grze, gdy ta działa.",
+          "points": {
+            "a": "**Zamknięcie tej aplikacji nie wyłącza VectorXR.** Warstwa działa w każdej grze OpenXR i sama czyta zapisane ustawienia. Jak ją wyłączyć, opisuje ostatnia sekcja tego poradnika.",
+            "b": "Żadna zmiana nie działa, dopóki nie klikniesz **Zapisz zmiany** na pasku na dole.",
+            "c": "Wszystko zostaje na Twoim komputerze. Ustawienia są zapisane w %LOCALAPPDATA%\\VectorXR."
+          }
+        },
+        "layer": {
+          "heading": "Czym jest warstwa OpenXR",
+          "body": "OpenXR to standard, za pomocą którego gry VR rozmawiają z oprogramowaniem gogli, czyli **Środowisko uruchomieniowe OpenXR** (SteamVR, Pimax Play, Varjo Base, Virtual Desktop i inne). **Warstwa OpenXR** znajduje się między grą a środowiskiem uruchomieniowym. Przechodzi przez nią każda klatka wysłana przez grę, więc może dopasować widok, dodać klatki albo narysować panel, zanim środowisko pokaże obraz w goglach.",
+          "points": {
+            "a": "Windows ładuje do każdej gry OpenXR warstwy wpisane w rejestrze, w ustalonej kolejności. Strona **Warstwy OpenXR** pokazuje je wszystkie.",
+            "b": "Warstwa zmienia tylko to, co włączyłeś dla danej gry. Gdy wszystkie ulepszenia są wyłączone, klatki przechodzą bez zmian.",
+            "c": "Inne narzędzia, takie jak OpenXR Toolkit, też są warstwami. Dwie warstwy wykonujące to samo zadanie mogą się kłócić, więc używaj tylko jednej z każdego rodzaju."
+          }
+        },
+        "decide": {
+          "heading": "Jak VectorXR decyduje, co zastosować",
+          "body": "Każde ulepszenie sprawdza trzy rzeczy, w tej kolejności:",
+          "steps": {
+            "1": "**VectorXR włączony** w Ustawieniach. Gdy jest wyłączony, nic nie działa w żadnej grze.",
+            "2": "**Profil niestandardowy** dla tej gry. Wygrywa pierwszy włączony profil, który wskazuje grę, nawet gdy profil domyślny jest wyłączony.",
+            "3": "**Profil domyślny**. Działa w grach bez włączonego profilu niestandardowego. Każdy profil domyślny jest na początku wyłączony."
+          }
+        },
+        "firstGame": {
+          "heading": "Skonfiguruj pierwszą grę",
+          "steps": {
+            "1": "Uruchom grę raz z zainstalowanym VectorXR, a potem ją zamknij.",
+            "2": "Otwórz **Rejestr aplikacji**, kliknij **Odśwież** i zarejestruj grę z listy aplikacji, które VectorXR widział.",
+            "3": "Otwórz ulepszenie na pasku bocznym, kliknij **Dodaj profil** i wybierz grę.",
+            "4": "Dostosuj ustawienia i kliknij **Zapisz zmiany**. Niektóre ulepszenia wymagają ponownego uruchomienia gry; ich poradniki mówią które."
+          }
+        },
+        "off": {
+          "heading": "Jak to wyłączyć",
+          "body": "VectorXR można cofnąć na każdym poziomie:",
+          "points": {
+            "a": "**Jedno ulepszenie w jednej grze:** wyłącz profil tej gry na stronie ulepszenia.",
+            "b": "**Jedno ulepszenie wszędzie:** wyłącz jego profil domyślny i profile niestandardowe.",
+            "c": "**Wszystko, na razie:** wyłącz **VectorXR włączony** w Ustawieniach albo w menu ikony w zasobniku. Większość zatrzymuje się od razu. Quadviews i taktowanie Frame Generation zostają do ponownego uruchomienia gry.",
+            "d": "**Wyjmij z łańcucha:** wyłącz warstwę VectorXR na stronie **Warstwy OpenXR**. Gry w ogóle przestają ją ładować.",
+            "e": "**Usuń:** odinstaluj VectorXR w Windows. To usuwa aplikację i wyrejestrowuje warstwę."
+          }
+        }
+      }
+    },
+    "anticheat": {
+      "title": "Gry online i anti-cheat",
+      "summary": "Co warto wiedzieć przed użyciem VectorXR w grach wieloosobowych, takich jak Star Citizen.",
+      "sections": {
+        "what": {
+          "heading": "Na własne ryzyko",
+          "body": "Używanie VectorXR w grach online z systemem anti-cheat, w tym w Star Citizen, odbywa się na własne ryzyko, także dla Twojego konta w grze. Oficjalne wydania są podpisane cyfrowo, a VectorXR działał w testach z Easy Anti-Cheat, ale żaden twórca gier go nie zatwierdził, a zasady anti-cheat mogą się zmienić w każdej chwili, z każdą aktualizacją gry lub VectorXR."
+        },
+        "off": {
+          "body": "Aby całkowicie trzymać VectorXR z dala od jednej gry, nie dawaj jej żadnych profili i zostaw profile domyślne wyłączone. Aby trzymać go z dala od wszystkich gier, wyłącz warstwę VectorXR na stronie **Warstwy OpenXR**."
+        },
+        "problems": {
+          "body": "Zgłaszaj problemy do VectorXR, a nie do twórcy gry, i dołącz plik ZIP z **Eksportuj diagnostykę** na Stronie głównej."
+        }
+      }
+    },
+    "quadviews": {
+      "title": "Quadviews",
+      "summary": "Renderuj pełne detale tylko tam, gdzie patrzysz, a mniej na brzegach, w grach obsługujących quad views.",
+      "sections": {
+        "what": {
+          "body": "Quadviews renderuje każde oko jako dwa obrazy: ostry tam, gdzie patrzysz, i w niższej rozdzielczości dla reszty widoku. Ze śledzeniem wzroku ostry obszar podąża za oczami, bez niego za głową. GPU rysuje znacznie mniej pikseli, więc możesz podnieść jakość lub liczbę klatek w grze."
+        },
+        "when": {
+          "body": "Sama gra musi obsługiwać quad views OpenXR. **DCS** to główny testowany tytuł (Options > VR > Use Quad View). Włączenie Quadviews nie sprawi, że zwykła gra stereo zacznie renderować cztery widoki. To funkcja eksperymentalna dla gier Direct3D 11."
+        },
+        "setup": {
+          "steps": {
+            "1": "W DCS włącz **Use Quad View** (oraz **Use Eye Tracking**, jeśli Twoje gogle to mają).",
+            "2": "Wyłącz innych dostawców quad views: **Native Pimax Quad Views** od Pimax, warstwę Quad-Views-Foveated i OpenXR Toolkit dla DCS.",
+            "3": "Zarejestruj DCS, dodaj dla niego profil Quadviews i kliknij **Zapisz zmiany**.",
+            "4": "Uruchom DCS ponownie."
+          }
+        },
+        "check": {
+          "body": "Ustaw **Skrót w goglach** na stronie i naciśnij go w grze. Widok diagnostyczny obrysowuje ostry obszar i zabarwia mniej szczegółowe brzegi, więc widzisz, gdzie jest, i jak za Tobą podąża. **Jak odczytywać nakładkę** wyjaśnia każdy kolor."
+        },
+        "off": {
+          "body": "Wyłącz profil gry i zapisz. Quadviews działa do ponownego uruchomienia gry."
+        },
+        "problems": {
+          "points": {
+            "a": "**Gra wciąż renderuje stereo:** inna warstwa, często OpenXR Toolkit, jest nad VectorXR. Strona Warstwy OpenXR pokazuje ostrzeżenie.",
+            "b": "**Ostry obszar jest w złym miejscu:** sprawdź ustawienia śledzenia wzroku na stronie i w grze."
+          }
+        }
+      }
+    },
+    "turbo": {
+      "title": "Turbo",
+      "summary": "Nie pozwól, by oczekiwanie na klatki w środowisku hamowało gry, których główny wątek utknął w czekaniu.",
+      "sections": {
+        "what": {
+          "body": "Niektóre gry spędzają część każdej klatki na czekaniu na środowisko uruchomieniowe OpenXR, zamiast pracować nad następną klatką. Turbo zmienia to taktowanie, by gra mogła zacząć wcześniej, co może podnieść liczbę klatek. Bezpieczeństwo Turbo pilnuje problemów i trzyma Turbo wyłączone w konfiguracji, która działa źle."
+        },
+        "when": {
+          "body": "Używaj go tylko w grach, w których test A/B w goglach pokazuje zysk. Jest wrażliwy na zgodność, więc zostaw profil domyślny wyłączony. Nie łącz go z innym narzędziem do taktowania, takim jak Turbo Mode z OpenXR Toolkit, ani z reprojekcją środowiska, jak Motion Smoothing czy ASW. Turbo pozostaje wyłączone, gdy działa Frame Generation."
+        },
+        "setup": {
+          "steps": {
+            "1": "Zarejestruj grę i dodaj dla niej niestandardowy profil Turbo. Zostaw profil domyślny wyłączony.",
+            "2": "Zostaw włączone **Bezpieczeństwo Turbo** i zacznij od **Auto · najpierw stabilność**.",
+            "3": "W sekcji **Przełącznik Turbo w grze** kliknij **Edytuj przypisanie…**, wybierz klawisz lub przycisk, a potem **Zapisz zmiany**.",
+            "4": "W grze porównaj Turbo włączone i wyłączone w tej samej scenie za pomocą przypisania."
+          }
+        },
+        "check": {
+          "body": "**Diagnostyka wydajności** na stronie Turbo porównuje liczbę klatek, czasy klatek i oczekiwanie z Turbo włączonym i wyłączonym. Wyświetlacz ekranowy pokazuje stan Turbo, na przykład **Async** lub **Sequenced**."
+        },
+        "off": {
+          "body": "Naciśnij przypisanie, by wyłączyć je w grze, albo wyłącz profil i zapisz."
+        },
+        "problems": {
+          "body": "Wyłącz Turbo, jeśli widzisz nakładkę oczekiwania, czarne klatki, ciągłe zacinanie lub zepsutą reprojekcję. Jeśli bezpieczeństwo zablokowało konfigurację, jego strona wyjaśnia dlaczego i pozwala zdjąć blokadę i przetestować ponownie."
+        }
+      }
+    },
+    "framegen": {
+      "title": "Frame Generation",
+      "summary": "Dodawaj wygenerowane klatki między klatkami gry, by gogle dostawały nowy obraz przy każdym odświeżeniu.",
+      "sections": {
+        "what": {
+          "body": "Frame Generation mierzy, jak obraz porusza się między klatkami gry, i tworzy nowe klatki pomiędzy nimi. Gra działająca w 45 fps może wypełnić gogle 90 Hz. **Interpolate** (domyślnie) ma najmniej artefaktów, ale dodaje opóźnienie około jednej klatki gry. **Extrapolate** nie dodaje opóźnienia, ale pokazuje więcej artefaktów na krawędziach."
+        },
+        "when": {
+          "body": "Używaj go, gdy gra sama utrzymuje co najmniej połowę częstotliwości odświeżania gogli, na przykład 45 fps przy 90 Hz. Poniżej tego artefakty szybko rosną. To funkcja eksperymentalna, testowana głównie na kartach NVIDIA RTX."
+        },
+        "setup": {
+          "steps": {
+            "1": "Wyłącz wygładzanie środowiska dla gry: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW lub Meta ASW.",
+            "2": "Utrzymuj gogle na pełnej częstotliwości odświeżania. Nie blokuj jej na połowie w środowisku uruchomieniowym.",
+            "3": "Zarejestruj grę, dodaj dla niej profil Frame Generation, zostaw ustawienia domyślne i kliknij **Zapisz zmiany**. Na karcie NVIDIA RTX wypróbuj **Sprzęt NVIDIA** jako źródło ruchu.",
+            "4": "Uruchom grę ponownie. Włączenie Frame Generation działa od następnego uruchomienia."
+          }
+        },
+        "check": {
+          "body": "Przy włączonym wyświetlaczu ekranowym obok liczby klatek pojawia się **FG WŁ.**. Lista **Sterowanie w goglach** na stronie pokazuje stan każdej działającej gry, a **Zabarwienie generowanych klatek** oznacza wygenerowane klatki."
+        },
+        "off": {
+          "body": "Wyłącz profil gry i zapisz. Wygenerowane klatki znikają od razu, a klatki przechodzą bez zmian. Opcjonalne przypisanie **Przełącznik A/B** wyłącza je i włącza w grze."
+        },
+        "problems": {
+          "points": {
+            "a": "**Falujące krawędzie lub smużenie:** wypróbuj Interpolate albo Sprzęt NVIDIA jako źródło ruchu.",
+            "b": "**FG GOTOWY:** gra już utrzymuje częstotliwość odświeżania albo środowisko trzyma klatki na połowie częstotliwości.",
+            "c": "**FG N/D:** obrazów tej gry nie da się użyć. OSD i strona podają powód."
+          }
+        }
+      }
+    },
+    "pivot": {
+      "title": "Pivot",
+      "summary": "Obracaj widok dalej, niż obraca się szyja, w VR na siedząco i w symulatorach lotu.",
+      "sections": {
+        "what": {
+          "body": "Pivot dodaje dodatkowy obrót, gdy obracasz głowę, więc niewielki ruch wystarczy, by spojrzeć przez ramię. **Wzmocniony ruch** mnoży obroty głowy, płynnie lub skokowo. **Widoki skokowe** przeskakują do stałych widoków wybieranych przypisaniami. Wychylenie ciała nadal przesuwa Cię 1:1."
+        },
+        "when": {
+          "body": "Jest stworzony do gier na siedząco, takich jak symulatory lotu i wyścigów, w których trzeba spojrzeć za siebie bez wykręcania się w fotelu."
+        },
+        "setup": {
+          "steps": {
+            "1": "Zarejestruj grę i dodaj dla niej profil Pivot.",
+            "2": "Wybierz **Wzmocniony ruch** i tryb aktywacji. **Zawsze aktywny** nie wymaga przypisania. **Przełączanie** i **Przytrzymanie** wymagają klawisza lub przycisku.",
+            "3": "Przypisz **Ustaw punkt zerowy** do tego samego wejścia co centrowanie w grze, aby oba zgadzały się co do Twojej pozycji.",
+            "4": "Kliknij **Zapisz zmiany**, a potem dostrój mnożnik i martwą strefę dla każdej osi."
+          }
+        },
+        "check": {
+          "body": "Wiersz Pivot na wyświetlaczu ekranowym zaczyna się od **Ruch:** i pokazuje **Aktywne**, gdy Pivot obraca widok."
+        },
+        "off": {
+          "body": "Użyj przypisania aktywacji, by zawiesić go w grze, albo wyłącz profil i zapisz."
+        },
+        "problems": {
+          "body": "Jeśli widok ucieka od środka, naciśnij ponownie Ustaw punkt zerowy po wycentrowaniu gry lub zmianie pozycji. Jeśli efekt jest za silny, zwiększ martwą strefę, by zwykłe spoglądanie na przyrządy zostało 1:1."
+        }
+      }
+    },
+    "depth": {
+      "title": "Głębia",
+      "summary": "Dostrój głębię stereo i skalę świata obrazu 3D.",
+      "sections": {
+        "what": {
+          "body": "Głębia zmienia rozstaw wirtualnych oczu i miejsce, w którym oba obrazy się pokrywają. **Głębia stereo / Skala świata** sprawia, że świat wydaje się większy lub bardziej zwarty. **Zbieżność / Płaszczyzna głębi** ustala odległość, przy której oczy są najbardziej rozluźnione. **Depth Lock** nie pozwala środowisku cofnąć Twoich ustawień."
+        },
+        "when": {
+          "body": "Używaj jej, gdy kokpit wydaje się miniaturowy lub za duży albo efekt 3D jest za słaby lub za silny. Każda gra może wymagać własnego ustawienia."
+        },
+        "setup": {
+          "steps": {
+            "1": "Wyłącz w grze jej własne ustawienie IPD lub skali świata (w DCS **Force IPD Distance**) i uruchom grę ponownie.",
+            "2": "Zarejestruj grę i dodaj dla niej profil Głębi. Zacznij od zbieżności równej 0.",
+            "3": "Przesuwaj głębię stereo, aż skala będzie właściwa, a potem dostrój zbieżność małymi krokami.",
+            "4": "Kliknij **Zapisz zmiany** po każdej zmianie, którą chcesz zachować."
+          }
+        },
+        "check": {
+          "body": "Przypisz **Przełącznik A/B Głębi**, by wyłączać i włączać Głębię w goglach i porównywać. **Mapa par głębi** na stronie pokazuje, w której kombinacji jesteś."
+        },
+        "off": {
+          "body": "Naciśnij przypisanie Przełącznika A/B Głębi albo wyłącz profil i zapisz."
+        },
+        "problems": {
+          "body": "Jeśli Głębia zdaje się nic nie robić, nadpisuje ją ustawienie IPD lub skali w samej grze. Otwórz **Rozwiązywanie problemów z głębią** na stronie. Jeśli coś jest niekomfortowe, wróć w stronę 0."
+        }
+      }
+    },
+    "osd": {
+      "title": "Wyświetlacz ekranowy",
+      "summary": "Panel w goglach z liczbą klatek, czasami klatek i tym, co robi VectorXR.",
+      "sections": {
+        "what": {
+          "body": "Wyświetlacz ekranowy (OSD) to mały panel, który podąża za głową. Pokazuje liczbę klatek i czasy klatek gry oraz stan Turbo, Frame Generation, Pivot i pozostałych ulepszeń. Ma układ **Kompaktowy** i **Rozszerzony**."
+        },
+        "setup": {
+          "steps": {
+            "1": "Otwórz **Wyświetlacz ekranowy** i włącz go.",
+            "2": "Wybierz ustawienie: **Rozszerzony**, **Wydajność** lub **Minimalny**.",
+            "3": "Przeciągnij panel w podglądzie, by go ustawić, wybierz, co pokazuje, i kliknij **Zapisz zmiany**.",
+            "4": "W grze **Ctrl+Alt+F10** pokazuje lub ukrywa panel, a **Ctrl+Alt+F11** przełącza układ."
+          }
+        },
+        "off": {
+          "body": "Wyłącz OSD na jego stronie i zapisz albo ukryj go na czas sesji jego przypisaniem."
+        }
+      }
+    }
+  },
+  "walkthrough": {
+    "play": "Odtwórz",
+    "pause": "Pauza",
+    "replay": "Jeszcze raz",
+    "back": "Wstecz",
+    "next": "Dalej",
+    "mute": "Wycisz muzykę",
+    "unmute": "Włącz muzykę",
+    "volume": "Głośność muzyki",
+    "stepOf": "Krok {current} z {total}",
+    "labels": {
+      "stillRunning": "Wciąż działa",
+      "passThrough": "Klatki przechodzą bez zmian",
+      "appClosed": "Aplikacja zamknięta",
+      "inTheApp": "W aplikacji",
+      "whereYouLook": "Gdzie patrzysz",
+      "pixelsDrawn": "Rysowane piksele",
+      "turboOff": "Bez Turbo",
+      "turboOn": "Z Turbo",
+      "heldOff": "Bezpieczeństwo Turbo: wstrzymane dla tej konfiguracji",
+      "motion": "Ruch między dwiema klatkami gry",
+      "interpolate": "Najczyściej, ok. 1 klatkę później",
+      "extrapolate": "Bez opóźnienia, więcej artefaktów na krawędziach",
+      "neck": "Tu kończy się zakres szyi",
+      "deadzone": "W martwej strefie: 1:1",
+      "biggerWorld": "Oczy bliżej: większy świat",
+      "compactWorld": "Oczy dalej: bardziej zwarty świat",
+      "frames_one": "{count} klatka",
+      "frames_few": "{count} klatki",
+      "frames_many": "{count} klatek",
+      "frames_other": "{count} klatki"
+    }
+  },
+  "walkthroughs": {
+    "start": {
+      "title": "Obejrzyj: jak działa VectorXR",
+      "steps": {
+        "1": "Twoja gra rysuje klatki i wysyła je do gogli wiele razy na sekundę.",
+        "2": "Pomiędzy nimi działa oprogramowanie gogli, środowisko uruchomieniowe OpenXR: SteamVR, Pimax Play, Varjo Base, Virtual Desktop i inne.",
+        "3": "VectorXR to warstwa OpenXR. Windows ładuje ją do każdej gry OpenXR, między grę a środowisko uruchomieniowe, aby mogła ulepszać każdą przechodzącą klatkę.",
+        "4": "Ta aplikacja tylko edytuje ustawienia. Gdy klikniesz Zapisz zmiany, trafiają one do pliku, a warstwa czyta je stamtąd.",
+        "5": "Zamknięcie tej aplikacji nie wyłącza VectorXR. Warstwa jest częścią działającej gry i dalej pracuje z zapisanymi ustawieniami.",
+        "6": "Aby ją wyłączyć, wyłącz VectorXR włączony w Ustawieniach lub w menu zasobnika, a klatki przejdą bez zmian. Aby całkiem usunąć ją z gier, wyłącz ją na stronie Warstwy OpenXR."
+      }
+    },
+    "quadviews": {
+      "title": "Obejrzyj: jak działa Quadviews",
+      "steps": {
+        "1": "Gogle pokazują szeroki widok, ale oczy widzą ostro tylko w małym miejscu naraz.",
+        "2": "Quadviews renderuje mały ostry obraz tam, gdzie patrzysz, a resztę widoku w niższej rozdzielczości.",
+        "3": "Ze śledzeniem wzroku ostry obszar podąża za oczami. Bez niego podąża za głową.",
+        "4": "GPU rysuje znacznie mniej pikseli, które możesz przeznaczyć na jakość lub liczbę klatek w grze.",
+        "5": "W DCS włącz Use Quad View, dodaj dla niego profil Quadviews, zapisz i uruchom grę ponownie."
+      }
+    },
+    "turbo": {
+      "title": "Obejrzyj: jak działa Turbo",
+      "steps": {
+        "1": "W każdej klatce niektóre gry czekają na środowisko uruchomieniowe OpenXR, zanim zaczną następną.",
+        "2": "Turbo zmienia to taktowanie, żeby gra zaczynała wcześniej i w tym samym czasie mieściło się więcej klatek.",
+        "3": "Bezpieczeństwo Turbo pilnuje problemów i trzyma Turbo wyłączone w konfiguracji, która działa źle.",
+        "4": "Przypisz przełącznik Turbo w grze i porównaj Turbo włączone i wyłączone w tej samej scenie. Zostaw je tylko tam, gdzie pomaga.",
+        "5": "Na stronie Turbo dodaj niestandardowy profil dla gry, zostaw włączone Bezpieczeństwo Turbo i zapisz."
+      }
+    },
+    "framegen": {
+      "title": "Obejrzyj: jak działa Frame Generation",
+      "steps": {
+        "1": "Twoja gra renderuje 45 klatek na sekundę, a gogle 90 Hz odświeżają obraz 90 razy.",
+        "2": "Frame Generation mierzy, jak obraz porusza się między klatkami gry.",
+        "3": "Tworzy nową klatkę na każde odświeżenie pomiędzy nimi, więc ruch wygląda płynnie.",
+        "4": "Interpolate ma najmniej artefaktów, ale pokazuje każdą klatkę gry mniej więcej klatkę później. Extrapolate nie dodaje opóźnienia, ale pokazuje więcej artefaktów na krawędziach.",
+        "5": "Wyłącz wygładzanie środowiska, dodaj profil dla gry, zapisz i uruchom ją ponownie. Wtedy obok liczby klatek w OSD pojawi się FG WŁ."
+      }
+    },
+    "pivot": {
+      "title": "Obejrzyj: jak działa Pivot",
+      "steps": {
+        "1": "W symulatorze na siedząco spojrzenie za siebie oznacza wykręcenie szyi do granic.",
+        "2": "Pivot dodaje dodatkowy obrót przy obracaniu głowy, więc mały ruch sięga wzrokiem dużo dalej.",
+        "3": "W martwej strefie widok podąża za głową 1:1, więc spoglądanie na przyrządy jest naturalne.",
+        "4": "Widoki skokowe przeskakują przyciskiem do wybranych stałych widoków. Wychylenie ciała nadal przesuwa Cię 1:1.",
+        "5": "Dodaj profil Pivot, wybierz tryb aktywacji i przypisz Ustaw punkt zerowy do tego samego wejścia co centrowanie w grze."
+      }
+    },
+    "depth": {
+      "title": "Obejrzyj: jak działa Głębia",
+      "steps": {
+        "1": "Twoje oczy widzą świat z nieco różnych miejsc. To dlatego wygląda trójwymiarowo.",
+        "2": "Głębia stereo zmienia rozstaw wirtualnych oczu, więc świat wydaje się większy lub bardziej zwarty.",
+        "3": "Zbieżność ustala odległość, w której oba obrazy się pokrywają: tę, przy której oczy są najbardziej rozluźnione.",
+        "4": "Wyłącz w grze jej własne ustawienie IPD, dodaj profil Głębi i porównaj Przełącznikiem A/B Głębi."
+      }
+    },
+    "osd": {
+      "title": "Obejrzyj: jak działa wyświetlacz ekranowy",
+      "steps": {
+        "1": "Wyświetlacz ekranowy to mały panel w goglach, który podąża za głową.",
+        "2": "Pokazuje liczbę klatek, czasy klatek oraz to, co robią Turbo, Frame Generation i Pivot.",
+        "3": "Wybierz ustawienie i przeciągnij panel w podglądzie tam, gdzie ma być.",
+        "4": "W grze Ctrl+Alt+F10 pokazuje lub ukrywa panel, a Ctrl+Alt+F11 przełącza układ.",
+        "5": "Na stronie Wyświetlacz ekranowy włącz go, wybierz ustawienie i zapisz."
+      }
+    }
+  }
+}

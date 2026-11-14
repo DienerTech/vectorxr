@@ -25,6 +25,10 @@
       "subtitle": "Inspecciona y administra el orden de las capas implícitas",
       "status": "Sistema"
     },
+    "guides": {
+      "label": "Guías",
+      "subtitle": "Cómo funciona cada función y cómo activarla y desactivarla"
+    },
     "about": {
       "label": "Acerca de",
       "subtitle": "Información del proyecto, notas de la versión y soporte"
@@ -185,6 +189,11 @@
     "openFailed": "No se pudo abrir el navegador. Inténtalo de nuevo.",
     "retryAria": "Reintentar la carga de la invitación de Discord",
     "loadingStatus": "Cargando la invitación de Discord."
+  },
+  "patreon": {
+    "title": "Hazte miembro en Patreon",
+    "join": "Unirse en Patreon ↗",
+    "openFailed": "No se pudo abrir el navegador. Inténtalo de nuevo."
   },
   "healthCheck": {
     "eyebrow": "Estado del sistema",

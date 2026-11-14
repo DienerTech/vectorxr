@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import GuideLink from '../GuideLink.vue'
 
 import { t } from '../../i18n/index.ts'
 import { loadRuntimeStatus, type RuntimeStatusSession } from '../../lib/commands'
@@ -179,6 +180,7 @@ function settingsSummary(settings: FrameGenSettings) {
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
             {{ t('framegen.intro') }}
           </p>
+          <GuideLink guide="framegen" class="mt-2" />
         </div>
         <button
           class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"

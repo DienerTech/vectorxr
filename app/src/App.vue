@@ -14,6 +14,7 @@ import CoreTab from './components/tabs/CoreTab.vue'
 import OsdTab from './components/tabs/OsdTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import FrameGenTab from './components/tabs/FrameGenTab.vue'
+import GuidesTab from './components/tabs/GuidesTab.vue'
 import HomeTab from './components/tabs/HomeTab.vue'
 import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
@@ -159,6 +160,12 @@ const tabs = computed(() => [
     label: t('app.tabs.layers.label'),
     subtitle: t('app.tabs.layers.subtitle'),
     status: t('app.tabs.layers.status'),
+  },
+  {
+    id: 'guides' as const,
+    label: t('app.tabs.guides.label'),
+    subtitle: t('app.tabs.guides.subtitle'),
+    status: '',
   },
   {
     id: 'about' as const,
@@ -607,6 +614,7 @@ async function confirmResetConfig() {
           @snapshot-updated="openXrLayerSnapshot = $event; refreshOpenXrLayers(true)"
           @status="store.state.status = $event"
         />
+        <GuidesTab v-else-if="store.state.activeTab === 'guides'" @navigate="store.setActiveTab" />
         <AboutTab
           v-else-if="store.state.activeTab === 'about'"
           :latest-patch="latestPatch"

@@ -1,0 +1,393 @@
+{
+  "title": "Guías",
+  "intro": "Guías breves sobre qué hace cada parte de VectorXR, cuándo ayuda, cómo activarla para un juego y cómo volver a desactivarla. ¿Es tu primera vez con VectorXR? Empieza por la primera.",
+  "groups": {
+    "start": "Empieza aquí",
+    "enhancements": "Mejoras",
+    "tools": "Pantalla y herramientas"
+  },
+  "badges": {
+    "experimental": "Experimental"
+  },
+  "back": "Todas las guías",
+  "backTo": "Volver a {page}",
+  "openTab": "Abrir {page}",
+  "readGuide": "Leer la guía",
+  "headings": {
+    "what": "Qué hace",
+    "when": "Cuándo ayuda",
+    "setup": "Activarlo para un juego",
+    "check": "Comprobar que funciona",
+    "off": "Desactivarlo",
+    "problems": "Si algo se ve mal"
+  },
+  "diagram": {
+    "game": "Tu juego",
+    "layer": "Capa de VectorXR",
+    "runtime": "Entorno OpenXR",
+    "headset": "Visor",
+    "app": "App de VectorXR",
+    "settingsFile": "Ajustes guardados",
+    "realFrame": "Fotograma del juego",
+    "generatedFrame": "Fotograma generado",
+    "refresh": "Refrescos del visor",
+    "focus": "Nítido donde miras",
+    "periphery": "Menos detalle en los bordes",
+    "before": "Antes",
+    "after": "Después",
+    "headTurn": "Tu cabeza gira",
+    "viewTurns": "La vista gira más",
+    "leftEye": "Ojo izquierdo",
+    "rightEye": "Ojo derecho",
+    "depthPlane": "Plano de profundidad",
+    "wait": "Esperando al entorno",
+    "render": "El juego renderiza",
+    "osdPanel": "Panel OSD"
+  },
+  "items": {
+    "start": {
+      "title": "¿Qué es VectorXR?",
+      "summary": "Qué es VectorXR, qué es una capa OpenXR, cómo decide qué aplicar a un juego y todas las formas de desactivarlo.",
+      "sections": {
+        "what": {
+          "heading": "Qué es VectorXR",
+          "body": "VectorXR añade funciones a los juegos de realidad virtual para PC que usan OpenXR: más nitidez donde miras, movimiento más fluido, mejor giro de cabeza en simuladores sentado y más. Tiene dos partes. La **app de escritorio** (esta ventana) es donde eliges los ajustes. La **capa de VectorXR** los aplica dentro del juego mientras se ejecuta.",
+          "points": {
+            "a": "**Cerrar esta app no desactiva VectorXR.** La capa funciona dentro de cada juego OpenXR y lee tus ajustes guardados por sí sola. Para desactivarlo, consulta la última sección de esta guía.",
+            "b": "Nada de lo que cambies aquí surte efecto hasta que pulses **Guardar cambios** en la barra inferior.",
+            "c": "Todo se queda en tu PC. Los ajustes se guardan en %LOCALAPPDATA%\\VectorXR."
+          }
+        },
+        "layer": {
+          "heading": "Qué es una capa OpenXR",
+          "body": "OpenXR es el estándar que usan los juegos de realidad virtual para comunicarse con el software del visor, llamado **entorno de ejecución OpenXR** (SteamVR, Pimax Play, Varjo Base, Virtual Desktop y otros). Una **capa OpenXR** se sitúa entre el juego y el entorno de ejecución. Cada fotograma que envía el juego pasa por ella, así que puede ajustar la vista, añadir fotogramas o dibujar un panel antes de que el entorno muestre la imagen en el visor.",
+          "points": {
+            "a": "Windows carga en cada juego OpenXR las capas que figuran en el registro, en un orden fijo. La página **Capas OpenXR** las muestra todas.",
+            "b": "Una capa solo cambia lo que hayas activado para ese juego. Con todas las mejoras desactivadas, los fotogramas pasan sin cambios.",
+            "c": "Otras herramientas, como OpenXR Toolkit, también son capas. Dos capas que hacen lo mismo pueden entrar en conflicto, así que usa solo una de cada tipo."
+          }
+        },
+        "decide": {
+          "heading": "Cómo decide VectorXR qué aplicar",
+          "body": "Cada mejora comprueba tres cosas, en este orden:",
+          "steps": {
+            "1": "**VectorXR activado** en Configuración. Si está desactivado, no se aplica nada en ningún juego.",
+            "2": "Un **perfil personalizado** para este juego. Gana el primero activado que nombre el juego, aunque el perfil predeterminado esté desactivado.",
+            "3": "El **perfil predeterminado**. Se aplica a los juegos sin un perfil personalizado activado. Todos los perfiles predeterminados empiezan desactivados."
+          }
+        },
+        "firstGame": {
+          "heading": "Configura tu primer juego",
+          "steps": {
+            "1": "Inicia el juego una vez con VectorXR instalado y ciérralo.",
+            "2": "Abre **Registro de aplicaciones**, pulsa **Actualizar** y registra el juego desde la lista de apps que VectorXR ha visto.",
+            "3": "Abre una mejora en la barra lateral, pulsa **Añadir perfil** y elige el juego.",
+            "4": "Ajusta los valores y pulsa **Guardar cambios**. Algunas mejoras necesitan reiniciar el juego; sus guías indican cuáles."
+          }
+        },
+        "off": {
+          "heading": "Cómo desactivarlo",
+          "body": "VectorXR se puede deshacer en cada nivel:",
+          "points": {
+            "a": "**Una mejora en un juego:** desactiva el perfil de ese juego en la página de la mejora.",
+            "b": "**Una mejora en todas partes:** desactiva su perfil predeterminado y sus perfiles personalizados.",
+            "c": "**Todo, por ahora:** desactiva **VectorXR activado** en Configuración o en el menú del icono de la bandeja. Casi todo se detiene al momento. Quadviews y el ritmo de Frame Generation siguen hasta que el juego se reinicia.",
+            "d": "**Sacarlo de la cadena:** desactiva la capa de VectorXR en la página **Capas OpenXR**. Los juegos dejan de cargarla.",
+            "e": "**Quitarlo:** desinstala VectorXR desde Windows. Eso elimina la app y anula el registro de la capa."
+          }
+        }
+      }
+    },
+    "anticheat": {
+      "title": "Juegos en línea y antitrampas",
+      "summary": "Lo que debes saber antes de usar VectorXR en juegos multijugador como Star Citizen.",
+      "sections": {
+        "what": {
+          "heading": "Bajo tu responsabilidad",
+          "body": "Usar VectorXR en juegos en línea con antitrampas, incluido Star Citizen, es bajo tu propia responsabilidad, también para tu cuenta del juego. Las versiones oficiales están firmadas y VectorXR ha funcionado con Easy Anti-Cheat en pruebas, pero ningún desarrollador de juegos lo ha avalado, y las reglas antitrampas pueden cambiar en cualquier momento con cualquier actualización del juego o de VectorXR."
+        },
+        "off": {
+          "body": "Para mantener VectorXR totalmente fuera de un juego, no le asignes perfiles y deja desactivados los perfiles predeterminados. Para mantenerlo fuera de todos los juegos, desactiva la capa de VectorXR en la página **Capas OpenXR**."
+        },
+        "problems": {
+          "body": "Informa de los problemas a VectorXR y no al desarrollador del juego, y adjunta el ZIP de **Exportar depuración** en Inicio."
+        }
+      }
+    },
+    "quadviews": {
+      "title": "Quadviews",
+      "summary": "Renderiza todo el detalle solo donde miras, y menos en los bordes, en juegos compatibles con quad views.",
+      "sections": {
+        "what": {
+          "body": "Quadviews renderiza cada ojo como dos imágenes: una nítida donde miras y otra de menor resolución para el resto de la vista. Con seguimiento ocular, la zona nítida sigue tus ojos; sin él, sigue tu cabeza. La GPU dibuja muchos menos píxeles, así que puedes subir la calidad o los fotogramas del juego."
+        },
+        "when": {
+          "body": "El propio juego debe admitir quad views de OpenXR. **DCS** es el principal título probado (Options > VR > Use Quad View). Activar Quadviews no hace que un juego estéreo normal renderice cuatro vistas. Es experimental y para juegos Direct3D 11."
+        },
+        "setup": {
+          "steps": {
+            "1": "En DCS, activa **Use Quad View** (y **Use Eye Tracking** si tu visor lo tiene).",
+            "2": "Desactiva los demás proveedores de quad views: **Native Pimax Quad Views** de Pimax, la capa Quad-Views-Foveated y OpenXR Toolkit para DCS.",
+            "3": "Registra DCS, añade un perfil de Quadviews para él y pulsa **Guardar cambios**.",
+            "4": "Reinicia DCS."
+          }
+        },
+        "check": {
+          "body": "Asigna el **Atajo en el visor** en la página y púlsalo en el juego. La vista de diagnóstico marca el contorno de la zona nítida y tiñe los bordes de menor detalle, para que veas dónde está y cómo te sigue. **Cómo interpretar la superposición** explica cada color."
+        },
+        "off": {
+          "body": "Desactiva el perfil del juego y guarda. Quadviews sigue activo hasta que el juego se reinicia."
+        },
+        "problems": {
+          "points": {
+            "a": "**El juego sigue renderizando en estéreo:** otra capa, a menudo OpenXR Toolkit, está por encima de VectorXR. La página Capas OpenXR muestra un aviso.",
+            "b": "**La zona nítida está en el lugar equivocado:** revisa los ajustes de seguimiento ocular en la página y en el juego."
+          }
+        }
+      }
+    },
+    "turbo": {
+      "title": "Turbo",
+      "summary": "Evita que las esperas de fotograma del entorno frenen juegos cuyo hilo principal se queda esperando.",
+      "sections": {
+        "what": {
+          "body": "Algunos juegos pasan parte de cada fotograma esperando al entorno de ejecución OpenXR en vez de trabajar en el siguiente. Turbo cambia ese ritmo para que el juego empiece antes, lo que puede subir sus fotogramas por segundo. La seguridad de Turbo vigila los problemas y mantiene Turbo desactivado en una configuración que falla."
+        },
+        "when": {
+          "body": "Úsalo solo en juegos donde una prueba A/B en el visor muestre una mejora. Es sensible a la compatibilidad, así que deja el perfil predeterminado desactivado. No lo combines con otra herramienta de ritmo como el Turbo Mode de OpenXR Toolkit, ni con la reproyección del entorno como Motion Smoothing o ASW. Turbo se queda desactivado mientras funciona Frame Generation."
+        },
+        "setup": {
+          "steps": {
+            "1": "Registra el juego y añade un perfil personalizado de Turbo para él. Deja el perfil predeterminado desactivado.",
+            "2": "Mantén activada la **Seguridad de Turbo** y empieza con **Automático · prioridad a la estabilidad**.",
+            "3": "En **Conmutador de Turbo en el juego**, pulsa **Editar asignación…**, elige una tecla o un botón y luego **Guardar cambios**.",
+            "4": "En el juego, compara Turbo activado y desactivado en la misma escena con tu asignación."
+          }
+        },
+        "check": {
+          "body": "El **Diagnóstico de rendimiento** de la página de Turbo compara fotogramas por segundo, tiempos de fotograma y esperas con Turbo activado y desactivado. La información en pantalla muestra el estado de Turbo, como **Async** o **Sequenced**."
+        },
+        "off": {
+          "body": "Pulsa tu asignación para desactivarlo en el juego, o desactiva el perfil y guarda."
+        },
+        "problems": {
+          "body": "Desactiva Turbo si ves una superposición de espera, fotogramas negros, tirones constantes o reproyección rota. Si la seguridad bloqueó una configuración, su página explica el motivo y te deja quitar el bloqueo y volver a probar."
+        }
+      }
+    },
+    "framegen": {
+      "title": "Frame Generation",
+      "summary": "Añade fotogramas generados entre los del juego para que el visor reciba una imagen nueva en cada refresco.",
+      "sections": {
+        "what": {
+          "body": "Frame Generation mide cómo se mueve la imagen entre los fotogramas del juego y crea fotogramas nuevos entre ellos. Un juego a 45 fps puede llenar un visor de 90 Hz. **Interpolate** (el predeterminado) tiene menos artefactos pero añade un fotograma de juego de retraso, aproximadamente. **Extrapolate** no añade retraso pero muestra más artefactos en los bordes."
+        },
+        "when": {
+          "body": "Úsalo cuando el juego mantenga por sí solo al menos la mitad de la frecuencia del visor, como 45 fps a 90 Hz. Por debajo, los artefactos crecen rápido. Es experimental y se ha probado sobre todo en GPU NVIDIA RTX."
+        },
+        "setup": {
+          "steps": {
+            "1": "Desactiva el suavizado del entorno para el juego: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW o Meta ASW.",
+            "2": "Mantén el visor a su frecuencia completa. No lo limites a la mitad en el entorno de ejecución.",
+            "3": "Registra el juego, añade un perfil de Frame Generation para él, conserva los ajustes predeterminados y pulsa **Guardar cambios**. Con una GPU NVIDIA RTX, prueba **Hardware de NVIDIA** como fuente de movimiento.",
+            "4": "Reinicia el juego. Activar Frame Generation surte efecto en el siguiente inicio."
+          }
+        },
+        "check": {
+          "body": "Con la información en pantalla activada, aparece **FG ACTIVO** junto a los fotogramas por segundo. La lista **Controles en el visor** de la página muestra el estado de cada juego en marcha, y **Tinte de fotogramas generados** marca los fotogramas generados."
+        },
+        "off": {
+          "body": "Desactiva el perfil del juego y guarda. Los fotogramas generados se detienen al momento y los fotogramas pasan sin cambios. La asignación opcional **Conmutador A/B** los desactiva y activa en el juego."
+        },
+        "problems": {
+          "points": {
+            "a": "**Bordes ondulantes o manchas:** prueba Interpolate, o Hardware de NVIDIA como fuente de movimiento.",
+            "b": "**FG LISTO:** el juego ya mantiene la frecuencia, o el entorno está limitando los fotogramas a la mitad.",
+            "c": "**FG N/D:** las imágenes de este juego no se pueden usar. El OSD y la página indican el motivo."
+          }
+        }
+      }
+    },
+    "pivot": {
+      "title": "Pivot",
+      "summary": "Gira la vista más de lo que gira tu cuello, para realidad virtual sentado y simuladores de vuelo.",
+      "sections": {
+        "what": {
+          "body": "Pivot añade giro extra cuando giras la cabeza, así que un giro pequeño basta para mirar por encima del hombro. **Movimiento mejorado** multiplica tus giros de cabeza, de forma continua o por pasos. **Vistas fijas** saltan a vistas que eliges con asignaciones. Inclinarte te sigue moviendo 1:1."
+        },
+        "when": {
+          "body": "Está pensado para juegos sentado, como simuladores de vuelo y de carreras, donde necesitas mirar atrás sin retorcerte en el asiento."
+        },
+        "setup": {
+          "steps": {
+            "1": "Registra el juego y añade un perfil de Pivot para él.",
+            "2": "Elige **Movimiento mejorado** y un modo de activación. **Siempre activo** no necesita asignación. **Alternar** y **Mantener** necesitan una tecla o un botón.",
+            "3": "Asigna **Fijar origen** a la misma entrada que el recentrado del juego, para que ambos coincidan en dónde estás sentado.",
+            "4": "Pulsa **Guardar cambios** y ajusta el multiplicador y la zona muerta de cada eje."
+          }
+        },
+        "check": {
+          "body": "La fila de Pivot de la información en pantalla empieza por **Movimiento:** y muestra **Activo** mientras Pivot gira la vista."
+        },
+        "off": {
+          "body": "Usa tu asignación de activación para suspenderlo en el juego, o desactiva el perfil y guarda."
+        },
+        "problems": {
+          "body": "Si la vista se descentra, vuelve a pulsar Fijar origen después de recentrar el juego o cambiar de postura. Si se nota demasiado fuerte, sube la zona muerta para que mirar los paneles siga siendo 1:1."
+        }
+      }
+    },
+    "depth": {
+      "title": "Profundidad",
+      "summary": "Ajusta la profundidad estéreo y la escala del mundo de la imagen 3D.",
+      "sections": {
+        "what": {
+          "body": "Profundidad cambia la separación de tus ojos virtuales y dónde coinciden las dos imágenes. **Profundidad estéreo / Escala del mundo** hace que el mundo parezca más grande o más compacto. **Convergencia / Plano de profundidad** fija la distancia que resulta más relajada. **Depth Lock** evita que el entorno deshaga tu ajuste."
+        },
+        "when": {
+          "body": "Úsalo cuando una cabina parezca diminuta o enorme, o el efecto 3D se note demasiado débil o demasiado fuerte. Cada juego puede necesitar su propio ajuste."
+        },
+        "setup": {
+          "steps": {
+            "1": "Desactiva el ajuste de IPD o de escala del propio juego (en DCS, **Force IPD Distance**) y reinicia el juego.",
+            "2": "Registra el juego y añade un perfil de Profundidad para él. Empieza con la convergencia en 0.",
+            "3": "Mueve la profundidad estéreo hasta que la escala sea la adecuada y luego ajusta la convergencia en pasos pequeños.",
+            "4": "Pulsa **Guardar cambios** después de cada cambio que quieras conservar."
+          }
+        },
+        "check": {
+          "body": "Asigna el **Conmutador A/B de Profundidad** para activar y desactivar Profundidad en el visor y comparar. El **Mapa de combinación de profundidad** de la página muestra en qué combinación estás."
+        },
+        "off": {
+          "body": "Pulsa tu asignación del Conmutador A/B de Profundidad, o desactiva el perfil y guarda."
+        },
+        "problems": {
+          "body": "Si Profundidad parece no hacer nada, el ajuste de IPD o de escala del juego lo está anulando. Abre **Solución de problemas de profundidad** en la página. Si algo resulta incómodo, vuelve hacia 0."
+        }
+      }
+    },
+    "osd": {
+      "title": "Información en pantalla",
+      "summary": "Un panel en el visor con los fotogramas por segundo, los tiempos de fotograma y lo que está haciendo VectorXR.",
+      "sections": {
+        "what": {
+          "body": "La información en pantalla (OSD) es un pequeño panel que sigue tu cabeza. Muestra los fotogramas por segundo y los tiempos de fotograma del juego, y el estado de Turbo, Frame Generation, Pivot y las demás mejoras. Tiene un diseño **Compacto** y otro **Ampliado**."
+        },
+        "setup": {
+          "steps": {
+            "1": "Abre **Información en pantalla** y actívala.",
+            "2": "Elige un preajuste: **Ampliado**, **Rendimiento** o **Mínimo**.",
+            "3": "Arrastra el panel en la vista previa para colocarlo, elige qué muestra y pulsa **Guardar cambios**.",
+            "4": "En el juego, **Ctrl+Alt+F10** lo muestra u oculta y **Ctrl+Alt+F11** cambia de diseño."
+          }
+        },
+        "off": {
+          "body": "Desactiva el OSD en su página y guarda, u ocúltalo durante la sesión con su asignación."
+        }
+      }
+    }
+  },
+  "walkthrough": {
+    "play": "Reproducir",
+    "pause": "Pausa",
+    "replay": "Repetir",
+    "back": "Atrás",
+    "next": "Siguiente",
+    "mute": "Silenciar la música",
+    "unmute": "Activar la música",
+    "volume": "Volumen de la música",
+    "stepOf": "Paso {current} de {total}",
+    "labels": {
+      "stillRunning": "Sigue funcionando",
+      "passThrough": "Los fotogramas pasan sin cambios",
+      "appClosed": "App cerrada",
+      "inTheApp": "En la app",
+      "whereYouLook": "Donde miras",
+      "pixelsDrawn": "Píxeles dibujados",
+      "turboOff": "Sin Turbo",
+      "turboOn": "Con Turbo",
+      "heldOff": "Seguridad de Turbo: desactivado para esta configuración",
+      "motion": "Movimiento entre dos fotogramas del juego",
+      "interpolate": "Más limpio, aprox. 1 fotograma después",
+      "extrapolate": "Sin retraso, más artefactos en los bordes",
+      "neck": "Ese es el límite de tu cuello",
+      "deadzone": "Dentro de la zona muerta: 1:1",
+      "biggerWorld": "Ojos más juntos: un mundo más grande",
+      "compactWorld": "Ojos más separados: un mundo más compacto",
+      "frames_one": "{count} fotograma",
+      "frames_other": "{count} fotogramas"
+    }
+  },
+  "walkthroughs": {
+    "start": {
+      "title": "Mira: cómo funciona VectorXR",
+      "steps": {
+        "1": "Tu juego dibuja fotogramas y los envía hacia el visor, muchas veces por segundo.",
+        "2": "En medio está el software del visor, el entorno de ejecución OpenXR: SteamVR, Pimax Play, Varjo Base, Virtual Desktop y otros.",
+        "3": "VectorXR es una capa OpenXR. Windows la carga en cada juego OpenXR, entre el juego y el entorno de ejecución, para que pueda mejorar cada fotograma a su paso.",
+        "4": "Esta app solo edita ajustes. Al pulsar Guardar cambios, se guardan en un archivo, y la capa los lee de ahí.",
+        "5": "Cerrar esta app no desactiva VectorXR. La capa forma parte del juego mientras se ejecuta y sigue funcionando con tus ajustes guardados.",
+        "6": "Para desactivarlo, desactiva VectorXR activado en Configuración o en el menú de la bandeja, y los fotogramas pasan sin cambios. Para sacarlo de los juegos por completo, desactívalo en la página Capas OpenXR."
+      }
+    },
+    "quadviews": {
+      "title": "Mira: cómo funciona Quadviews",
+      "steps": {
+        "1": "Tu visor muestra una vista amplia, pero tus ojos solo ven nítido en un punto pequeño cada vez.",
+        "2": "Quadviews renderiza una imagen pequeña y nítida donde miras, y el resto de la vista a menor resolución.",
+        "3": "Con seguimiento ocular, la zona nítida sigue tus ojos. Sin él, sigue tu cabeza.",
+        "4": "La GPU dibuja muchos menos píxeles, que puedes dedicar a la calidad o los fotogramas del juego.",
+        "5": "En DCS activa Use Quad View, añade un perfil de Quadviews para él, guarda y reinicia el juego."
+      }
+    },
+    "turbo": {
+      "title": "Mira: cómo funciona Turbo",
+      "steps": {
+        "1": "En cada fotograma, algunos juegos esperan al entorno de ejecución OpenXR antes de empezar con el siguiente.",
+        "2": "Turbo cambia ese ritmo para que el juego empiece antes y quepan más fotogramas en el mismo tiempo.",
+        "3": "La seguridad de Turbo vigila los problemas y mantiene Turbo desactivado en una configuración que falla.",
+        "4": "Asigna el conmutador de Turbo en el juego y compara Turbo activado y desactivado en la misma escena. Mantenlo solo donde ayude.",
+        "5": "En la página de Turbo, añade un perfil personalizado para el juego, mantén activada la Seguridad de Turbo y guarda."
+      }
+    },
+    "framegen": {
+      "title": "Mira: cómo funciona Frame Generation",
+      "steps": {
+        "1": "Tu juego renderiza 45 fotogramas por segundo, pero un visor de 90 Hz se refresca 90 veces.",
+        "2": "Frame Generation mide cómo se mueve la imagen entre los fotogramas del juego.",
+        "3": "Crea un fotograma nuevo para cada refresco intermedio, así el movimiento se ve fluido.",
+        "4": "Interpolate tiene menos artefactos, pero muestra cada fotograma del juego aproximadamente un fotograma después. Extrapolate no añade retraso pero muestra más artefactos en los bordes.",
+        "5": "Desactiva el suavizado del entorno, añade un perfil para el juego, guarda y reinícialo. Entonces aparece FG ACTIVO junto a los fotogramas por segundo en el OSD."
+      }
+    },
+    "pivot": {
+      "title": "Mira: cómo funciona Pivot",
+      "steps": {
+        "1": "En un simulador sentado, mirar atrás significa girar el cuello todo lo que da.",
+        "2": "Pivot añade giro extra cuando giras la cabeza, así que un giro pequeño mira mucho más lejos.",
+        "3": "Dentro de la zona muerta la vista sigue a tu cabeza 1:1, así que mirar los instrumentos se siente normal.",
+        "4": "Las Vistas fijas saltan a vistas que eliges con un botón. Inclinarte te sigue moviendo 1:1.",
+        "5": "Añade un perfil de Pivot, elige un modo de activación y asigna Fijar origen a la misma entrada que el recentrado del juego."
+      }
+    },
+    "depth": {
+      "title": "Mira: cómo funciona Profundidad",
+      "steps": {
+        "1": "Tus dos ojos ven el mundo desde puntos un poco distintos. Eso es lo que lo hace verse en 3D.",
+        "2": "La profundidad estéreo cambia la separación de tus ojos virtuales, así que el mundo parece más grande o más compacto.",
+        "3": "La convergencia fija la distancia donde coinciden las dos imágenes: la que resulta más relajada.",
+        "4": "Desactiva el ajuste de IPD del propio juego, añade un perfil de Profundidad y compara con el Conmutador A/B de Profundidad."
+      }
+    },
+    "osd": {
+      "title": "Mira: cómo funciona la información en pantalla",
+      "steps": {
+        "1": "La información en pantalla es un pequeño panel en el visor que sigue tu cabeza.",
+        "2": "Muestra los fotogramas por segundo, los tiempos de fotograma y lo que hacen Turbo, Frame Generation y Pivot.",
+        "3": "Elige un preajuste y arrastra el panel hasta donde lo quieras en la vista previa.",
+        "4": "En el juego, Ctrl+Alt+F10 lo muestra u oculta y Ctrl+Alt+F11 cambia de diseño.",
+        "5": "En la página Información en pantalla, actívala, elige un preajuste y guarda."
+      }
+    }
+  }
+}

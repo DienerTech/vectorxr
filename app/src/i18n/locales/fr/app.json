@@ -25,6 +25,10 @@
       "subtitle": "Inspecter et gérer l'ordre des couches implicites",
       "status": "Système"
     },
+    "guides": {
+      "label": "Guides",
+      "subtitle": "Comment fonctionne chaque fonction, et comment l'activer et la désactiver"
+    },
     "about": {
       "label": "À propos",
       "subtitle": "Infos sur le projet, notes de version et soutien"
@@ -185,6 +189,11 @@
     "openFailed": "Impossible d'ouvrir le navigateur. Veuillez réessayer.",
     "retryAria": "Réessayer de charger l'invitation Discord",
     "loadingStatus": "Chargement de l'invitation Discord."
+  },
+  "patreon": {
+    "title": "Devenir membre sur Patreon",
+    "join": "Rejoindre sur Patreon ↗",
+    "openFailed": "Impossible d'ouvrir le navigateur. Veuillez réessayer."
   },
   "healthCheck": {
     "eyebrow": "État du système",

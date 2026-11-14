@@ -1,0 +1,186 @@
+/* Shared drawing styles for the walkthrough scenes (global: each scene is its own component). */
+.wt-box {
+  fill: var(--app-surface-strong);
+  stroke: var(--app-border-strong);
+  stroke-width: 1.5;
+}
+.wt-ghost {
+  fill: none;
+  stroke: var(--app-border-strong);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+.wt-titlebar {
+  fill: var(--app-idle-soft);
+}
+.wt-accent {
+  fill: var(--app-accent-soft);
+  stroke: var(--app-accent);
+  stroke-width: 2;
+}
+.wt-button {
+  fill: var(--app-accent);
+  transition: transform 0.15s ease, opacity 0.15s ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.wt-pressed {
+  transform: scale(0.92);
+  opacity: 0.8;
+}
+.wt-on-accent {
+  fill: #fff;
+  font-weight: 600;
+}
+.wt-file {
+  fill: var(--app-surface-strong);
+  stroke: var(--app-accent);
+  stroke-width: 1.5;
+}
+.wt-track {
+  stroke: var(--app-border-strong);
+  stroke-width: 2;
+  stroke-dasharray: 2 6;
+  stroke-linecap: round;
+}
+.wt-frame {
+  fill: var(--app-text-soft);
+}
+.wt-frame-touched {
+  fill: var(--app-accent);
+}
+.wt-chip {
+  fill: var(--app-idle-soft);
+  stroke: var(--app-border);
+  transition: fill 0.3s ease, stroke 0.3s ease;
+}
+.wt-chip-on {
+  fill: var(--app-accent-soft);
+  stroke: var(--app-accent);
+}
+.wt-switch {
+  fill: var(--app-success-text);
+  transition: fill 0.25s ease;
+}
+.wt-switch-off {
+  fill: var(--app-text-soft);
+}
+.wt-knob {
+  fill: #fff;
+  transition: cx 0.25s ease;
+}
+.wt-label {
+  fill: var(--app-text);
+  font-size: 14px;
+}
+.wt-small {
+  fill: var(--app-text-muted);
+  font-size: 13px;
+}
+.wt-tiny {
+  fill: var(--app-text-muted);
+  font-size: 11px;
+}
+.wt-strong {
+  font-weight: 600;
+  fill: var(--app-text);
+}
+.wt-good {
+  fill: var(--app-success-text);
+  font-weight: 600;
+}
+.wt-x-hot {
+  fill: var(--app-danger);
+  font-weight: 700;
+}
+.wt-fade {
+  transition: opacity 0.45s ease, transform 0.45s ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.wt-hidden {
+  opacity: 0;
+}
+.wt-closing {
+  opacity: 0;
+  transform: scale(0.9);
+}
+.wt-drop {
+  transition: opacity 0.5s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1.2);
+}
+.wt-hidden-up {
+  opacity: 0;
+  transform: translateY(-40px);
+}
+.wt-dim {
+  opacity: 0.4;
+}
+.wt-flash rect {
+  stroke-width: 4;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wt-fade,
+  .wt-drop,
+  .wt-chip,
+  .wt-switch,
+  .wt-knob,
+  .wt-button {
+    transition: none;
+  }
+}
+.wt-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 640 / 270;
+}
+.wt-stage > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.wt-band {
+  fill: #000;
+  opacity: 0.85;
+}
+.wt-soft {
+  fill: var(--app-idle-soft);
+  stroke: var(--app-border);
+  stroke-width: 1;
+}
+.wt-wait {
+  fill: var(--app-text-soft);
+  fill-opacity: 0.28;
+  stroke: var(--app-text-soft);
+  stroke-dasharray: 3 3;
+}
+.wt-danger {
+  fill: var(--app-danger-soft);
+  stroke: var(--app-danger);
+  stroke-width: 2;
+}
+.wt-line {
+  fill: none;
+  stroke: var(--app-text-muted);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.wt-line-accent {
+  fill: none;
+  stroke: var(--app-accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+.wt-dash {
+  stroke-dasharray: 5 5;
+}
+.wt-dot-accent {
+  fill: var(--app-accent);
+}
+.wt-move {
+  transition: transform 0.5s cubic-bezier(0.3, 0.7, 0.2, 1);
+}
+.wt-big {
+  fill: var(--app-text);
+  font-size: 26px;
+  font-weight: 700;
+}

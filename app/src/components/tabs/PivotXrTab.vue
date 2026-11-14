@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
+import GuideLink from '../GuideLink.vue'
 
 import { t } from '../../i18n/index.ts'
 import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
@@ -363,6 +364,7 @@ const profileOverviewWarningIndexes = computed(() => profileWarningState.value.o
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
             {{ t('pivot.tab.intro') }}
           </p>
+          <GuideLink guide="pivot" class="mt-2" />
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <button

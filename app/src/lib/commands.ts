@@ -310,6 +310,21 @@ export async function openFileDirectory(path: string): Promise<void> {
   await invoke('open_file_directory', { path })
 }
 
+// The local community-config override (%LOCALAPPDATA%\VectorXR\config\community.override.json),
+// or null. Outside the app (a browser preview), the same JSON is read from
+// localStorage under vectorxr-community-override.
+export async function loadCommunityOverride(): Promise<string | null> {
+  if (!tauriAvailable()) {
+    try {
+      return window.localStorage.getItem('vectorxr-community-override')
+    } catch {
+      return null
+    }
+  }
+
+  return invoke<string | null>('load_community_override')
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   if (!url) {
     return

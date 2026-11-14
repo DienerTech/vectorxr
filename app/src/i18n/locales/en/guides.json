@@ -1,0 +1,393 @@
+{
+  "title": "Guides",
+  "intro": "Short guides to what each part of VectorXR does, when it helps, how to turn it on for a game, and how to turn it off again. New to VectorXR? Start with the first one.",
+  "groups": {
+    "start": "Start here",
+    "enhancements": "Enhancements",
+    "tools": "Display and tools"
+  },
+  "badges": {
+    "experimental": "Experimental"
+  },
+  "back": "All guides",
+  "backTo": "Back to {page}",
+  "openTab": "Open {page}",
+  "readGuide": "Read the guide",
+  "headings": {
+    "what": "What it does",
+    "when": "When it helps",
+    "setup": "Turn it on for a game",
+    "check": "Check that it's working",
+    "off": "Turn it off",
+    "problems": "If something looks wrong"
+  },
+  "diagram": {
+    "game": "Your game",
+    "layer": "VectorXR layer",
+    "runtime": "OpenXR runtime",
+    "headset": "Headset",
+    "app": "VectorXR app",
+    "settingsFile": "Saved settings",
+    "realFrame": "Game frame",
+    "generatedFrame": "Generated frame",
+    "refresh": "Headset refreshes",
+    "focus": "Sharp where you look",
+    "periphery": "Lower detail at the edges",
+    "before": "Before",
+    "after": "After",
+    "headTurn": "Your head turns",
+    "viewTurns": "The view turns further",
+    "leftEye": "Left eye",
+    "rightEye": "Right eye",
+    "depthPlane": "Depth plane",
+    "wait": "Waiting on the runtime",
+    "render": "Game renders",
+    "osdPanel": "OSD panel"
+  },
+  "items": {
+    "start": {
+      "title": "What is VectorXR?",
+      "summary": "What VectorXR is, what an OpenXR layer is, how it decides what to apply to a game, and every way to turn it off.",
+      "sections": {
+        "what": {
+          "heading": "What VectorXR is",
+          "body": "VectorXR adds features to PC VR games that use OpenXR: sharper rendering where you look, smoother motion, better head rotation for seated sims, and more. It has two parts. The **desktop app** (this window) is where you choose settings. The **VectorXR layer** applies them inside the game while it runs.",
+          "points": {
+            "a": "**Closing this app does not turn VectorXR off.** The layer runs inside every OpenXR game and reads your saved settings by itself. To turn it off, see the last section of this guide.",
+            "b": "Nothing you change here takes effect until you click **Save Changes** in the bar at the bottom.",
+            "c": "Everything stays on your PC. Settings are stored under %LOCALAPPDATA%\\VectorXR."
+          }
+        },
+        "layer": {
+          "heading": "What an OpenXR layer is",
+          "body": "OpenXR is the standard that VR games use to talk to your headset's software, called the **OpenXR runtime** (SteamVR, Pimax Play, Varjo Base, Virtual Desktop and others). An **OpenXR layer** sits between the game and the runtime. Every frame the game sends passes through it, so it can adjust the view, add frames or draw a panel before the runtime shows the picture in the headset.",
+          "points": {
+            "a": "Windows loads the layers listed in the registry into every OpenXR game, in a set order. The **OpenXR Layers** page shows them all.",
+            "b": "A layer only changes what you turned on for that game. With every enhancement off, frames pass straight through.",
+            "c": "Other tools, such as OpenXR Toolkit, are layers too. Two layers doing the same job can conflict, so run one of each kind."
+          }
+        },
+        "decide": {
+          "heading": "How VectorXR decides what to apply",
+          "body": "Each enhancement checks three things, in this order:",
+          "steps": {
+            "1": "**VectorXR Enabled** in Settings. When it's off, nothing applies to any game.",
+            "2": "A **custom profile** for this game. The first enabled one that names the game wins, even when the Default Profile is off.",
+            "3": "The **Default Profile**. It applies to games without an enabled custom profile. Every Default Profile starts off."
+          }
+        },
+        "firstGame": {
+          "heading": "Set up your first game",
+          "steps": {
+            "1": "Launch the game once with VectorXR installed, then quit it.",
+            "2": "Open **Application Registry**, click **Refresh**, and register the game from the list of apps VectorXR has seen.",
+            "3": "Open an enhancement in the sidebar, click **Add Profile**, and choose the game.",
+            "4": "Adjust the settings, then click **Save Changes**. Some enhancements need the game restarted; their guides say which."
+          }
+        },
+        "off": {
+          "heading": "How to turn it off",
+          "body": "VectorXR can be undone at every level:",
+          "points": {
+            "a": "**One enhancement for one game:** turn off that game's profile on the enhancement's page.",
+            "b": "**One enhancement everywhere:** turn off its Default Profile and its custom profiles.",
+            "c": "**Everything, for now:** turn off **VectorXR Enabled** in Settings, or in the tray icon's menu. Most things stop at once. Quadviews and Frame Generation pacing stay until the game restarts.",
+            "d": "**Take it out of the pipeline:** disable the VectorXR layer on the **OpenXR Layers** page. Games no longer load it at all.",
+            "e": "**Remove it:** uninstall VectorXR from Windows. That removes the app and unregisters the layer."
+          }
+        }
+      }
+    },
+    "anticheat": {
+      "title": "Online games and anti-cheat",
+      "summary": "What to know before using VectorXR in multiplayer games such as Star Citizen.",
+      "sections": {
+        "what": {
+          "heading": "Your own risk",
+          "body": "Using VectorXR in online games with anti-cheat, including Star Citizen, is at your own risk, and that includes your game account. Official releases are code-signed, and VectorXR has run under Easy Anti-Cheat in testing, but no game developer has endorsed it, and anti-cheat rules can change at any time with any game or VectorXR update."
+        },
+        "off": {
+          "body": "To keep VectorXR out of one game entirely, don't give it any profiles and keep the Default Profiles off. To keep it out of every game, disable the VectorXR layer on the **OpenXR Layers** page."
+        },
+        "problems": {
+          "body": "Report problems to VectorXR rather than to the game's developer, and attach the ZIP from **Export Debug** on Home."
+        }
+      }
+    },
+    "quadviews": {
+      "title": "Quadviews",
+      "summary": "Render full detail only where you look, and less at the edges, in games that support quad views.",
+      "sections": {
+        "what": {
+          "body": "Quadviews renders each eye as two images: a sharp one where you're looking and a lower-resolution one for the rest of the view. With eye tracking the sharp area follows your eyes; without it, it follows your head. The GPU draws far fewer pixels, so you can raise the game's quality or frame rate."
+        },
+        "when": {
+          "body": "The game itself must support OpenXR quad views. **DCS** is the main tested title (Options > VR > Use Quad View). Turning Quadviews on does not make an ordinary stereo game render four views. It is experimental and for Direct3D 11 games."
+        },
+        "setup": {
+          "steps": {
+            "1": "In DCS, turn on **Use Quad View** (and **Use Eye Tracking** if your headset has it).",
+            "2": "Turn off the other quad-views providers: Pimax's **Native Pimax Quad Views**, the Quad-Views-Foveated layer, and OpenXR Toolkit for DCS.",
+            "3": "Register DCS, then add a Quadviews profile for it and click **Save Changes**.",
+            "4": "Restart DCS."
+          }
+        },
+        "check": {
+          "body": "Assign the **In-headset shortcut** on the page and press it in the game. The diagnostic view outlines the sharp area and tints the lower-detail edges, so you can see where it is and watch it follow you. **How to read the overlay** explains each color."
+        },
+        "off": {
+          "body": "Turn off the game's profile and save. Quadviews stays on until the game restarts."
+        },
+        "problems": {
+          "points": {
+            "a": "**The game still renders stereo:** another layer, often OpenXR Toolkit, is above VectorXR. The OpenXR Layers page shows a warning.",
+            "b": "**The sharp area is in the wrong place:** check the eye-tracking settings on the page and in the game."
+          }
+        }
+      }
+    },
+    "turbo": {
+      "title": "Turbo",
+      "summary": "Stop the runtime's frame waits from holding back games whose main thread is stuck waiting.",
+      "sections": {
+        "what": {
+          "body": "Some games spend part of every frame waiting on the OpenXR runtime instead of working on the next frame. Turbo changes that timing so the game can start sooner, which can raise its frame rate. Turbo Safety watches for problems and holds Turbo off for a setup that misbehaves."
+        },
+        "when": {
+          "body": "Use it only for games where an A/B test in the headset shows a gain. It is compatibility-sensitive, so keep the Default Profile off. Don't combine it with another pacing tool such as OpenXR Toolkit's Turbo Mode, or with runtime reprojection like Motion Smoothing or ASW. Turbo stays off while Frame Generation runs."
+        },
+        "setup": {
+          "steps": {
+            "1": "Register the game, then add a Turbo custom profile for it. Leave the Default Profile off.",
+            "2": "Keep **Turbo Safety** on and start with **Auto · stability-first**.",
+            "3": "Under **In-game Turbo Toggle**, click **Edit Binding…** and choose a key or button, then **Save Changes**.",
+            "4": "In the game, compare Turbo on and off in the same scene with your binding."
+          }
+        },
+        "check": {
+          "body": "**Performance Diagnostics** on the Turbo page compares frame rate, frame times and waits with Turbo on and off. The On-Screen Display shows Turbo's state, such as **Async** or **Sequenced**."
+        },
+        "off": {
+          "body": "Press your binding to switch it off in the game, or turn off the profile and save."
+        },
+        "problems": {
+          "body": "Turn Turbo off if you see a Waiting overlay, black frames, constant stutter or broken reprojection. If Safety blocked a setup, its page explains why and lets you clear the block and test again."
+        }
+      }
+    },
+    "framegen": {
+      "title": "Frame Generation",
+      "summary": "Add generated frames between the game's frames so the headset gets a fresh image every refresh.",
+      "sections": {
+        "what": {
+          "body": "Frame Generation measures how the picture moves between the game's frames and makes new frames in between. A game running at 45 fps can fill a 90 Hz headset. **Interpolate** (the default) has the fewest artifacts but adds about one game frame of delay. **Extrapolate** adds no delay but shows more edge artifacts."
+        },
+        "when": {
+          "body": "Use it when the game holds at least half the headset's refresh rate on its own, such as 45 fps at 90 Hz. Below that, artifacts grow quickly. It is experimental and tested mainly on NVIDIA RTX GPUs."
+        },
+        "setup": {
+          "steps": {
+            "1": "Turn off runtime smoothing for the game: SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW or Meta ASW.",
+            "2": "Keep the headset at its full refresh rate. Don't lock it to half rate in the runtime.",
+            "3": "Register the game, add a Frame Generation profile for it, keep the default settings, and click **Save Changes**. On an NVIDIA RTX GPU, try **NVIDIA hardware** as the motion source.",
+            "4": "Restart the game. Turning Frame Generation on takes effect at the next launch."
+          }
+        },
+        "check": {
+          "body": "With the On-Screen Display on, **FG ON** appears next to the frame rate. The **In-headset controls** list on the page shows each running game's status, and **Generated-frame tint** marks the generated frames."
+        },
+        "off": {
+          "body": "Turn off the game's profile and save. Generated frames stop at once and frames pass straight through. The optional **A/B toggle** binding switches them off and on in the game."
+        },
+        "problems": {
+          "points": {
+            "a": "**Wobbly edges or smearing:** try Interpolate, or NVIDIA hardware as the motion source.",
+            "b": "**FG STBY:** the game already holds the refresh rate, or the runtime is holding frames to half rate.",
+            "c": "**FG N/A:** this game's images can't be used. The OSD and the page say why."
+          }
+        }
+      }
+    },
+    "pivot": {
+      "title": "Pivot",
+      "summary": "Turn the view further than your neck turns, for seated and flight-sim VR.",
+      "sections": {
+        "what": {
+          "body": "Pivot adds extra rotation as you turn your head, so a small turn can look over your shoulder. **Enhanced Motion** multiplies your head turns, smoothly or in steps. **Snap Views** jump to fixed views you choose with bindings. Leaning still moves you 1:1."
+        },
+        "when": {
+          "body": "It's made for seated games such as flight and racing sims, where you need to check six o'clock without twisting in your seat."
+        },
+        "setup": {
+          "steps": {
+            "1": "Register the game, then add a Pivot profile for it.",
+            "2": "Choose **Enhanced Motion** and an activation mode. **Always active** needs no binding. **Toggle** and **Hold** need a key or button.",
+            "3": "Bind **Set Origin** to the same input as the game's recenter, so both agree on where you sit.",
+            "4": "Click **Save Changes**, then tune the Multiplier and Deadzone for each axis."
+          }
+        },
+        "check": {
+          "body": "The On-Screen Display's Pivot row starts with **Motion:** and shows **Active** while Pivot is turning the view."
+        },
+        "off": {
+          "body": "Use your activation binding to suspend it in the game, or turn off the profile and save."
+        },
+        "problems": {
+          "body": "If the view drifts off-center, press Set Origin again after recentering the game or changing your seat position. If it feels too strong, raise the Deadzone so normal panel scanning stays 1:1."
+        }
+      }
+    },
+    "depth": {
+      "title": "Depth",
+      "summary": "Tune the stereo depth and world scale of the 3D image.",
+      "sections": {
+        "what": {
+          "body": "Depth changes how far apart your virtual eyes are and where the two images line up. **Stereo Depth / World Scale** makes the world feel bigger or more compact. **Convergence / Depth Plane** sets the distance that feels most relaxed. **Depth Lock** keeps the runtime from undoing your tuning."
+        },
+        "when": {
+          "body": "Use it when a cockpit feels miniature or oversized, or the 3D effect feels too weak or too strong. Each game can need its own setting."
+        },
+        "setup": {
+          "steps": {
+            "1": "Turn off the game's own IPD or world-scale override (in DCS, **Force IPD Distance**) and restart the game.",
+            "2": "Register the game, then add a Depth profile for it. Start with Convergence at 0.",
+            "3": "Move Stereo Depth until the scale feels right, then adjust Convergence in small steps.",
+            "4": "Click **Save Changes** after each change you want to keep."
+          }
+        },
+        "check": {
+          "body": "Bind the **Depth A/B Toggle** to switch Depth off and on in the headset and compare. The **Depth pairing map** on the page shows which combination you're in."
+        },
+        "off": {
+          "body": "Press your Depth A/B Toggle binding, or turn off the profile and save."
+        },
+        "problems": {
+          "body": "If Depth seems to do nothing, the game's own IPD or scale setting is overriding it. Open **Depth Troubleshooting** on the page. If anything feels uncomfortable, go back toward 0."
+        }
+      }
+    },
+    "osd": {
+      "title": "On-Screen Display",
+      "summary": "A panel in the headset with frame rate, frame times and what VectorXR is doing.",
+      "sections": {
+        "what": {
+          "body": "The On-Screen Display (OSD) is a small panel that follows your head. It shows the game's frame rate and frame times, and the state of Turbo, Frame Generation, Pivot and the other enhancements. It has a **Compact** and an **Expanded** layout."
+        },
+        "setup": {
+          "steps": {
+            "1": "Open **On-Screen Display** and switch it on.",
+            "2": "Pick a preset: **Expanded**, **Performance** or **Minimal**.",
+            "3": "Drag the panel in the preview to place it, choose what it shows, and click **Save Changes**.",
+            "4": "In the game, **Ctrl+Alt+F10** shows or hides it and **Ctrl+Alt+F11** switches layouts."
+          }
+        },
+        "off": {
+          "body": "Switch the OSD off on its page and save, or hide it for the session with its binding."
+        }
+      }
+    }
+  },
+  "walkthrough": {
+    "play": "Play",
+    "pause": "Pause",
+    "replay": "Replay",
+    "back": "Back",
+    "next": "Next",
+    "mute": "Mute music",
+    "unmute": "Play music",
+    "volume": "Music volume",
+    "stepOf": "Step {current} of {total}",
+    "labels": {
+      "stillRunning": "Still running",
+      "passThrough": "Frames pass straight through",
+      "appClosed": "App closed",
+      "inTheApp": "In the app",
+      "whereYouLook": "Where you look",
+      "pixelsDrawn": "Pixels drawn",
+      "turboOff": "Without Turbo",
+      "turboOn": "With Turbo",
+      "frames_one": "{count} frame",
+      "frames_other": "{count} frames",
+      "heldOff": "Turbo Safety: held off for this setup",
+      "motion": "Motion between two game frames",
+      "interpolate": "Cleanest, about 1 frame later",
+      "extrapolate": "No added delay, more edge artifacts",
+      "neck": "That's your neck's limit",
+      "deadzone": "Inside the deadzone: 1:1",
+      "biggerWorld": "Closer eyes: a bigger world",
+      "compactWorld": "Wider eyes: a more compact world"
+    }
+  },
+  "walkthroughs": {
+    "start": {
+      "title": "Watch: how VectorXR works",
+      "steps": {
+        "1": "Your game draws frames and sends them toward your headset, many times a second.",
+        "2": "In between sits your headset's software, the OpenXR runtime: SteamVR, Pimax Play, Varjo Base, Virtual Desktop and others.",
+        "3": "VectorXR is an OpenXR layer. Windows loads it into every OpenXR game, between the game and the runtime, so it can improve each frame on its way through.",
+        "4": "This app only edits settings. When you click Save Changes, they're saved to a file, and the layer reads them from there.",
+        "5": "Closing this app does not turn VectorXR off. The layer is part of the game while it runs, and keeps working with your saved settings.",
+        "6": "To turn it off, switch off VectorXR Enabled in Settings or the tray menu, and frames pass straight through. To take it out of games entirely, disable it on the OpenXR Layers page."
+      }
+    },
+    "quadviews": {
+      "title": "Watch: how Quadviews works",
+      "steps": {
+        "1": "Your headset shows a wide view, but your eyes only see sharply in a small spot at a time.",
+        "2": "Quadviews renders a small sharp image where you look, and the rest of the view at lower resolution.",
+        "3": "With eye tracking the sharp area follows your eyes. Without it, it follows your head.",
+        "4": "The GPU draws far fewer pixels, which you can spend on the game's quality or frame rate.",
+        "5": "In DCS turn on Use Quad View, then add a Quadviews profile for it, save, and restart the game."
+      }
+    },
+    "turbo": {
+      "title": "Watch: how Turbo works",
+      "steps": {
+        "1": "Every frame, some games wait on the OpenXR runtime before they start working on the next one.",
+        "2": "Turbo changes that timing so the game starts sooner, and more frames fit in the same time.",
+        "3": "Turbo Safety watches for trouble and holds Turbo off for a setup that misbehaves.",
+        "4": "Bind the in-game toggle and compare Turbo on and off in the same scene. Keep it only where it helps.",
+        "5": "On the Turbo page, add a custom profile for the game, keep Turbo Safety on, and save."
+      }
+    },
+    "framegen": {
+      "title": "Watch: how Frame Generation works",
+      "steps": {
+        "1": "Your game renders 45 frames a second, but a 90 Hz headset refreshes 90 times.",
+        "2": "Frame Generation measures how the picture moves between the game's frames.",
+        "3": "It makes a new frame for each refresh in between, so motion looks smooth.",
+        "4": "Interpolate has the fewest artifacts but shows each game frame about one frame later. Extrapolate adds no delay but shows more edge artifacts.",
+        "5": "Turn off runtime smoothing, add a profile for the game, save, and restart it. FG ON then appears next to the frame rate in the OSD."
+      }
+    },
+    "pivot": {
+      "title": "Watch: how Pivot works",
+      "steps": {
+        "1": "In a seated sim, checking six o'clock means twisting your neck as far as it goes.",
+        "2": "Pivot adds extra rotation as you turn your head, so a small turn looks much further.",
+        "3": "Inside the deadzone the view follows your head 1:1, so scanning your instruments feels normal.",
+        "4": "Snap Views jump to fixed views you choose with a button. Leaning still moves you 1:1.",
+        "5": "Add a Pivot profile, choose an activation mode, and bind Set Origin to the same input as the game's recenter."
+      }
+    },
+    "depth": {
+      "title": "Watch: how Depth works",
+      "steps": {
+        "1": "Your two eyes see the world from slightly different places. That's what makes it look 3D.",
+        "2": "Stereo Depth changes how far apart your virtual eyes are, so the world feels bigger or more compact.",
+        "3": "Convergence sets the distance where the two images line up: the one that feels most relaxed.",
+        "4": "Turn off the game's own IPD override, add a Depth profile, and compare with the Depth A/B Toggle."
+      }
+    },
+    "osd": {
+      "title": "Watch: how the On-Screen Display works",
+      "steps": {
+        "1": "The On-Screen Display is a small panel in your headset that follows your head.",
+        "2": "It shows the frame rate and frame times, and what Turbo, Frame Generation and Pivot are doing.",
+        "3": "Pick a preset, then drag the panel to where you want it in the preview.",
+        "4": "In the game, Ctrl+Alt+F10 shows or hides it, and Ctrl+Alt+F11 switches layouts.",
+        "5": "On the On-Screen Display page, switch it on, choose a preset, and save."
+      }
+    }
+  }
+}

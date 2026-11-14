@@ -25,6 +25,10 @@
       "subtitle": "Inspecione e gerencie a ordem das camadas implícitas",
       "status": "Sistema"
     },
+    "guides": {
+      "label": "Guias",
+      "subtitle": "Como cada recurso funciona e como ativá-lo e desativá-lo"
+    },
     "about": {
       "label": "Sobre",
       "subtitle": "Informações do projeto, notas da versão e suporte"
@@ -185,6 +189,11 @@
     "openFailed": "Não foi possível abrir o navegador. Tente de novo.",
     "retryAria": "Tentar carregar o convite do Discord de novo",
     "loadingStatus": "Carregando o convite do Discord."
+  },
+  "patreon": {
+    "title": "Seja membro no Patreon",
+    "join": "Apoiar no Patreon ↗",
+    "openFailed": "Não foi possível abrir o navegador. Tente de novo."
   },
   "healthCheck": {
     "eyebrow": "Integridade do sistema",

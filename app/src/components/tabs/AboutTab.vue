@@ -5,6 +5,7 @@ import { openExternalUrl } from '../../lib/commands'
 import { formatPatchNoteInlineHtml, type PatchNoteEntry } from '../../lib/patchNotes'
 import { useUpdateStore } from '../../stores/updateStore'
 import DiscordJoinButton from '../DiscordJoinButton.vue'
+import PatreonPromo from '../PatreonPromo.vue'
 import I18nText from '../I18nText.vue'
 import { t } from '../../i18n/index.ts'
 
@@ -169,6 +170,7 @@ onMounted(() => {
         >
           {{ t('about.support.button') }}
         </button>
+        <PatreonPromo class="mt-4" button-class="w-full rounded-[0.75rem] px-4 py-2.5 text-sm font-semibold" message-class="text-sm leading-6 text-muted" />
       </aside>
     </section>
 

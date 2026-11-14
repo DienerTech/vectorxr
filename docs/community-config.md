@@ -16,3 +16,33 @@ offer Retry. Requests bypass the browser cache; GitHub propagation can still tak
 time. A successful result stays in memory for that app session, so restart the app
 to pick up changes. There is no persistent or hardcoded invite fallback. Revoke an
 old invite in Discord if it must stop working immediately for already-running apps.
+
+## Patreon
+
+The `patreon` entry drives a Patreon button beside the Ko-fi buttons on Home and
+About. It shows only when `enabled` is `true` and `url` is an HTTPS page on
+`patreon.com` or `www.patreon.com` (not the bare site root). Anything else,
+including a missing entry or a failed request, hides it.
+
+```json
+"patreon": {
+  "enabled": true,
+  "url": "https://www.patreon.com/<page>",
+  "message": "Optional text shown above the button."
+}
+```
+
+`message` is optional plain text, at most 400 characters. It can be one string,
+or one per app language code, with English as the fallback:
+`{ "en": "Early access builds", "de": "Frühzugang zu neuen Builds" }`. The button
+label itself is translated in the app.
+
+### Preview before publishing
+
+To see a change before it is published, put a `community.override.json` file beside
+the app's settings, in `%LOCALAPPDATA%\VectorXR\config\`. Its top-level fields
+replace the published file's (for example, only `patreon`), and it still applies
+when the published file can't be fetched. Restart the app to pick it up, and delete
+the file to go back to the published config. In a browser preview of the app
+(`npm run dev`), the same JSON is read from `localStorage` under
+`vectorxr-community-override`.

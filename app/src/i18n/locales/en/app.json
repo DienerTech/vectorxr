@@ -25,6 +25,10 @@
       "subtitle": "Inspect and manage implicit layer order",
       "status": "System"
     },
+    "guides": {
+      "label": "Guides",
+      "subtitle": "How each feature works, and how to turn it on and off"
+    },
     "about": {
       "label": "About",
       "subtitle": "Project info, patch notes, and support"
@@ -185,6 +189,11 @@
     "openFailed": "Could not open the browser. Please try again.",
     "retryAria": "Retry loading Discord invite",
     "loadingStatus": "Loading Discord invite."
+  },
+  "patreon": {
+    "title": "Become a Patreon member",
+    "join": "Join on Patreon ↗",
+    "openFailed": "Could not open the browser. Please try again."
   },
   "healthCheck": {
     "eyebrow": "System Health",
