@@ -7668,6 +7668,39 @@ void TestNoExtrapolationAcrossPauses() {
     }
 }
 
+// Interpolating just in time, a real frame is needed from the refresh after
+// the frame before it, for the frames between them. Not after a pause:
+// nothing is generated across it, so the first frame after it is needed in
+// its own refresh. Needed a refresh after the last frame before the pause,
+// it ended that whole pause late, and counted against the lead.
+void TestInterpolatePauseIsNotLate() {
+    const std::string name = "interpolate pause";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 1000ms, kLightWork);
+    Check(presenter.Status().threaded, name + ": presents from its own thread");
+    // Longer than a pause is at any pace.
+    SleepPrecise(std::chrono::steady_clock::now() + 1200ms);
+    const FrameGenStatus before = presenter.Status();
+    RunWork(*app, 1ms, kLightWork); // the first frame after the pause
+    const FrameGenStatus after = presenter.Status();
+    Check(after.late_cpu == before.late_cpu,
+          name + ": the first frame after it is not late (" + std::to_string(after.late_cpu - before.late_cpu) +
+              " counted)");
+    Check(after.lead_slots <= before.lead_slots,
+          name + ": ...and the lead does not step up (" + std::to_string(before.lead_slots) + " -> " +
+              std::to_string(after.lead_slots) + ")");
+    RunWork(*app, 300ms, kLightWork);
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // Passing frames straight through captures nothing (Auto at full rate,
 // Dynamic standing by); the first engaged frame is still captured at its
 // release, so generation starts from captured history.
@@ -15968,6 +16001,11 @@ class FrameGenFlowTestPeer {
         std::scoped_lock lock(p.mutex_);
         return p.InterpolateFlowDelayUntilLocked(now, mode, hardware);
     }
+    // The frames waited inline and not yet ended.
+    static std::size_t OpenFrames(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        return p.frames_.size();
+    }
     static State Get(FrameGenPresenter& p) {
         std::scoped_lock lock(p.mutex_);
         return {p.interpolate_flow_hardware_, p.interpolate_flow_probing_, p.interpolate_flow_bad_windows_,
@@ -16234,6 +16272,30 @@ void TestInterpolateFlowAcceptanceDelay() {
           "flow delay: switches and recovery are logged with reasons");
 }
 
+// The session ends on another thread while a game's wait is inside the
+// runtime's. The wait returns the runtime's frame state as it is, and the
+// stopped presenter stays as Stop left it: off, with no frame open for the
+// next session to find.
+void TestStopDuringRuntimeWait() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "stop in wait: engaged before it");
+    runtime.wait_sleep_ms = 300;
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    std::thread waiter([&] { state = app.Wait(); });
+    std::this_thread::sleep_for(60ms); // the wait is inside the runtime's
+    presenter.Stop();
+    waiter.join();
+    runtime.wait_sleep_ms = 0;
+    Check(state.predictedDisplayPeriod == runtime.period, "stop in wait: the game gets the runtime's own period");
+    Check(presenter.Status().state == FrameGenState::kOff, "stop in wait: the stopped presenter stays off");
+    Check(FrameGenFlowTestPeer::OpenFrames(presenter) == 0, "stop in wait: no frame is kept for the next session");
+}
+
 // --group <name> runs one group of the tests below (GROUP marks where each
 // begins), so CTest can run the groups side by side; without it, all of them.
 const char* g_group = nullptr;
@@ -16278,6 +16340,7 @@ void RunPolicyTests() {
     RUN(TestDynamicProbe);
     RUN(TestExtrapolateDuplicateTargetGuard);
     RUN(TestNoExtrapolationAcrossPauses);
+    RUN(TestInterpolatePauseIsNotLate);
     RUN(TestLeadResetOnRestart);
     RUN(TestLeadStepsDownAfterHitches);
     RUN(TestLeadDoesNotFlap);
@@ -16467,6 +16530,7 @@ int main(int argc, char** argv) {
     RUN(TestOverlappingWaitIsHeld);
     RUN(TestUnclaimedFrameIsDemoted);
     RUN(TestSameThreadDoubleWait);
+    RUN(TestStopDuringRuntimeWait);
     RUN(TestDepthDescriptionLogged);
     // A long session: video memory moving between engagements, pauses far
     // apart, and what the summaries and the log say about both.

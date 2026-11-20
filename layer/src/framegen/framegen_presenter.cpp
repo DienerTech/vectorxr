@@ -4783,6 +4783,13 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
         return result;
     }
     std::scoped_lock lock(mutex_);
+    if (!started_) {
+        // Stopped during the runtime's wait (the session ended on another
+        // thread): the game gets the runtime's frame state as it is. Nothing
+        // of this frame is kept, and the state stays off: what Stop cleared
+        // would otherwise reach the next session.
+        return result;
+    }
     const auto returned = Clock::now();
     NotePhaseLocked(called, returned, state->predictedDisplayTime, state->predictedDisplayPeriod);
     NoteRuntimeClockLocked(returned, state->predictedDisplayTime, state->predictedDisplayPeriod,
@@ -9533,10 +9540,12 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
     // When it is needed: extrapolating, in its own refresh; interpolating,
     // from the refresh after the newest real frame's (its own, the first),
     // for the frames between. Measured, then written on the GPU, by when
-    // the runtime releases that refresh's wait.
-    const XrTime needed = !frame.interpolate || jit_frames_.empty()
-                              ? frame.target_time
-                              : std::min(frame.target_time, jit_frames_.back().time + period);
+    // the runtime releases that refresh's wait. Nothing is generated across
+    // a frame shown as it is, nor across a pause (not the game's pace): a
+    // frame after either is needed in its own refresh.
+    const bool follows = frame.interpolate && !jit_frames_.empty() && !jit_frames_.back().as_is &&
+                         frame.target_time - jit_frames_.back().time <= PauseLimitLocked();
+    const XrTime needed = follows ? std::min(frame.target_time, jit_frames_.back().time + period) : frame.target_time;
     // Interpolating with a refresh between it and the newest real frame,
     // that refresh shows it moved: its motion is needed then, not only its
     // capture.

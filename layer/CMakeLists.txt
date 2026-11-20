@@ -715,6 +715,11 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         endforeach()
         # COST: CTest starts the longest tests first, before it has timings of its own.
         set_tests_properties(${_presenter_tests} PROPERTIES TIMEOUT 600 COST 200)
+        # These three assert on frame rates and timelines with a few milliseconds to spare each frame: beside
+        # other tests they came in late now and then, and alone they pass. They run with nothing else.
+        set_tests_properties(depthxr_framegen_presenter_tests_pacing
+                             depthxr_framegen_presenter_tests_lifecycle
+                             depthxr_framegen_presenter_tests_clocks PROPERTIES RUN_SERIAL TRUE)
         # The submitted-image module and screenshots: the CPU half with no
         # argument, readback on the software adapter (WARP) with d3d11 or d3d12.
         add_executable(depthxr_imaging_tests tests/imaging_tests.cpp)
