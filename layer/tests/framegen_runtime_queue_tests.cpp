@@ -556,6 +556,42 @@ void AcquireExhaustionTest(ID3D12Device* device) {
     std::cout << "Image exhaustion and deferred wait ordering passed\n";
 }
 
+// A full ring's acquire gives the oldest held-back release a bounded wait on
+// the CPU before it orders the runtime's queue. A wait that timed out leaves
+// the swapchain's event armed for its value: that work finishing later sets
+// the event, which must not end the next acquire's wait for a newer release.
+void AcquireStaleEventTest(ID3D12Device* device) {
+    Harness h(device);
+    h.HoldGame(1);
+    h.Frame(kSource, true);
+    h.HoldGame(2); // the later frames' work stays unfinished past the first's
+    h.Frame(kSource, true);
+    h.Frame(kSource, true);
+    h.Frame(kSource, true); // the ring is full: its wait for the first release times out
+    Check(h.runtime.chains.at(kSource).calls == "awaarwa", "the full ring forwards the first release");
+    Check(SUCCEEDED(h.gate->Signal(1)), "finish the first frame's GPU work");
+    bool finished = false;
+    for (int i = 0; i < 5000 && !finished; ++i) {
+        finished = h.substitution.Describe().find("released=4/1 ") != std::string::npos;
+        if (!finished) Sleep(1);
+    }
+    Check(finished, "the first release's work finishes alone: " + h.substitution.Describe());
+    Sleep(20); // the fence sets the event armed for that work
+    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    std::uint32_t image = 0;
+    const auto start = std::chrono::steady_clock::now();
+    Check(h.substitution.Acquire(kSource, 3, kCalls, &acquire, &image) == XR_SUCCESS, "acquire from the full ring again");
+    const auto waited = std::chrono::steady_clock::now() - start;
+    const std::string& calls = h.runtime.chains.at(kSource).calls;
+    Check(waited >= std::chrono::milliseconds(90) && waited < std::chrono::seconds(1) && calls == "awaarwarwa",
+          "the second release gets its own bounded wait, not the first one's stale wake-up (" +
+              std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(waited).count()) + " ms, " + calls +
+              ")");
+    h.FinishGame(2);
+    Check(h.runtime_marker.Reaches(h.runtime_queue), "the runtime's queue runs on once the work has finished");
+    std::cout << "Acquire's bounded wait after a stale wake-up passed\n";
+}
+
 void BusyDiagnosticsTest(ID3D12Device* device) {
     Harness h(device);
     h.runtime.release_entered = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -620,6 +656,7 @@ int main(int argc, char** argv) {
         FirstShownImageTest(device.Get());
         ShownLayerPipelinedWaitTest(device.Get());
         AcquireExhaustionTest(device.Get());
+        AcquireStaleEventTest(device.Get());
         DeferredCallRetryTest(device.Get());
         AcquireDeferredRefusalBudgetTest(device.Get());
         FirstUseOrderingTest(device.Get(), false);

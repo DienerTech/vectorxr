@@ -166,9 +166,17 @@ struct FrameGenQueueSubstitution::Impl {
                 if (until == Until::kAcquire) {
                     // The ring is full. Give the oldest release a bounded
                     // chance to finish before ordering the runtime queue.
+                    // The event may still be set for an earlier value:
+                    // waited for until this one has passed.
                     if (!state.event) state.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kReleaseWaitMs);
                     if (state.event && SUCCEEDED(released->SetEventOnCompletion(call.value, state.event))) {
-                        WaitForSingleObject(state.event, kReleaseWaitMs);
+                        for (auto now = std::chrono::steady_clock::now();
+                             released->GetCompletedValue() < call.value && now < deadline;
+                             now = std::chrono::steady_clock::now()) {
+                            const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+                            WaitForSingleObject(state.event, static_cast<DWORD>(left.count()));
+                        }
                     }
                     done = released->GetCompletedValue();
                 }
