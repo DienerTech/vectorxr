@@ -10884,6 +10884,40 @@ void HardwareWatchOwnershipTest() {
     Check(!watch.ResetFence(nullptr), "a pending hardware operation was discarded while retiring its fence");
     second.completed = 7;
     Check(watch.ResetFence(nullptr) && !watch.Pending(), "a finished hardware fence cannot be retired");
+
+    // More operations than places, the first never finishing (captures on the
+    // game's queue can run that far ahead): the first keeps its watch, and so
+    // does the latest, whose release covers the ones between.
+    Fence busy;
+    FrameGenHardwareWatch<Fence> crowded;
+    Check(crowded.ResetFence(&busy), "the crowded hardware fence is installed");
+    for (std::uint64_t done = 1; done <= 6; ++done) {
+        crowded.Watch(done, 20 + done, 250);
+    }
+    bool first_watched = false;
+    bool latest_watched = false;
+    for (std::size_t index = 0; index < 4; ++index) {
+        const auto operation = crowded.Read(index);
+        first_watched = first_watched || (operation && operation.fence == &busy && operation.done == 1 &&
+                                          operation.input == 21 && crowded.Current(operation));
+        latest_watched = latest_watched || (operation && operation.done == 6 && operation.input == 26);
+    }
+    Check(first_watched, "a later hardware operation took the place of an unfinished one");
+    Check(latest_watched, "the latest hardware operation is not watched while every place is taken");
+    Check(crowded.Pending() && !crowded.ResetFence(nullptr), "an unfinished hardware operation was discarded");
+    // A finished operation's place is the one given up.
+    busy.completed = 1;
+    crowded.Watch(7, 27, 250);
+    bool second_watched = false;
+    bool next_watched = false;
+    for (std::size_t index = 0; index < 4; ++index) {
+        const auto operation = crowded.Read(index);
+        second_watched = second_watched || (operation && operation.done == 2);
+        next_watched = next_watched || (operation && operation.done == 7 && operation.input == 27);
+    }
+    Check(second_watched && next_watched, "a finished hardware operation's place was not the one reused");
+    busy.completed = 7;
+    Check(crowded.ResetFence(nullptr) && !crowded.Pending(), "the finished crowded hardware fence cannot be retired");
 }
 
 // A one-shot failure at every working-texture allocation. Check the complete
@@ -15600,6 +15634,42 @@ int D3D12Test() {
     X(CmdPipelineBarrier) X(CmdCopyImageToBuffer) X(CmdCopyBufferToImage) X(CreateFence) X(DestroyFence) X(ResetFences)   \
     X(WaitForFences) X(QueueSubmit) X(DeviceWaitIdle)
 
+// A game's images, captured at their release (no SetCopyAfterRelease): the
+// first frame has no capture and only sets its view up, the next release is
+// captured into that view and the frame shows it.
+void VulkanUncapturedTest(Harness& harness) {
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    Check(gpu != nullptr, "Vulkan uncaptured backend: " + error);
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    g_swapchains[kSource] = {harness.create(kSize, kSize)};
+    g_swapchains[kOutput] = {harness.create(kSize, kSize)};
+    g_swapchains[kOutputSecond] = {harness.create(kSize, kSize)};
+    Check(gpu->Track(kSource, EnumerateImages, error) && gpu->Track(kOutput, EnumerateImages, error) &&
+              gpu->Track(kOutputSecond, EnumerateImages, error),
+          error);
+    const Pixels pixels = MovingSquare(120, 120);
+    harness.upload(g_swapchains[kSource][0], pixels);
+    const std::vector<FrameGenViewSubmission> views{Submission(0, harness.format, output_format, true, 0, 0)};
+    FrameGenTuning tuning;
+    FrameGenExecuteResult result;
+    Check(!gpu->Execute(views, tuning, result, error) && result.uncaptured,
+          "Vulkan: a frame without a capture was not reported as uncaptured: " + error);
+    Check(gpu->WaitIdle(), "Vulkan: setting an uncaptured view up did not finish");
+    Check(gpu->Capture(0, views[0].source, views[0].request, tuning.quality, error),
+          "Vulkan: a view set up by an uncaptured frame refused its capture: " + error);
+    result = {};
+    Check(gpu->Execute(views, tuning, result, error) && gpu->WaitIdle(), "Vulkan: a captured frame did not execute: " + error);
+    Check(!result.uncaptured && !result.synthesized[0], "Vulkan: a captured first frame must pass through");
+    Check(MeanError(harness.readback(g_swapchains[kOutput][0]), pixels, 0, 0, kSize, kSize) < 0.004,
+          "Vulkan: a captured first frame differs from its source");
+    gpu.reset();
+    g_swapchains.erase(kSource);
+    g_swapchains.erase(kOutput);
+    g_swapchains.erase(kOutputSecond);
+    std::cout << "Vulkan capture at release after an uncaptured frame passed\n";
+}
+
 int VulkanTest() {
     const HMODULE loader = LoadLibraryExW(L"vulkan-1.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!loader) {
@@ -15801,6 +15871,9 @@ int VulkanTest() {
         std::memcpy(pixels.data(), mapped, pixels.size() * 4);
         return pixels;
     };
+    if (!g_bench) {
+        VulkanUncapturedTest(harness);
+    }
     const int result = g_bench ? RunBench(harness) : RunScenarios(harness);
     vkDeviceWaitIdle(device);
     for (const auto& image : owned) {

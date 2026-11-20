@@ -246,7 +246,9 @@ class VulkanFrameGen final : public FrameGenGpu {
         }
         commands_ = slot.commands;
         CopySource(view, source, it->second[source.image_index]);
-        if (!Check(vkEndCommandBuffer(slot.commands), "vkEndCommandBuffer", error)) {
+        const bool ended = Check(vkEndCommandBuffer(slot.commands), "vkEndCommandBuffer", error);
+        commands_ = VK_NULL_HANDLE; // nothing records into an ended buffer
+        if (!ended) {
             // Nothing was submitted; rebuild the view on the next Execute.
             view.history_state = {};
             return false;
@@ -291,9 +293,9 @@ class VulkanFrameGen final : public FrameGenGpu {
         FrameGenTuning tuning = requested;
         tuning.hardware_flow = tuning.hardware_level = false;
         result.synthesized.assign(views.size(), false);
-        if (Uncaptured(views, tuning, result, error)) {
-            return false;
-        }
+        // Uncaptured views are only set up here: their images' first layouts
+        // are recorded and submitted as any frame's commands are.
+        const bool uncaptured = Uncaptured(views);
         const std::size_t slot_index = static_cast<std::size_t>(submission_ % kFramesInFlight);
         FrameSlot& slot = slots_[slot_index];
         if (slot.pending) {
@@ -320,7 +322,7 @@ class VulkanFrameGen final : public FrameGenGpu {
         }
         commands_ = slot.commands;
         descriptors_ = slot.descriptors;
-        const bool timed = query_pool_ != VK_NULL_HANDLE;
+        const bool timed = query_pool_ != VK_NULL_HANDLE && !uncaptured; // setting up is not a frame's time
         if (timed) {
             vkCmdResetQueryPool(commands_, query_pool_, static_cast<std::uint32_t>(slot_index * 2), 2);
             vkCmdWriteTimestamp(commands_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool_,
@@ -334,6 +336,11 @@ class VulkanFrameGen final : public FrameGenGpu {
         }
         bool ok = true;
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
+            if (uncaptured) {
+                ok = EnsureView(views_[i], views[i], tuning, error);
+                views_[i].capture.valid = false;
+                continue;
+            }
             bool synthesized = false;
             ok = RecordView(views[i], tuning, views_[i], synthesized, error);
             result.synthesized[i] = synthesized;
@@ -342,7 +349,8 @@ class VulkanFrameGen final : public FrameGenGpu {
             vkCmdWriteTimestamp(commands_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool_,
                                 static_cast<std::uint32_t>(slot_index * 2 + 1));
         }
-        ok = Check(vkEndCommandBuffer(commands_), "vkEndCommandBuffer", error) && ok;
+        ok = Check(vkEndCommandBuffer(slot.commands), "vkEndCommandBuffer", error) && ok;
+        commands_ = VK_NULL_HANDLE; // nothing records into an ended buffer
         if (!ok) {
             // Nothing was submitted; recorded layout transitions never ran.
             for (std::size_t i = 0; i < views.size() && i < views_.size(); ++i) {
@@ -353,7 +361,7 @@ class VulkanFrameGen final : public FrameGenGpu {
         }
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &commands_;
+        submit.pCommandBuffers = &slot.commands;
         if (!Check(vkResetFences(binding_.device, 1, &slot.fence), "vkResetFences", error) ||
             !Check(vkQueueSubmit(queue_, 1, &submit, slot.fence), "vkQueueSubmit", error)) {
             return false;
@@ -361,6 +369,11 @@ class VulkanFrameGen final : public FrameGenGpu {
         slot.pending = true;
         slot.timing_pending = timed;
         ++submission_;
+        if (uncaptured) {
+            result.uncaptured = true;
+            error = "a view's image was not captured when the game released it";
+            return false;
+        }
         for (std::size_t i = 0; i < views.size(); ++i) {
             views_[i].history_state.Commit(result.synthesized[i]);
             views_[i].capture.valid = false;
@@ -621,10 +634,9 @@ class VulkanFrameGen final : public FrameGenGpu {
 
     // A view whose image was not captured when the game released it cannot
     // be generated from (the runtime owns the image, and its layout, after
-    // its release): the views are set up for the next releases to be
+    // its release): Execute sets the views up for the next releases to be
     // captured instead.
-    bool Uncaptured(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
-                    FrameGenExecuteResult& result, std::string& error) {
+    bool Uncaptured(const std::vector<FrameGenViewSubmission>& views) {
         if (copy_after_release_) {
             return false;
         }
@@ -635,18 +647,7 @@ class VulkanFrameGen final : public FrameGenGpu {
         for (std::size_t i = 0; i < views.size(); ++i) {
             captured = captured && views_[i].capture.Matches(views[i].source);
         }
-        if (captured) {
-            return false;
-        }
-        for (std::size_t i = 0; i < views.size(); ++i) {
-            if (!EnsureView(views_[i], views[i], tuning, error)) {
-                return true;
-            }
-            views_[i].capture.valid = false;
-        }
-        result.uncaptured = true;
-        error = "a view's image was not captured when the game released it";
-        return true;
+        return !captured;
     }
 
     void DestroyView(ViewResources& view) {

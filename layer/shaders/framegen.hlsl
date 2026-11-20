@@ -1952,8 +1952,13 @@ float2 SourceUv(float2 position, float fraction) {
 // content is in the newest frame (uv units), false where it has none. A map
 // built for another frame of the same real frame (FrameGenTuning::
 // engine_map_reuse: its time in options.w's high half; 0, this frame's own)
-// is scaled to `fraction`.
+// is scaled to `fraction`. Outside the image it has none (a read out of
+// bounds returns 0, which would decode as content that has not moved).
 bool MotionMapBack(float2 uv, float fraction, out float2 back) {
+    back = float2(0.0, 0.0);
+    if (any(uv < 0.0) || any(uv >= 1.0)) {
+        return false;
+    }
     uint width, height;
     g_motion.GetDimensions(width, height);
     const float2 size = float2(width, height);
@@ -4333,7 +4338,11 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         }
         source = texel;
     }
-    uint packed = 0u;
+    // A gap nothing reached from either side: the eye-shift map keeps the
+    // newest frame unshifted there (0, read as FG_SHIFT_NONE is); the motion
+    // maps have no entry, so their reader keeps its chosen vector rather than
+    // taking the content there as not having moved.
+    uint packed = MotionMap() ? FG_SHIFT_NONE : 0u;
     if (ahead_key != 0u || behind_key != 0u) {
         const uint neighbour = g_shift[source];
         const float2 back = (neighbour == FG_SHIFT_NONE ? float2(0.0, 0.0)
