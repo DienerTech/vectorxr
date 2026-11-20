@@ -3019,6 +3019,110 @@ void TestSkippedCopy(Game& game) {
     CheckClean(nullptr, "skipped copy (End)");
 }
 
+// Depth taken late (VECTORXR_VULKAN_BRIDGE_DEPTH=late) with the bridge's queue
+// stalled and the same image every frame: an acquire whose image's late copy
+// is still queued from the acquire before makes no other (Direct3D 12 removes
+// the device when a command list is executed again before its last execution
+// is done) and says so in its figures; the image stays the game's and its
+// hand-over is copied all the same. Once the queue moves, acquires copy again.
+void TestLateCopyPending(Game& game) {
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "late");
+    VulkanBridge bridge;
+    Session session(game);
+    BeginBridge(game, bridge, session);
+    ComPtr<ID3D12Device> device = BridgeDevice(bridge);
+    MakeRuntimeImages(device.Get(), 1, 32, 32, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth);
+    const XrSwapchain swapchain = Handle(0xa9);
+    std::string reason;
+    Check(bridge.AddSwapchain(swapchain, DepthInfo(32, 32), FakeEnumerate, reason), "bridged: " + reason);
+    const auto figures = [&](std::uint64_t copies, std::uint64_t skipped) {
+        const std::string described = bridge.Describe(swapchain);
+        return SummaryValue(described, "lateCopies") == copies && SummaryValue(described, "lateSkipped") == skipped &&
+               SummaryValue(bridge.Summary(), "lateDepthSkips") == skipped;
+    };
+    Acquire(bridge, swapchain, 0);
+    Check(Release(bridge, swapchain), "the first frame is copied");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    Check(figures(0, 0), "nothing is handed over before the first acquire: " + bridge.Describe(swapchain));
+    {
+        Gate gate(device.Get(), game);
+        gate.HoldQueue(BridgeQueue(bridge));
+        Acquire(bridge, swapchain, 0);
+        Check(figures(1, 0), "the acquire copies the image handed over last: " + bridge.Describe(swapchain));
+        Check(Release(bridge, swapchain), "its frame is copied");
+        for (std::uint64_t held = 1; held <= 2; ++held) {
+            Acquire(bridge, swapchain, 0);
+            Check(figures(1, held), "with its late copy still queued, acquire " + std::to_string(held) +
+                                        " makes no other: " + bridge.Describe(swapchain));
+            Check(Release(bridge, swapchain), "and its frame is copied all the same");
+        }
+    }
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    Check(device->GetDeviceRemovedReason() == S_OK, "the held late copy removes nothing");
+    Acquire(bridge, swapchain, 0);
+    Check(figures(2, 2), "acquires copy again once the queue moved: " + bridge.Describe(swapchain));
+    Check(Release(bridge, swapchain), "copied");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    Check(TakeLog("holds").size() == 1, "the late copy's memory is logged");
+    TakeLog("depth timing check");
+    Check(bridge.RemoveSwapchain(swapchain), "removed");
+    CheckClean(&bridge, "late copy pending");
+    bridge.End();
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "");
+    CheckClean(nullptr, "late copy pending (End)");
+}
+
+// Depth taken late, images in turn: the acquire that copies the image handed
+// over last gives it back to the game's queue, and that submission is refused.
+// The image stays the bridge's until its own next acquire, which gives it
+// back, so its release hands it over and is copied.
+void TestLateHandBackRefused(Game& game) {
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "late");
+    VulkanBridge bridge;
+    Session session(game);
+    BeginBridge(game, bridge, session);
+    ID3D12Device* device = BridgeDevice(bridge);
+    MakeRuntimeImages(device, 2, 32, 32, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth);
+    const XrSwapchain swapchain = Handle(0xaa);
+    std::string reason;
+    Check(bridge.AddSwapchain(swapchain, DepthInfo(32, 32), FakeEnumerate, reason), "bridged: " + reason);
+    Acquire(bridge, swapchain, 0);
+    Check(Release(bridge, swapchain), "image 0's frame is copied");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    // Image 1's acquire copies image 0 late: its release goes through, its
+    // giving back is refused.
+    g_recorder.pass_submits = 1;
+    g_recorder.fail_submits = 1;
+    g_recorder.fail_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    Acquire(bridge, swapchain, 1);
+    Check(g_recorder.fail_submits == 0 && SummaryValue(bridge.Summary(), "failedSubmits") == 1 &&
+              SummaryValue(bridge.Describe(swapchain), "lateCopies") == 1,
+          "the late copy's giving back was refused: " + bridge.Summary());
+    Check(TakeLog("refused").size() == 1, "the refusal is reported");
+    Check(Release(bridge, swapchain), "image 1's frame is copied");
+    // Image 0's next acquire: image 1's late copy (its release, its giving
+    // back), then image 0 given back.
+    g_recorder.Take();
+    Acquire(bridge, swapchain, 0);
+    const std::vector<Submission> acquired = g_recorder.Take();
+    Check(acquired.size() == 3 && acquired[2].commands.size() == 1,
+          "image 0's next acquire gives it back: " + std::to_string(acquired.size()) + " submissions");
+    Check(Release(bridge, swapchain), "and its frame is handed over and copied");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    Check(SummaryValue(bridge.Summary(), "failedSubmits") == 1, "nothing else was refused: " + bridge.Summary());
+    Check(TakeLog("holds").size() == 1, "the late copy's memory is logged");
+    TakeLog("depth timing check");
+    Check(bridge.RemoveSwapchain(swapchain), "removed");
+    CheckClean(&bridge, "late hand-back refused");
+    bridge.End();
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "");
+    CheckClean(nullptr, "late hand-back refused (End)");
+}
+
 // The game's queue held back over many frames of a stereo colour+depth set:
 // no acquire or release waits on the CPU (no fence is waited for: more are
 // made, up to the cap, then submissions go unfenced), and once the queue
@@ -4447,6 +4551,8 @@ int main(int argc, char** argv) {
         TestFenceDeviceLost(game);
         TestStalledQueue(game);
         TestSkippedCopy(game);
+        TestLateCopyPending(game);
+        TestLateHandBackRefused(game);
         TestRingStall(game);
         if (!binary_only) TestDrainPastGame(game, true);
         TestDrainPastGame(game, false);

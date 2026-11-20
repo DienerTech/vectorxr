@@ -420,10 +420,12 @@ struct VulkanBridge::Impl {
         ComPtr<ID3D12Resource> resource; // the twin's shape, the bridge's alone
         std::vector<ComPtr<ID3D12CommandAllocator>> allocators;
         std::vector<ComPtr<ID3D12GraphicsCommandList>> lists; // by image: its twin into `resource`
+        std::vector<UINT64> list_done;                        // by image: its list's last execution's done value
         bool resource_failed{false};
         std::optional<std::uint32_t> handed; // the image the last hand-over named
         bool fresh{false};                   // `resource` holds a copy no hand-over took yet
         std::uint64_t copies{0};             // into `resource`
+        std::uint64_t skipped{0};            // acquires not copied: the image's list was still queued
         std::uint64_t used{0};               // hand-overs that copied `resource`
         std::uint64_t engagements{0};
         std::uint64_t bytes{0};
@@ -570,6 +572,7 @@ struct VulkanBridge::Impl {
     bool check_always{false}; // VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK=always
     bool check_reported{false};
     std::uint64_t late_copies{0};
+    std::uint64_t late_skips{0}; // LateDepth::skipped, of every swapchain
     // The CPU time of each hand-over (Released), all of it: its submissions,
     // the copy queued and the hand-back.
     std::vector<double> handover_us;
@@ -973,7 +976,7 @@ struct VulkanBridge::Impl {
                    << ", depthChecks=" << late.at_end_checks << "/" << late.late_only_checks << "/"
                    << late.neither_checks << " (at the hand-over/only at the next acquire/neither)"
                    << ", lateCopies=" << late.copies << ", lateUsed=" << late.used
-                   << ", lateTaken=" << late.engagements;
+                   << ", lateTaken=" << late.engagements << ", lateSkipped=" << late.skipped;
             if (late.bytes) stream << ", lateMiB=" << MiB(late.bytes);
         }
         if (!chain.private_reason.empty()) {
@@ -2094,6 +2097,7 @@ struct VulkanBridge::Impl {
                                                        nullptr, IID_PPV_ARGS(&late.resource));
         late.allocators.assign(chain.images.size(), nullptr);
         late.lists.assign(chain.images.size(), nullptr);
+        late.list_done.assign(chain.images.size(), 0);
         for (std::size_t i = 0; SUCCEEDED(hr) && i < chain.images.size(); ++i) {
             hr = device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&late.allocators[i]));
             if (SUCCEEDED(hr)) {
@@ -2123,6 +2127,7 @@ struct VulkanBridge::Impl {
             late.resource.Reset();
             late.allocators.clear();
             late.lists.clear();
+            late.list_done.clear();
             late.resource_failed = true;
             late.engaged = false;
             Info(Failure("Making the late depth copy", hr) + ": the game's depth is taken at the hand-over (" +
@@ -2155,7 +2160,17 @@ struct VulkanBridge::Impl {
         if (image.state != State::kGame || !image.acquire) return;
         const VkCommandBuffer check =
             checking && late.image == *handed ? LateRead(chain, image, *handed, 1) : VK_NULL_HANDLE;
-        const bool copy = late.engaged && EnsureLateResource(chain);
+        bool copy = late.engaged && EnsureLateResource(chain);
+        if (copy && late.list_done[*handed] > done->GetCompletedValue()) {
+            // The image's list is still queued from its last acquire (the
+            // bridge's queue is behind), and Direct3D 12 forbids executing a
+            // command list again before its last execution is done: no copy
+            // this time. The image stays the game's, and its next hand-over
+            // copies the twin, as while depth is not taken from here.
+            copy = false;
+            ++late.skipped;
+            ++late_skips;
+        }
         if (!check && !copy) return;
         std::uint64_t serial = 0;
         if (!copy) {
@@ -2178,6 +2193,9 @@ struct VulkanBridge::Impl {
         }
         written_value = written_next;
         image.state = State::kExternal;
+        // Its release's giving back (Image::handed_back) is undone: should
+        // the giving back below be refused, its next acquire must submit.
+        image.handed_back = false;
         chain.last_serial = serial;
         if (check) {
             late.step = LateDepth::Step::kQueued;
@@ -2188,6 +2206,7 @@ struct VulkanBridge::Impl {
         queue->ExecuteCommandLists(1, lists);
         const UINT64 value = ++done_value;
         queue->Signal(done.Get(), value);
+        late.list_done[*handed] = value;
         image.done = value;
         chain.last_done = value;
         late.fresh = true;
@@ -3528,7 +3547,7 @@ std::string VulkanBridge::Summary() const {
            << ", depth=" << Impl::DepthTimingName(impl_->depth_timing)
 
            << ", depthChecks=" << checks[0] << "/" << checks[1] << "/" << checks[2]
-           << ", lateDepthCopies=" << impl_->late_copies
+           << ", lateDepthCopies=" << impl_->late_copies << ", lateDepthSkips=" << impl_->late_skips
 
            << ", liveFences=" << impl_->fence_count
            << ", fenceGrowth=" << impl_->fence_growth << ", unfencedSubmits=" << impl_->unfenced_submits
