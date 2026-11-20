@@ -987,6 +987,10 @@ struct FrameGenSettings {
     // Use the game's depth (written only when off; absent means on).
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     use_game_depth: bool,
+    // Settings this app does not know (another edition's, or a later
+    // version's) round-trip untouched.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn default_framegen_interpolate_flow() -> String { "auto".to_owned() }
@@ -1004,6 +1008,7 @@ impl Default for FrameGenSettings {
             extend_head_prediction: false,
             edge_fill: false,
             use_game_depth: true,
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -1083,9 +1088,12 @@ struct MirrorSettings {
     margin: f64,
     #[serde(default = "default_mirror_aspect")]
     aspect: String,
-    #[serde(default = "default_mirror_width")]
+    // A number written by hand as 1280.0, or one out of range, is not a
+    // reason to refuse the whole file: it is rounded here and brought into
+    // range with the rest (normalize_mirror_settings).
+    #[serde(default = "default_mirror_width", deserialize_with = "deserialize_mirror_width")]
     width: u32,
-    #[serde(default = "default_mirror_frame_rate")]
+    #[serde(default = "default_mirror_frame_rate", deserialize_with = "deserialize_mirror_frame_rate")]
     frame_rate: u32,
     #[serde(default = "default_false")]
     fill_monitor: bool,
@@ -1115,6 +1123,22 @@ fn default_mirror_width() -> u32 {
 
 fn default_mirror_frame_rate() -> u32 {
     60
+}
+
+// Any JSON number, rounded and kept to u32; anything else is the default.
+fn lenient_u32(value: serde_json::Value, fallback: u32) -> u32 {
+    match value.as_f64() {
+        Some(number) if number.is_finite() => number.round().clamp(0.0, f64::from(u32::MAX)) as u32,
+        _ => fallback,
+    }
+}
+
+fn deserialize_mirror_width<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    Ok(lenient_u32(serde_json::Value::deserialize(deserializer)?, default_mirror_width()))
+}
+
+fn deserialize_mirror_frame_rate<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    Ok(lenient_u32(serde_json::Value::deserialize(deserializer)?, default_mirror_frame_rate()))
 }
 
 const MIRROR_EYES: [&str; 2] = ["left", "right"];
@@ -1201,6 +1225,10 @@ struct VectorXRModules {
     framegen: FrameGenModuleConfig,
     #[serde(default)]
     mirror: MirrorModuleConfig,
+    // Modules this app does not know (another edition's, or a later
+    // version's) round-trip untouched.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1213,6 +1241,9 @@ struct VectorXRConfig {
     applications: Vec<RegisteredApplication>,
     #[serde(default)]
     modules: VectorXRModules,
+    // Anything else of another edition's or a later version's, untouched.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1519,6 +1550,7 @@ fn default_config() -> VectorXRConfig {
         core: CoreConfig::default(),
         applications: Vec::new(),
         modules: VectorXRModules::default(),
+        extra: serde_json::Map::new(),
     }
 }
 
@@ -2546,9 +2578,20 @@ fn show_directory(directory: &Path) -> Result<(), String> {
     if wide[..wide.len() - 1].contains(&0) {
         return Err(format!("Unable to open {}", directory.to_string_lossy()));
     }
+    // The shell may hand the folder to its extensions, which need COM on the
+    // calling thread (a worker's, not the UI's).
+    let com = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_APARTMENTTHREADED | windows::Win32::System::Com::COINIT_DISABLE_OLE1DDE,
+        )
+    };
     let result = unsafe {
         ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL)
     };
+    if com.is_ok() {
+        unsafe { windows::Win32::System::Com::CoUninitialize() };
+    }
     // ShellExecute reports success as a value above 32.
     if result.0 as isize > 32 {
         Ok(())
@@ -2689,12 +2732,18 @@ fn default_screenshot_folder() -> Result<String, String> {
 }
 
 // Opens the screenshot folder in the file manager. Returns the folder opened.
+// Off the UI thread: a network folder whose server is gone can take as long
+// as the network's timeout to answer.
 #[tauri::command]
-fn open_screenshot_folder(folder: Option<String>) -> Result<String, String> {
-    let folder = screenshot_folder_in(pictures_folder(), local_app_data_folder(), folder.as_deref())?;
-    prepare_screenshot_folder(&folder)?;
-    show_directory(&folder.path)?;
-    Ok(folder.path.to_string_lossy().into_owned())
+async fn open_screenshot_folder(folder: Option<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder = screenshot_folder_in(pictures_folder(), local_app_data_folder(), folder.as_deref())?;
+        prepare_screenshot_folder(&folder)?;
+        show_directory(&folder.path)?;
+        Ok(folder.path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 // The language chosen in the installer (windows/nsis-hooks.nsh writes its
@@ -3291,7 +3340,11 @@ fn write_runtime_control(session_id: String, desired: RuntimeControlAction) -> R
         .find(|status| status.session_id == session_id)
         .ok_or_else(|| user_error("sessionInactive", &[], "The OpenXR session is no longer active".into()))?;
     if matches!(desired, RuntimeControlAction::MirrorVisible(_)) && session.state.mirror_visible.is_none() {
-        return Err("The mirror window is unavailable for this OpenXR session".into());
+        return Err(user_error(
+            "mirrorUnavailable",
+            &[],
+            "The mirror window is unavailable for this OpenXR session".into(),
+        ));
     }
     if matches!(desired, RuntimeControlAction::QuadviewsDiagnosticVisualization(_)) && !session.capabilities.quadviews_diagnostic_visualization {
         return Err(user_error(
@@ -3540,6 +3593,28 @@ fn play_test_sound_blocking(
 
 #[cfg(test)]
 mod tests {
+    // Settings another edition (or a later version) wrote are kept when this
+    // app saves; a hand-written 1280.0 mirror width does not refuse the file.
+    #[test]
+    fn unknown_settings_round_trip_and_mirror_numbers_are_lenient() {
+        let content = r#"{
+            "version": 3,
+            "laterTopLevel": {"kept": true},
+            "modules": {
+                "crop": {"enabled": true, "defaults": {"top": 10}},
+                "framegen": {"defaults": {"predictionDampening": 50}},
+                "mirror": {"defaults": {"width": 1280.0, "frameRate": -5}}
+            }
+        }"#;
+        let config = super::normalize_config(super::parse_config(content).unwrap());
+        let saved: serde_json::Value = serde_json::to_value(&config).unwrap();
+        assert_eq!(saved["laterTopLevel"]["kept"], true);
+        assert_eq!(saved["modules"]["crop"]["defaults"]["top"], 10);
+        assert_eq!(saved["modules"]["framegen"]["defaults"]["predictionDampening"], 50);
+        assert_eq!(saved["modules"]["mirror"]["defaults"]["width"], 1280);
+        assert!(saved["modules"]["mirror"]["defaults"]["frameRate"].as_u64().unwrap() >= 1);
+    }
+
     // The request the layer reads (ReadInputRescanRequest): its protocol
     // version and the press's time, at the relay root.
     #[test]

@@ -86,7 +86,7 @@
           "heading": "Ihr erstes Spiel einrichten",
           "steps": {
             "1": "Starten Sie das Spiel einmal mit installiertem VectorXR und beenden Sie es wieder.",
-            "2": "Öffnen Sie das **Anwendungsregister**, klicken Sie auf **Aktualisieren** und registrieren Sie das Spiel aus der Liste der Apps, die VectorXR gesehen hat.",
+            "2": "Öffnen Sie **Anwendungen → Erkennung**, klicken Sie auf **Aktualisieren** und registrieren Sie das Spiel aus der Liste der Apps, die VectorXR gesehen hat.",
             "3": "Öffnen Sie in der Seitenleiste eine Erweiterung, klicken Sie auf **Profil hinzufügen** und wählen Sie das Spiel.",
             "4": "Passen Sie die Einstellungen an und klicken Sie auf **Änderungen speichern**. Manche Erweiterungen brauchen einen Neustart des Spiels; ihre Anleitungen sagen, welche."
           }

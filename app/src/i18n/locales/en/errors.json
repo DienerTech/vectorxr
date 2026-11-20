@@ -7,6 +7,7 @@
   "soundMissing": "Sound file not found: {path}",
   "sessionInactive": "The OpenXR session is no longer active",
   "diagnosticUnavailable": "Diagnostic visualization is unavailable for this OpenXR session",
+  "mirrorUnavailable": "The mirror window is unavailable for this OpenXR session",
   "layerNotRegistered": "Layer manifest is no longer registered in that OpenXR slice",
   "layerConflict": "Another VectorXR registration is already enabled ({slice}: {path}). OpenXR apps crash when two copies of VectorXR load, so disable that one first.",
   "elevationRequired": "This OpenXR layer change requires elevation. Restart VectorXR as administrator, then try again.",

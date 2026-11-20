@@ -788,9 +788,23 @@ function normalizeFrameGenInteger(value: unknown, limits: { min: number; max: nu
   return Math.min(limits.max, Math.max(limits.min, Math.round(value)))
 }
 
+const frameGenSettingKeys = [
+  'synthesisMode',
+  'flowQuality',
+  'motionEstimation',
+  'interpolateFlow',
+  'frameMultiplier',
+  'artifactSuppression',
+  'motionLimitPercent',
+  'extendHeadPrediction',
+  'edgeFill',
+  'useGameDepth',
+] as const satisfies readonly (keyof FrameGenSettings)[]
+
 export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSettings = defaultFrameGenSettings()): FrameGenSettings {
   const source = isRecord(value) ? value : {}
   return {
+    ...unknownEntries(source, frameGenSettingKeys),
     synthesisMode: frameGenSynthesisModes.includes(source.synthesisMode as FrameGenSynthesisMode)
       ? source.synthesisMode as FrameGenSynthesisMode
       : fallback.synthesisMode,
@@ -1005,6 +1019,17 @@ type UnknownRecord = Record<string, unknown>
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null
+}
+
+// A record's keys this app does not know, as they are: settings another
+// edition of VectorXR (or a later version) writes are kept when this app
+// saves, not dropped.
+function unknownEntries(source: UnknownRecord, known: readonly string[]): UnknownRecord {
+  const extra: UnknownRecord = {}
+  for (const [key, value] of Object.entries(source)) {
+    if (!known.includes(key)) extra[key] = value
+  }
+  return extra
 }
 
 function normalizeLogLevel(value: unknown): LogLevel {
@@ -2166,6 +2191,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const mirrorDefaults = normalizeMirrorSettings(mirror.defaults, fallback.modules.mirror.defaults)
 
   return {
+    ...unknownEntries(source, ['version', 'core', 'applications', 'modules']),
     version: 3,
     core: {
       enabled: normalizeBoolean(core.enabled, fallback.core.enabled),
@@ -2178,6 +2204,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
     },
     applications,
     modules: {
+      ...unknownEntries(modules, ['depthxr', 'pivotxr', 'quadviews', 'turbo', 'framegen', 'mirror']),
       depthxr: {
         enabled: normalizeBoolean(depthxr.enabled, fallback.modules.depthxr.enabled),
         defaults: normalizeDepthXRSettings(depthxr.defaults, fallback.modules.depthxr.defaults),

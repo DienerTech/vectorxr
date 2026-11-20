@@ -51,7 +51,7 @@ const previewModules: ModuleId[] = ['depthxr', 'pivotxr', 'quadviews', 'turbo', 
             >
               <template #state><span class="font-medium" style="color: var(--app-text)">{{ config.modules[moduleId].enabled ? t('common.on') : t('common.off') }}</span></template>
             </I18nText>
-            <!-- The stabilized mirror window is a utility with profiles, not a tab of its own. -->
+            <!-- The stabilized mirror window: a Capture & Mirror utility with profiles of its own. -->
             <I18nText
               tag="li"
               keypath="app.importPreview.moduleDefault"

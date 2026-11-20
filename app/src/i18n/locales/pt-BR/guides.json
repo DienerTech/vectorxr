@@ -86,7 +86,7 @@
           "heading": "Configure seu primeiro jogo",
           "steps": {
             "1": "Abra o jogo uma vez com o VectorXR instalado e depois feche-o.",
-            "2": "Abra o **Registro de aplicativos**, clique em **Atualizar** e registre o jogo na lista de apps que o VectorXR viu.",
+            "2": "Abra **Aplicativos → Descoberta**, clique em **Atualizar** e registre o jogo na lista de apps que o VectorXR viu.",
             "3": "Abra um aprimoramento na barra lateral, clique em **Adicionar perfil** e escolha o jogo.",
             "4": "Ajuste as configurações e clique em **Salvar alterações**. Alguns aprimoramentos exigem reiniciar o jogo; os guias deles dizem quais."
           }

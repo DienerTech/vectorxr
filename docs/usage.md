@@ -30,16 +30,15 @@ The **Home** tab is a status dashboard:
 
 - **System Health** shows whether the runtime is enabled and the VectorXR layer is registered.
   Use **View Health** for details or **Export Debug** to collect a support ZIP.
-- **Applications** contains **Registry** and **Discovery**. Under **OpenXR Utilities**,
-  expand **Capture & Mirror** for the **Screenshots** and **Stabilized Mirror** pages.
-  OpenXR Enhancements are grouped into **Performance**, **Look and Feel**, and **Control**.
-  The sidebar remembers which groups you collapse.
 - The **Active overview** lists the five Enhancements — **Quadviews**, **Turbo**, **Frame
   Generation**, **Pivot**, and **Depth**, including the default profile and enabled custom-profile counts. These summarize
   your configuration; an Active badge does not mean a VR application is currently running.
 - The left sidebar holds app sections (Home, Settings, On-Screen Display, Application Registry,
   OpenXR Layers, About) and the five Enhancements. A green dot marks an Enhancement with an
-  enabled default or custom profile.
+  enabled default or custom profile. **Applications** contains **Registry** and **Discovery**;
+  under **OpenXR Utilities**, **Capture & Mirror** holds the **Screenshots** and **Stabilized
+  Mirror** pages; the Enhancements are grouped into **Performance**, **Look and Feel**, and
+  **Control**. The sidebar remembers which groups you collapse.
 - The bar at the bottom is the **save bar**. Changes you make are staged until you click **Save
   Changes** (or **Discard**). Watch this bar — nothing you change takes effect until it's saved.
 - **Community & Announcements** provides access to the DienerTech Discord and Ko-fi support.

@@ -86,7 +86,7 @@
           "heading": "Set up your first game",
           "steps": {
             "1": "Launch the game once with VectorXR installed, then quit it.",
-            "2": "Open **Application Registry**, click **Refresh**, and register the game from the list of apps VectorXR has seen.",
+            "2": "Open **Applications → Discovery**, click **Refresh**, and register the game from the list of apps VectorXR has seen.",
             "3": "Open an enhancement in the sidebar, click **Add Profile**, and choose the game.",
             "4": "Adjust the settings, then click **Save Changes**. Some enhancements need the game restarted; their guides say which."
           }

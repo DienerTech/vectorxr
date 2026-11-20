@@ -86,7 +86,7 @@
           "heading": "Configurer votre premier jeu",
           "steps": {
             "1": "Lancez le jeu une fois avec VectorXR installé, puis quittez-le.",
-            "2": "Ouvrez le **Registre des applications**, cliquez sur **Actualiser** et enregistrez le jeu depuis la liste des applications vues par VectorXR.",
+            "2": "Ouvrez **Applications → Découverte**, cliquez sur **Actualiser** et enregistrez le jeu depuis la liste des applications vues par VectorXR.",
             "3": "Ouvrez une amélioration dans la barre latérale, cliquez sur **Ajouter un profil** et choisissez le jeu.",
             "4": "Ajustez les réglages, puis cliquez sur **Enregistrer les modifications**. Certaines améliorations demandent de redémarrer le jeu ; leurs guides indiquent lesquelles."
           }

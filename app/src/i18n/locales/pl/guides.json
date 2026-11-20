@@ -86,7 +86,7 @@
           "heading": "Skonfiguruj pierwszą grę",
           "steps": {
             "1": "Uruchom grę raz z zainstalowanym VectorXR, a potem ją zamknij.",
-            "2": "Otwórz **Rejestr aplikacji**, kliknij **Odśwież** i zarejestruj grę z listy aplikacji, które VectorXR widział.",
+            "2": "Otwórz **Aplikacje → Wykrywanie**, kliknij **Odśwież** i zarejestruj grę z listy aplikacji, które VectorXR widział.",
             "3": "Otwórz ulepszenie na pasku bocznym, kliknij **Dodaj profil** i wybierz grę.",
             "4": "Dostosuj ustawienia i kliknij **Zapisz zmiany**. Niektóre ulepszenia wymagają ponownego uruchomienia gry; ich poradniki mówią które."
           }
