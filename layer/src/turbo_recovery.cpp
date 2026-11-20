@@ -104,12 +104,9 @@ bool WriteAtomically(const std::filesystem::path& path, const std::string& conte
 }
 
 
-bool ArchiveFault(const std::filesystem::path& path) {
-    std::ifstream stream(path);
-    if (!stream) return false;
-    std::ostringstream buffer;
-    buffer << stream.rdbuf();
-    const auto content = buffer.str();
+// Saves a record's text to fault history, named after the marker at `path`
+// and the record's own timestamp. The marker itself is not read or written.
+bool ArchiveRecord(const std::filesystem::path& path, const std::string& content) {
     const auto timestamp = ReadUnsigned(content, "updatedAtUnixMilliseconds");
     if (!timestamp) return false;
     auto name = path.stem();
@@ -121,6 +118,14 @@ bool ArchiveFault(const std::filesystem::path& path) {
     if (std::filesystem::exists(cleared, ec)) return true;
     if (std::filesystem::exists(destination, ec)) return true;
     return WriteAtomically(destination, content, nullptr);
+}
+
+bool ArchiveFault(const std::filesystem::path& path) {
+    std::ifstream stream(path);
+    if (!stream) return false;
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    return ArchiveRecord(path, buffer.str());
 }
 
 std::uint64_t FileTimeValue(
@@ -173,7 +178,7 @@ void TurboRecoveryGuard::Configure(std::filesystem::path root, TurboRecoveryReco
     reason_.clear();
 }
 
-bool TurboRecoveryGuard::Write() {
+std::string TurboRecoveryGuard::Serialize() {
     record_.updated_at = (std::max)(RuntimeRelayUnixMilliseconds(), record_.updated_at + 1);
     std::ostringstream json;
     json << "{\n  \"version\": 1,\n";
@@ -193,10 +198,12 @@ bool TurboRecoveryGuard::Write() {
     field("processCreated", std::to_string(record_.process_created));
     json << "  \"processId\": " << record_.process_id << ",\n"
          << "  \"updatedAtUnixMilliseconds\": " << record_.updated_at << "\n}\n";
-    std::string error;
-    if (WriteAtomically(own_path_, json.str(), &error)) return true;
-    reason_ = "Recovery record could not be saved. Turbo remains off while automatic recovery is enabled.";
-    return false;
+    return json.str();
+}
+
+// Saves the live marker. A caller decides what a failure means for Turbo.
+bool TurboRecoveryGuard::Write() {
+    return WriteAtomically(own_path_, Serialize(), nullptr);
 }
 
 bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mode, const ProcessAlive& alive) {
@@ -272,7 +279,12 @@ bool TurboRecoveryGuard::Prepare(bool enabled, bool retry, const std::string& mo
         record_.mode = mode;
         record_.state = "armed";
         record_.reason.clear();
-        if (!Write()) { exit_file_.Disarm(); blocked_ = true; return false; }
+        if (!Write()) {
+            exit_file_.Disarm();
+            blocked_ = true;
+            reason_ = "Recovery record could not be saved. Turbo remains off while automatic recovery is enabled.";
+            return false;
+        }
         armed_ = true;
         // A normal process exit removes the marker the way OpenXR teardown
         // would, for games that never call xrDestroySession. A game that
@@ -312,21 +324,19 @@ void TurboRecoveryGuard::Fail(const std::string& reason) {
 
 void TurboRecoveryGuard::NoteRecovered(const std::string& reason) {
     if (root_.empty()) return;
-    const TurboRecoveryRecord saved = record_;
+    // The history record goes straight to fault history. The live marker is
+    // never rewritten here: a crash right after a runtime failure must still
+    // find it armed. Serialize keeps the monotonic timestamp it advanced, so a
+    // later archive can never collide with this one.
+    const std::string saved_state = record_.state;
+    const std::string saved_reason = record_.reason;
     record_.state = "recovered";
     record_.reason = reason;
-    const bool written = Write() && ArchiveFault(own_path_);
-    // Keep the monotonic timestamp so a later archive can never collide with
-    // this one, then restore the live marker exactly as it was.
-    const auto updated_at = record_.updated_at;
-    record_ = saved;
-    record_.updated_at = updated_at;
-    if (armed_ || failed_) {
-        Write();
-    } else if (written) {
-        std::error_code ec;
-        std::filesystem::remove(own_path_, ec);
-    }
+    const std::string content = Serialize();
+    record_.state = saved_state;
+    record_.reason = saved_reason;
+    // History that cannot be saved is lost; Turbo and its status are unaffected.
+    ArchiveRecord(own_path_, content);
 }
 
 bool TurboRecoveryGuard::ConsumeClearRequest() {
