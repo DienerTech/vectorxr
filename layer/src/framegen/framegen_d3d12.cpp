@@ -221,6 +221,9 @@ struct CaptureKey {
 struct ViewResources {
     FrameGenHistoryState history_state;
     CaptureKey capture;
+    // EnsureView made the view's images for its history state (captures
+    // never allocate them: they wait for the Execute that does).
+    bool set_up{false};
     // Per real frame, in the history state's ring (FrameGenHistoryRing
     // slots; only those are created).
     std::array<Texture, kFrameGenHistoryRingMax> history;
@@ -233,7 +236,11 @@ struct ViewResources {
     Texture output;
     // Linear depth at half resolution, in the ring like the history: the
     // newest frame's, and the previous one's (content it did not see).
+    // Created the first time a frame brings depth (see EnsureDepth); a game
+    // that submits none never pays for them. depth_refused: they could not
+    // be made, and are not tried again until the view is set up again.
     std::array<Texture, kFrameGenHistoryRingMax> depth;
+    bool depth_refused{false};
     // Depth trust scores (in the ring) and the eye-shift map, at half
     // resolution; created once depth is first used.
     std::array<Texture, kFrameGenHistoryRingMax> trust;
@@ -877,6 +884,20 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
             delta_sky_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_SKY") == "1";
         }
+        // The trust update reads the scores back through the unordered access
+        // view it writes them with (FG_PASS_TRUST_UPDATE): only 32-bit
+        // single-channel formats are always readable that way, half floats
+        // where the device says so. Without that the scores are kept as
+        // 32-bit floats.
+        D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT trust_support{};
+        trust_support.Format = DXGI_FORMAT_R16_FLOAT;
+        const bool typed_load =
+            SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options))) &&
+            options.TypedUAVLoadAdditionalFormats &&
+            SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &trust_support, sizeof(trust_support))) &&
+            (trust_support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0;
+        trust_format_ = typed_load ? DXGI_FORMAT_R16_FLOAT : DXGI_FORMAT_R32_FLOAT;
         if (!software && coarse_tangent_ > 0.0 &&
             SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6))) &&
             options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2 &&
@@ -1013,8 +1034,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         ID3D12Resource* resource = it->second[source.image_index];
         // Capture never reallocates; Execute sets the view up first.
         static_cast<void>(quality); // the flow level does not affect the history images
-        if (!view.depth[1].resource || !view.history_state.MatchesImages(request.extent, resource->GetDesc().Format,
-                                                                      request.output)) {
+        if (!view.set_up || !view.history_state.MatchesImages(request.extent, resource->GetDesc().Format, request.output)) {
             error.clear();
             return false;
         }
@@ -1267,8 +1287,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         ViewResources& view = views_[index];
         const FrameGenExtent extent = view.history_state.Extent();
-        if (!view.depth[1].resource || extent.width != request.extent.width || extent.height != request.extent.height) {
+        if (!view.set_up || extent.width != request.extent.width || extent.height != request.extent.height) {
             return false; // Execute sets the view up first
+        }
+        if (view.depth_refused) {
+            return false; // its depth images could not be made: reported then
         }
         ID3D12Resource* resource = it->second[depth.image_index];
         const D3D12_RESOURCE_DESC desc = resource->GetDesc();
@@ -1295,6 +1318,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
+            return false;
+        }
+        // The first depth this view can read: its linear depth images.
+        if (!EnsureDepth(view, error)) {
             return false;
         }
         const std::size_t slot_index = capture_count_ % capture_slots_.size();
@@ -1902,6 +1929,10 @@ class D3D12FrameGen final : public FrameGenGpu {
             !Create(target.cross_keys, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error)) {
             return false;
         }
+        // The empty eye's own depth may never have been captured.
+        if (!EnsureDepth(target, error)) {
+            return false;
+        }
         Texture& from = source.depth[source.history_state.Newest()];
         Texture& to = target.depth[target.history_state.Newest()];
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
@@ -2079,6 +2110,32 @@ class D3D12FrameGen final : public FrameGenGpu {
         return true;
     }
 
+    // A view's linear depth images (one per ring slot, at half resolution),
+    // created the first time a frame brings depth for it: a game that
+    // submits none never pays for them. The view is set up (EnsureView).
+    // Slots of frames from before hold no depth, and nothing reads them: a
+    // frame reads the previous one's depth only when that frame used its own
+    // (FrameGenViewRequest::depth_previous). All of them or none: a view
+    // whose images cannot be made goes on without depth until it is set up
+    // again.
+    bool EnsureDepth(ViewResources& view, std::string& error) {
+        if (view.depth[0].resource) {
+            return true;
+        }
+        if (view.depth_refused) {
+            return false;
+        }
+        const FrameGenExtent half = FrameGenPyramid(view.history_state.Extent())[1];
+        for (std::uint8_t slot = 0; slot < view.history_state.Ring(); ++slot) {
+            if (!Create(view.depth[slot], half, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) {
+                view.depth = {};
+                view.depth_refused = true;
+                return false;
+            }
+        }
+        return true;
+    }
+
     // A view's depth trust and eye-shift textures, created the first time
     // its depth is used.
     bool EnsureTrust(ViewResources& view, FrameGenExtent extent, std::string& error) {
@@ -2086,9 +2143,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             return true;
         }
         const FrameGenExtent half = FrameGenPyramid(extent)[1];
-        // Scores in [-1, 1]: half floats hold them to a thousandth.
+        // Scores in [-1, 1]: half floats hold them to a thousandth (32-bit
+        // floats where the trust update cannot read half floats back, see
+        // trust_format_).
         for (std::uint8_t slot = 0; slot < view.history_state.Ring(); ++slot) {
-            if (!Create(view.trust[slot], half, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_FLOAT, true, error)) return false;
+            if (!Create(view.trust[slot], half, trust_format_, trust_format_, true, error)) return false;
         }
         const FrameGenExtent tiles = FrameGenTrustTiles(half);
         return Create(view.depth_scales, {tiles.width * kFrameGenDepthScaleTexels, tiles.height},
@@ -3182,7 +3241,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                        views_[i].capture.Matches(views[i].source);
             }
             if (both && views[source].request.depth && views[target].request.depth && views_[source].depth_ready &&
-                views_[source].depth_generation == validator_.Generation()) {
+                !views_[target].depth_refused && views_[source].depth_generation == validator_.Generation()) {
                 ok = RecordDepthCross(views[source], views[target], views_[source], views_[target], error);
                 Stamp(static_cast<int>(FrameGenPass::kDepthCrossResolve));
             }
@@ -5380,8 +5439,10 @@ class D3D12FrameGen final : public FrameGenGpu {
             // from its old images are not written.
             view.history_state = {};
             view.capture = {};
+            view.set_up = false;
             for (auto& generation : view.slot_generation) ++generation;
             view.trust_stereo = view.depth_ready = view.depth_fresh = false;
+            view.depth_refused = false;
             view.engine_pair = {};
             view.engine_read = {};
             view.engine_next = 0;
@@ -5532,7 +5593,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     // they are, for a ring of `ring` slots.
     bool Prepared(const FrameGenViewSubmission& submission, const ViewResources& view, std::uint8_t ring) const {
         const auto it = images_.find(submission.source.swapchain);
-        if (it == images_.end() || submission.source.image_index >= it->second.size() || !view.depth[1].resource ||
+        if (it == images_.end() || submission.source.image_index >= it->second.size() || !view.set_up ||
             view.history_state.Ring() != ring) {
             return false;
         }
@@ -5554,6 +5615,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 if (!complete) {
                     view.history_state = {};
                     view.capture.valid = false;
+                    view.set_up = false;
                 }
             }
         } setup{view};
@@ -5577,8 +5639,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             analyzed_.clear();
             for (auto& generation : view.slot_generation) ++generation;
         }
-        // The depth textures are created last: they mark a view set up.
-        if (change & FrameGenHistoryState::kAll || !view.depth[1].resource) {
+        // The view counts as set up once all of these are made.
+        if (change & FrameGenHistoryState::kAll || !view.set_up) {
+            view.set_up = false;
             view.capture.valid = false;
             const DXGI_FORMAT view_format = ViewFormat(source_desc.Format, submission.source.format);
             view.history = {};
@@ -5612,13 +5675,13 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.depth_scale_raw = {};
             view.depth_scale_votes = {};
             view.trust_stereo = false;
+            // The linear depth likewise, with the first frame that brings
+            // depth (see EnsureDepth); a capture into the old images is gone
+            // with them.
             view.depth = {};
-            for (std::uint8_t slot = 0; slot < ring; ++slot) {
-                if (!Create(view.depth[slot], levels[1], DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) {
-                    return false;
-                }
-            }
-            view.depth_ready = false;
+            view.depth_refused = false;
+            view.depth_ready = view.depth_fresh = false;
+            view.set_up = true;
         }
         if (change != FrameGenHistoryState::kNone || !view.filtered[0].resource) {
             view.filtered = {};
@@ -6688,7 +6751,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         // Depth only when it was captured for this frame; it is used once.
         FrameGenViewRequest effective = view.history_state.Effective(submission.request);
         // Only once the depth is known to line the eyes up (see RecordDepthCheck).
-        effective.depth = effective.depth && view.depth_ready && view.depth[1].resource && validator_.Usable() &&
+        effective.depth = effective.depth && view.depth_ready && view.depth[0].resource && validator_.Usable() &&
                           view.depth_generation == validator_.Generation();
         view.depth_ready = false;
         // Engine motion vectors likewise: captured for this frame (paired
@@ -7058,6 +7121,9 @@ class D3D12FrameGen final : public FrameGenGpu {
     ComPtr<ID3D12GraphicsCommandList5> commands5_; // the same list, for variable-rate shading
     bool commands_open_{false};                     // Execute's list is recording (RunHardwareFlow closes it)
     UINT shading_tile_{0};                          // pixels per shading-rate tile side; 0: no variable-rate shading
+    // The depth trust scores' format: half floats where the device reads
+    // them back through an unordered access view, 32-bit floats otherwise.
+    DXGI_FORMAT trust_format_{DXGI_FORMAT_R16_FLOAT};
     bool world_motion_{true};                       // FrameGenViewRequest::world_motion where depth is in use
     bool occlusion_{true};                          // FrameGenTuning::occlusion allowed
     bool cross_fade_{false};                        // FrameGenTuning::cross_fade forced (research)
