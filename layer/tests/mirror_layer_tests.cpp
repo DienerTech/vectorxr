@@ -240,27 +240,47 @@ struct GameFrame {
 
 // Every byte of a frame as it goes on (which may be the layer's copy).
 std::string FrameBytes(const XrFrameEndInfo& frame) {
+    // Field by field: a structure's padding is whatever its memory held, and
+    // two frames with the same fields may differ there.
     std::string bytes;
     const auto add = [&](const void* data, std::size_t size) { bytes.append(static_cast<const char*>(data), size); };
+    const auto add_sub_image = [&](const XrSwapchainSubImage& image) {
+        add(&image.swapchain, sizeof(image.swapchain));
+        add(&image.imageRect, sizeof(image.imageRect));
+        add(&image.imageArrayIndex, sizeof(image.imageArrayIndex));
+    };
     add(&frame.displayTime, sizeof(frame.displayTime));
     add(&frame.environmentBlendMode, sizeof(frame.environmentBlendMode));
     add(&frame.layerCount, sizeof(frame.layerCount));
     for (uint32_t i = 0; i < frame.layerCount; ++i) {
         const XrCompositionLayerBaseHeader* layer = frame.layers[i];
+        add(&layer->type, sizeof(layer->type));
+        add(&layer->layerFlags, sizeof(layer->layerFlags));
+        add(&layer->space, sizeof(layer->space));
         if (layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
             const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
-            add(&projection->layerFlags, sizeof(projection->layerFlags));
-            add(&projection->space, sizeof(projection->space));
             add(&projection->viewCount, sizeof(projection->viewCount));
             for (uint32_t v = 0; v < projection->viewCount; ++v) {
                 const XrCompositionLayerProjectionView& view = projection->views[v];
                 add(&view.pose, sizeof(view.pose));
                 add(&view.fov, sizeof(view.fov));
-                add(&view.subImage, sizeof(view.subImage));
-                if (view.next) add(view.next, sizeof(XrCompositionLayerDepthInfoKHR));
+                add_sub_image(view.subImage);
+                if (view.next) {
+                    const auto* depth = static_cast<const XrCompositionLayerDepthInfoKHR*>(view.next);
+                    add(&depth->type, sizeof(depth->type));
+                    add_sub_image(depth->subImage);
+                    add(&depth->minDepth, sizeof(depth->minDepth));
+                    add(&depth->maxDepth, sizeof(depth->maxDepth));
+                    add(&depth->nearZ, sizeof(depth->nearZ));
+                    add(&depth->farZ, sizeof(depth->farZ));
+                }
             }
-        } else {
-            add(layer, sizeof(XrCompositionLayerQuad));
+        } else if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+            add(&quad->eyeVisibility, sizeof(quad->eyeVisibility));
+            add_sub_image(quad->subImage);
+            add(&quad->pose, sizeof(quad->pose));
+            add(&quad->size, sizeof(quad->size));
         }
     }
     return bytes;
@@ -641,8 +661,11 @@ void TestFrameIsTheSameOnAndOff() {
     Expect(changed_off.empty() && changed_on.empty(), "The game's own frame is never written: " + changed_on);
     Expect(off.size() == on.size(), "Both runs hand on every frame");
     for (std::size_t i = 0; i < off.size(); ++i) {
+        std::size_t at = 0;
+        while (at < off[i].size() && at < on[i].size() && off[i][at] == on[i][at]) ++at;
         Expect(off[i] == on[i], "The runtime receives the same frame with the mirror on and off, frame " +
-                                   std::to_string(i));
+                                   std::to_string(i) + " (first difference at byte " + std::to_string(at) + " of " +
+                                   std::to_string(off[i].size()) + "/" + std::to_string(on[i].size()) + ")");
     }
     GameFrame game;
     Peer::Start(depthxr::MirrorSettings{});
