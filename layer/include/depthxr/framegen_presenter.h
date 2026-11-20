@@ -666,6 +666,10 @@ class FrameGenPresenter {
         XrTime end_time{0};
         XrTime slot_time{0};
         XrDuration period{0};
+        // Passed straight through: `period` is a multiple of the refresh
+        // period that only echoed the game's own frame interval, the runtime
+        // holding nothing back (NoteRuntimeHalvingLocked).
+        bool period_echoed{false};
         bool should_render{false};
         bool begun{false};
         bool engaged{false};
@@ -998,7 +1002,8 @@ class FrameGenPresenter {
     // interval), was not held, and any other says nothing. Only the
     // presenter thread's waits report halving; the game's own can clear it
     // (they may also wait for the game's frame before, as MSFS's do).
-    void NoteRuntimeHalvingLocked(std::chrono::steady_clock::time_point called,
+    // Returns whether this wait's period was such an echo.
+    bool NoteRuntimeHalvingLocked(std::chrono::steady_clock::time_point called,
                                   std::chrono::steady_clock::time_point returned, XrTime display_time,
                                   XrDuration period, bool presenter);
     void NotePhaseLocked(std::chrono::steady_clock::time_point called, std::chrono::steady_clock::time_point returned,
@@ -1142,7 +1147,8 @@ class FrameGenPresenter {
         std::chrono::steady_clock::time_point now, FrameGenSynthesisMode mode, bool hardware_active);
     // One output image per spec in each of the first `sets` output sets.
     // `keep_replaced`: an output made anew keeps its old swapchain alive
-    // (retired_outputs_) until a frame is written into the new ones.
+    // (retired_outputs_) until a frame written into the new ones has been
+    // submitted.
     bool EnsureOutputs(const std::vector<OutputSpec>& specs, std::size_t sets, std::string& error,
                        bool keep_replaced = false);
     // Acquires and waits the images of the first `sets` output sets.
@@ -2098,7 +2104,8 @@ class FrameGenPresenter {
     bool logged_quad_unanalyzed_{false};
     // Presenter thread (and Stop): output images replaced while composing
     // quad views, kept alive while the last frame written still shows them
-    // (until a frame is written into the new ones, or the thread exits).
+    // (until a frame written into the new ones has been submitted, or the
+    // thread exits).
     std::vector<Output> retired_outputs_;
     std::uint64_t jit_covers_{0};   // refreshes shown past the newest real frame while the next was late (summary)
     XrTime last_target_time_{0};    // just in time: the display time the newest waited frame was told

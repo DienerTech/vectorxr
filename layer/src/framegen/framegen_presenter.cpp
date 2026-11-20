@@ -3652,8 +3652,18 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     const auto settle = probe_switch ? std::min(auto_settle_, kAutoProbeSettle) : auto_settle_;
     if (last_app_end_ && now - multiplier_changed_at_ >= settle) {
         // An engaged frame should take N refreshes; a passed-through one, one.
+        // One refresh, not the period reported, where that only echoed the
+        // game's own frame interval (SteamVR with Pimax's headset driver; the
+        // frame's wait showed it, NoteRuntimeHalvingLocked): judged against
+        // its own interval a slow game would never read as late, and Auto
+        // would never engage for it. A period the runtime holds frames to
+        // stays what a passed-through frame is judged by.
         const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
-        const auto expected = std::chrono::nanoseconds(static_cast<std::int64_t>(period * multiplier * kAutoLateFactor));
+        const XrDuration cadence_period =
+            frame && !frame->engaged && frame->period_echoed && refresh_period_ > 0 ? std::min(period, refresh_period_)
+                                                                                    : period;
+        const auto expected =
+            std::chrono::nanoseconds(static_cast<std::int64_t>(cadence_period * multiplier * kAutoLateFactor));
         const bool late = now - *last_app_end_ > expected;
         cadence_.push_back({now, late, late && started_late});
     }
@@ -4811,7 +4821,7 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
     NoteRuntimePeriodLocked(frame.period, returned);
     if (!frame.engaged && frame.should_render) {
         // Passed straight through: the game's own wait.
-        NoteRuntimeHalvingLocked(called, returned, frame.slot_time, frame.period, false);
+        frame.period_echoed = NoteRuntimeHalvingLocked(called, returned, frame.slot_time, frame.period, false);
     }
     if (frame.engaged) {
         state->predictedDisplayPeriod = frame.period * static_cast<XrDuration>(multiplier);
@@ -5213,7 +5223,7 @@ void FrameGenPresenter::NoteRuntimePeriodLocked(XrDuration period, Clock::time_p
     }
 }
 
-void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock::time_point returned,
+bool FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock::time_point returned,
                                                  XrTime display_time, XrDuration period, bool presenter) {
     // Each source is measured from its own waits: a switch starts over.
     const std::optional<HalvingWait> previous = halving_last_;
@@ -5221,11 +5231,11 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
     if (!previous || previous->presenter != presenter) {
         halving_samples_.clear();
         halving_since_ = returned;
-        return;
+        return false;
     }
     const XrDuration refresh = refresh_period_;
     if (refresh <= 0 || display_time <= previous->display_time) {
-        return;
+        return false;
     }
     // Halved (or cut further): a multiple of the refresh period reported, or
     // a wait asked for well within a refresh of the last one's release that
@@ -5252,6 +5262,7 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
     const auto waited = returned - called;
     const bool blocked = waited >= std::chrono::nanoseconds(refresh / 2);
     bool halved = held >= 2;
+    bool echoed = false; // the period reported only echoes the caller's own interval
     if (halved && called - previous->returned >= std::chrono::nanoseconds(refresh * 3 / 4)) {
         const XrDuration past = step % refresh;
         const bool off_grid = std::min(past, refresh - past) > refresh / 20;
@@ -5259,8 +5270,9 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
             waited < std::max<std::chrono::nanoseconds>(std::chrono::milliseconds(1),
                                                         std::chrono::nanoseconds(refresh / 10))) {
             halved = false;
+            echoed = true;
         } else if (!reported || !blocked) {
-            return;
+            return false;
         }
     }
     if (presenter) {
@@ -5283,7 +5295,7 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
     }
     const std::size_t total = halving_samples_.size();
     if (returned - halving_since_ < window || static_cast<XrDuration>(total) * 8 * refresh < window.count()) {
-        return;
+        return echoed;
     }
     const auto count = static_cast<std::size_t>(std::count_if(
         halving_samples_.begin(), halving_samples_.end(), [](const HalvingSample& sample) { return sample.held >= 2; }));
@@ -5326,6 +5338,7 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
         runtime_halving_ = false;
         halving_confirmed_at_.reset();
     }
+    return echoed;
 }
 
 void FrameGenPresenter::NotePhaseLocked(Clock::time_point called, Clock::time_point returned, XrTime display_time,
@@ -5523,7 +5536,7 @@ std::pair<Clock::time_point, bool> FrameGenPresenter::ScheduleSubmissionLocked(C
     bool late = false;
     if (phased) {
         const auto ideal = phase_wall_ + ns(display_time - phase_xr_);
-        late = now > ideal + ns(period / 2);
+        late = now > ideal + ns(spacing / 2);
         // Held to it only while display times stay on the phase's refresh
         // grid. One off it (more than refresh/20 from a whole number of
         // refreshes) is no refresh's: the runtime echoed a late caller's own
@@ -10194,11 +10207,9 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
                                                              local[2] * local[2]));
         }
     }
-    // Output images replaced since the last frame written: nothing shows
-    // them once this frame is submitted.
-    if (quad && !retired_outputs_.empty()) {
-        DestroyRetiredOutputs();
-    }
+    // Output images replaced since the last frame written stay until this
+    // frame is submitted (CompositorLoop): the runtime's last frame still
+    // shows them.
     std::scoped_lock lock(mutex_);
     consecutive_failures_ = 0;
     jit_output_failed_ = false;
@@ -10710,6 +10721,20 @@ void FrameGenPresenter::CompositorLoop() {
             if (XR_FAILED(result)) {
                 PauseLocked("runtime rejected a frame from the presenter thread (" + std::to_string(result) + ")");
                 break;
+            }
+            // Output images replaced since the last frame written: the frame
+            // the runtime just took shows the new ones (or the game's own
+            // images), and the views kept to repeat are no longer theirs, so
+            // nothing shows them any more. Not before it: until then the
+            // runtime's last frame still names them, and destroying them
+            // waits for the GPU's work on them, which would cost that frame
+            // its refresh. A frame not submitted leaves them for the next one
+            // written; one the runtime refused ends this thread, which
+            // destroys them as it exits.
+            if (written && submit && !retired_outputs_.empty()) {
+                lock.unlock();
+                DestroyRetiredOutputs();
+                lock.lock();
             }
             continue;
         }

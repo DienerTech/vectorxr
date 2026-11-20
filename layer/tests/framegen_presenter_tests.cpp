@@ -72,6 +72,7 @@ int g_wait_timeouts = 0; // number of upcoming output waits that time out
 int g_wait_timeouts_on_create = 0; // g_wait_timeouts once the next output swapchain is made
 std::function<XrResult(XrSwapchain, XrDuration)> g_output_wait;
 std::function<XrResult(XrSwapchain)> g_output_release;
+std::function<void(XrSwapchain)> g_output_destroy; // each swapchain the layer destroys, under g_xr_mutex
 // Each output image wait takes this long (the runtime slow to hand images
 // back): the presenter thread writes its refresh that much later.
 std::atomic<std::chrono::microseconds> g_wait_image_delay{std::chrono::microseconds(0)};
@@ -104,6 +105,7 @@ XrResult XRAPI_PTR Create(XrSession, const XrSwapchainCreateInfo* info, XrSwapch
 }
 XrResult XRAPI_PTR Destroy(XrSwapchain swapchain) {
     std::scoped_lock lock(g_xr_mutex);
+    if (g_output_destroy) g_output_destroy(swapchain);
     g_images.erase(swapchain);
     g_destroyed.push_back(swapchain);
     return XR_SUCCESS;
@@ -9967,6 +9969,7 @@ void TestQuadOutputsResized() {
     const std::vector<XrSwapchain> old_outputs = runtime.Snapshot().back().swapchains;
     Check(ShowsFrameGenOutputs(runtime.Snapshot().back()), "resized: composing first");
     std::vector<std::pair<XrSwapchain, XrDuration>> waits;
+    std::size_t destroyed_while_shown = 0;
     {
         // The first new eye takes part of the refresh and the second
         // times out. The presenter must retry that same image next time.
@@ -9983,12 +9986,23 @@ void TestQuadOutputsResized() {
             }
             return XR_SUCCESS;
         };
+        // An old output destroyed while the runtime's last frame names it.
+        g_output_destroy = [&](XrSwapchain swapchain) {
+            if (std::find(old_outputs.begin(), old_outputs.end(), swapchain) == old_outputs.end() ||
+                runtime.log.empty()) return;
+            const std::vector<XrSwapchain>& last = runtime.log.back().swapchains;
+            destroyed_while_shown += std::find(last.begin(), last.end(), swapchain) != last.end() ? 1 : 0;
+        };
     }
     app.canvas = {1400, 1300};
     app.Run(600ms);
     {
         std::scoped_lock lock(g_xr_mutex);
         g_output_wait = {};
+        g_output_destroy = {};
+        Check(destroyed_while_shown == 0,
+              "resized: the old outputs are destroyed only once the runtime has a frame showing the new ones (" +
+                  std::to_string(destroyed_while_shown) + " while still shown)");
         Check(waits.size() == 3 && waits[0].first != waits[1].first && waits[1].first == waits[2].first,
               "resized: only the timed-out eye is waited again");
         Check(waits[0].second <= kPeriod && waits[1].second >= 0 && waits[1].second <= kPeriod - 1'000'000 &&
@@ -13036,6 +13050,43 @@ void TestEchoRuntimeClearsHalving() {
     Check(!status.runtime_halving && took < 2.0 && status.standby && presenter.OsdDetailText() != kHalvingDetail,
           name + ": the slow game's waits clear it (" + std::to_string(took) + " s; " + presenter.OsdDetailText() +
               ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// That runtime with Auto at full rate: a game at about 51 fps passes its
+// frames through, asks for each wait late, and is told its own interval as
+// the period, two refreshes, the runtime holding nothing. Judged against
+// that period its frames would never read as late and Auto would stay at
+// full rate; judged against the refresh period, Auto steps up for it.
+// Nothing is reported as halving.
+void TestAutoStepsUpOnEchoRuntime() {
+    const std::string name = "auto steps up on an echo runtime";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.echo = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kAuto, app, owned, nullptr);
+    // No probing down: only the step up is judged.
+    presenter.SetAutoPolicy(200ms, 30s, 600ms, 300ms);
+    // The refresh period is learned at full refresh first.
+    RunWork(*app, 600ms, kLightWork);
+    Check(presenter.Status().multiplier == 1 && !presenter.Status().threaded,
+          name + ": a game holding the refresh rate stays at full rate");
+    const int echoed = runtime.echoed_multiples;
+    const auto work = PeriodsOfWork(kPeriod, 1.75); // 19.4 ms of work: about 51 fps
+    RunWork(*app, 3000ms, work, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        return now.multiplier >= 2 && now.threaded;
+    });
+    const int multiples = runtime.echoed_multiples - echoed;
+    const FrameGenStatus status = presenter.Status();
+    Check(multiples >= 8, name + ": the runtime reported the game's own interval as the period (" +
+                              std::to_string(multiples) + " waits)");
+    Check(status.multiplier >= 2 && status.threaded && !status.runtime_halving,
+          name + ": the game below the refresh rate steps Auto up (" + std::to_string(status.multiplier) + "x)");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
@@ -16582,6 +16633,7 @@ int main(int argc, char** argv) {
     RUN(TestEchoRuntimeKeepsRefresh);
     RUN(TestEchoRuntimeLateWake);
     RUN(TestEchoRuntimeClearsHalving);
+    RUN(TestAutoStepsUpOnEchoRuntime);
     RUN(TestEchoHitchKeepsRefresh);
     // Quad views Frame Generation composes itself.
     GROUP("quad");
