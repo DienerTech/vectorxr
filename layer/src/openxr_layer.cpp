@@ -5159,7 +5159,8 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
             // Snapshot the released image index at the app's release moment —
             // the compositor must sample this frame's image even after the
             // (turbo-pipelined) app has acquired the next one.
-            if (const std::optional<uint32_t> released_index = it->second.image_states.ReleaseOldest()) {
+            const std::optional<uint32_t> released_index = it->second.image_states.ReleaseOldest();
+            if (released_index) {
                 it->second.last_released_image_index = *released_index;
                 it->second.has_last_released_image_index = true;
                 NoteFrameGenRelease(swapchain, *released_index);
@@ -5172,7 +5173,10 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                     framegen_.CaptureOnRelease(swapchain, *released_index);
                 }
             }
-            if (ShouldDeferSwapchainRelease(it->second)) {
+            // Held for capture only with an image waited for: a release the
+            // runtime would refuse (no successful wait) goes on to be refused.
+            if (QuadViewsDefersSwapchainRelease(it->second) ||
+                (released_index && ShouldDeferSwapchainRelease(it->second))) {
                 ++it->second.deferred_release_count;
                 ++it->second.release_count;
                 if (it->second.quadviews_session && it->second.release_count <= 3) {
@@ -9917,6 +9921,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
     // Each frame's own quad route only (set at the compose site below).
     DropPendingFrameGenQuad(true);
+    // A bridged frame's releases are handed over below: held from this
+    // frame on when screenshots, the mirror (or a pass of the layer's) read
+    // it at its end (CaptureHoldsReleasesLocked).
+    if (!capture_holds_releases_ && CaptureHoldsReleasesLocked()) {
+        capture_holds_releases_ = true;
+    }
     // The space-warp probe's structures never reach the runtime (nor Frame
     // Generation, nor the bridges' copies of the frame).
     std::optional<SpaceWarpFrame> spacewarp_frame;
@@ -16473,6 +16483,9 @@ void OpenXrLayer::StartScreenshotsLocked(const void* binding_chain) {
     screenshot_quad_logged_ = false;
     screenshot_framegen_logged_ = false;
     EnsureSubmittedImagesLocked();
+    // A session that starts with a reader of its images wanted holds its
+    // first frame's releases already (CaptureHoldsReleasesLocked).
+    capture_holds_releases_ = CaptureHoldsReleasesLocked();
 }
 
 bool OpenXrLayer::SubmittedImagesWantedLocked() const {
@@ -16576,6 +16589,9 @@ void OpenXrLayer::PollScreenshotBinding() {
     }
     if (screenshot_edge_.Update(screenshot_binding_down_cached_)) {
         screenshot_requested_ = true;
+        // The frame's releases still to come are held at once: usually this
+        // frame is the one saved (CaptureHoldsReleasesLocked).
+        capture_holds_releases_ = true;
     }
 #endif
 }
@@ -17284,13 +17300,17 @@ void OpenXrLayer::ResetSwapchainState() {
     tracked_swapchains_.clear();
 }
 
+bool OpenXrLayer::QuadViewsDefersSwapchainRelease(const SwapchainInfo& info) const {
+    return defer_quadviews_swapchain_releases_ && info.quadviews_session && info.session == active_session_ &&
+           IsQuadViewsActive();
+}
+
 bool OpenXrLayer::ShouldDeferSwapchainRelease(const SwapchainInfo& info) const {
     // Deliberately scoped to every swapchain in the quadviews session, not just the
     // four compositor inputs. The extra swapchains are still flushed before
     // next_end_frame_, so submission ordering stays correct; keying off the session
     // avoids tracking which handles are compositor inputs versus app-owned layers.
-    if (defer_quadviews_swapchain_releases_ && info.quadviews_session && info.session == active_session_ &&
-        IsQuadViewsActive()) {
+    if (QuadViewsDefersSwapchainRelease(info)) {
         return true;
     }
     // Screenshots and the mirror read the frame's images at its end, before

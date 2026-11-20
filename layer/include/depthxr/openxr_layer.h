@@ -775,6 +775,7 @@ class OpenXrLayer {
     void LogSwapchainFormatsOnChange(const std::string& line);
     // Counts an application call on the calling thread; logs the first call of each kind on each thread.
     void NoteThread(ThreadCensus::Call call);
+    bool QuadViewsDefersSwapchainRelease(const SwapchainInfo& info) const;
     bool ShouldDeferSwapchainRelease(const SwapchainInfo& info) const;
     // An application's release of `swapchain`'s image (forwarded as it came,
     // or deferred until its xrEndFrame), on to the runtime.
