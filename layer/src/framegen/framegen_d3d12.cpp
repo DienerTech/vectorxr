@@ -5250,6 +5250,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         };
         for (std::size_t i = 0; i < views.size() && i < views_.size(); ++i) {
             ViewResources& view = views_[i];
+            // A dump always has a depth file (the replay reads one): a view whose
+            // game brought no depth gets its ring here, empty.
+            if (!view.depth[0].resource && !EnsureDepth(view, error)) {
+                return false;
+            }
             if (!copy(view.history[view.history_state.Newest()], "view" + std::to_string(i) + "-color.raw") ||
                 !copy(view.depth[view.history_state.Newest()], "view" + std::to_string(i) + "-depth.f32")) {
                 return false;

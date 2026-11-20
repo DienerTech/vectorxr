@@ -4270,8 +4270,9 @@ int RunQuadViews(Harness& harness) {
             const FrameGenExtent filtered = levels[FrameGenFinalFlowLevel(tuning)];
             slot += allocation(views[i].extent, static_cast<ID3D12Resource*>(g_swapchains[sources[i]][0])->GetDesc().Format,
                                false) +
-                    2 * allocation(filtered, DXGI_FORMAT_R16G16B16A16_FLOAT, true) +
-                    allocation(levels[1], DXGI_FORMAT_R32_FLOAT, true);
+                    2 * allocation(filtered, DXGI_FORMAT_R16G16B16A16_FLOAT, true);
+            // No depth image: these views bring no depth, and the ring's depth is
+            // made only when one does.
         }
         const std::uint64_t slots = FrameGenHistoryRing(true) - FrameGenHistoryRing(false);
         std::cout << harness.name << " history ring: quad views " << bytes[0] / 1024 << " KiB, not composed "

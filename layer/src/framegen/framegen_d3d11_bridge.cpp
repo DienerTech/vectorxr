@@ -471,8 +471,14 @@ struct D3D11Bridge::Impl {
         }
         bool on = false;
         if (multithread) {
+            // Inside the device's lock: a thread that holds the context (the
+            // frame's, through its hand-over) is then waited for here, at the
+            // lock, and not from inside a Direct3D 11 call made beside its own
+            // (which the debug layer reports as two threads in one context).
+            multithread->Enter();
             multithread->SetMultithreadProtected(TRUE);
             on = multithread->GetMultithreadProtected() != FALSE;
+            multithread->Leave();
         }
         std::scoped_lock lock(mutex);
         multithread_protected = multithread_protected || on;

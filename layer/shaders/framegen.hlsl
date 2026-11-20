@@ -2585,7 +2585,11 @@ float4 PSMain(float4 position : SV_Position) : SV_Target {
             const float3 low = min(focus.rgb, min(min(n, s), min(e, w)));
             const float3 high = max(focus.rgb, max(max(n, s), max(e, w)));
             const float3 range = max(high - low, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
-            focus.rgb = saturate(focus.rgb + clamp((focus.rgb - average) * (sharpen * 2.0), -range * 0.5, range * 0.5));
+            // Up to 1.0, or where the neighbourhood is brighter than that (a float,
+            // HDR target) as far as the detail reaches, as the compositor's does.
+            const float3 ceiling = 1.0 + saturate(sign(high - 1.0)) * (high + range * 0.5 - 1.0);
+            focus.rgb = clamp(focus.rgb + clamp((focus.rgb - average) * (sharpen * 2.0), -range * 0.5, range * 0.5),
+                              0.0, ceiling);
         }
         composed = lerp(composed, focus, alpha);
     }

@@ -6826,7 +6826,7 @@ void TestD3D11SharpenShaderRegression() {
          ExtractRawShaderSource(source_file, "const char* D3D11FocusSharpenShaderSource()")},
     }};
     for (const auto& [label, shader] : shaders) {
-        Expect(shader.find("focus.rgb = max(focus.rgb + detail, 0.0);") != std::string::npos,
+        Expect(shader.find("focus.rgb = clamp(focus.rgb + detail, 0.0, ceiling);") != std::string::npos,
                label + " lost the extrema-preserving sharpen output");
         Expect(shader.find("focus.rgb = clamp(sharpened, lo, hi);") == std::string::npos,
                label + " regressed to the clamp that cancelled sharpening at extrema");

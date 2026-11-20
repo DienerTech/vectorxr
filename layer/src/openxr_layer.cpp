@@ -942,9 +942,10 @@ float4 PSMain(VSOut input) : SV_Target {
         float3 localRange = max(hi - lo, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
         float3 detail = (focus.rgb - avg) * (amount * 2.0);
         detail = clamp(detail, -localRange * 0.5, localRange * 0.5);
-        // No upper clamp: a float (HDR) target keeps its values above 1.0. The detail
-        // is already limited to half the local range, so only negatives need cutting.
-        focus.rgb = max(focus.rgb + detail, 0.0);
+        // Up to 1.0, or where the neighbourhood is brighter than that (a float, HDR
+        // target) as far as the detail reaches: highlights above 1.0 are kept.
+        float3 ceiling = 1.0 + saturate(sign(hi - 1.0)) * (hi + localRange * 0.5 - 1.0);
+        focus.rgb = clamp(focus.rgb + detail, 0.0, ceiling);
     }
     return focus;
 }
