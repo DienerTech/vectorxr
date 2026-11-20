@@ -891,6 +891,7 @@ struct StandIn {
     std::vector<std::string> extensions{kVulkanExtension, kVulkan2Extension, kD3D12Extension}; // listed before the instance
     bool enumeration_offered{true};
     bool vulkan_offered{true}; // XR_KHR_vulkan_enable(2)'s functions
+    bool visibility_mask_offered{false}; // XR_KHR_visibility_mask's function
     bool refuse_d3d12_instance{false}; // XR_ERROR_EXTENSION_NOT_PRESENT for instances with XR_KHR_D3D12_enable
     bool refuse_d3d12_session{false};  // XR_ERROR_GRAPHICS_DEVICE_INVALID for Direct3D 12 sessions
     bool refuse_destroy_session{false}; // xrDestroySession fails (the session stays)
@@ -1492,6 +1493,13 @@ XrResult XRAPI_CALL RtEnumerateBlendModes(XrInstance, XrSystemId, XrViewConfigur
     return XR_SUCCESS;
 }
 
+XrResult XRAPI_CALL RtGetVisibilityMask(XrSession, XrViewConfigurationType, std::uint32_t, XrVisibilityMaskTypeKHR,
+                                        XrVisibilityMaskKHR* mask) {
+    mask->vertexCountOutput = 0;
+    mask->indexCountOutput = 0;
+    return XR_SUCCESS;
+}
+
 XrResult XRAPI_CALL RtPollEvent(XrInstance, XrEventDataBuffer*) {
     return XR_EVENT_UNAVAILABLE;
 }
@@ -2023,6 +2031,10 @@ XrResult XRAPI_CALL RtGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (const auto it = kVulkanFunctions.find(name); it != kVulkanFunctions.end() && g_runtime.vulkan_offered) {
         *function = it->second;
+        return XR_SUCCESS;
+    }
+    if (std::strcmp(name, "xrGetVisibilityMaskKHR") == 0 && g_runtime.visibility_mask_offered) {
+        *function = Function(RtGetVisibilityMask);
         return XR_SUCCESS;
     }
     return XR_ERROR_FUNCTION_UNSUPPORTED;
@@ -3303,6 +3315,66 @@ void TestEnable2CreateInfos() {
                       !function,
                   std::string(name) + " is unsupported, as the runtime says");
         }
+        StopApp(app);
+        EndCase();
+    }
+}
+
+// xrGetInstanceProcAddr without an instance, and for an extension's function
+// the instance does not have.
+void TestProcAddrLookups() {
+    {
+        // No instance: only the three functions OpenXR allows then are looked
+        // up (the chain below answers them), never one the layer hooks.
+        BeginCase("proc-addr-no-instance");
+        App app = StartApp({kVulkan2Extension});
+        for (const char* name : {"xrLocateViews", "xrGetVisibilityMaskKHR", "xrCreateSession", "xrEndFrame",
+                                 "xrGetInstanceProcAddr", "xrCreateVulkanDeviceKHR", "xrGetSystem"}) {
+            PFN_xrVoidFunction function = Function(RtPollEvent);
+            Check(xrGetInstanceProcAddr(XR_NULL_HANDLE, name, &function) == XR_ERROR_HANDLE_INVALID && !function,
+                  std::string(name) + " without an instance is the handle's error, with no function");
+        }
+        PFN_xrVoidFunction function = nullptr;
+        Check(xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &function) ==
+                      XR_SUCCESS &&
+                  function,
+              "xrEnumerateInstanceExtensionProperties without an instance is the runtime's");
+        // The stand-in runtime has neither of these two: its answer comes back.
+        for (const char* name : {"xrEnumerateApiLayerProperties", "xrCreateInstance"}) {
+            function = Function(RtPollEvent);
+            Check(xrGetInstanceProcAddr(XR_NULL_HANDLE, name, &function) == XR_ERROR_FUNCTION_UNSUPPORTED &&
+                      !function,
+                  std::string(name) + " without an instance is asked of the runtime");
+        }
+        // With the instance the layer's functions are handed out as before.
+        function = nullptr;
+        Check(xrGetInstanceProcAddr(app.api.instance, "xrLocateViews", &function) == XR_SUCCESS && function &&
+                  function != Function(RtLocateViews),
+              "xrLocateViews with the instance is the layer's");
+        StopApp(app);
+        EndCase();
+    }
+    {
+        // XR_KHR_visibility_mask not enabled: the runtime has no function,
+        // and the layer hands out none of its own.
+        BeginCase("proc-addr-visibility-mask-absent");
+        App app = StartApp({kVulkan2Extension});
+        PFN_xrVoidFunction function = Function(RtPollEvent);
+        Check(xrGetInstanceProcAddr(app.api.instance, "xrGetVisibilityMaskKHR", &function) ==
+                      XR_ERROR_FUNCTION_UNSUPPORTED &&
+                  !function,
+              "xrGetVisibilityMaskKHR is unsupported, as the runtime says");
+        StopApp(app);
+        EndCase();
+    }
+    {
+        BeginCase("proc-addr-visibility-mask-present");
+        g_runtime.visibility_mask_offered = true;
+        App app = StartApp({kVulkan2Extension});
+        PFN_xrVoidFunction function = nullptr;
+        Check(xrGetInstanceProcAddr(app.api.instance, "xrGetVisibilityMaskKHR", &function) == XR_SUCCESS &&
+                  function && function != Function(RtGetVisibilityMask),
+              "xrGetVisibilityMaskKHR is the layer's where the runtime has it");
         StopApp(app);
         EndCase();
     }
@@ -6386,6 +6458,7 @@ int main(int argc, char** argv) {
     TestInstanceExtensions();
     TestRefusedInstance();
     TestEnable2CreateInfos();
+    TestProcAddrLookups();
     TestEnableLists();
     TestBridgeOffSession();
     TestBridgeOffWithD3D11();

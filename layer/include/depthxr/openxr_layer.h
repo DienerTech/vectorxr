@@ -330,6 +330,9 @@ class OpenXrLayer {
     // XR_FB_display_refresh_rate ones) call the runtime's through
     // CensusNext.
     bool HandshakeCensusActive() const { return handshake_census_.Active(); }
+    // Whether the chain below has xrGetVisibilityMaskKHR for the instance
+    // (XR_KHR_visibility_mask enabled): the layer hands out its own only then.
+    bool HasVisibilityMask() const { return next_get_visibility_mask_khr_ != nullptr; }
     void CensusCall();
     void CensusNote(std::string_view function, const std::string& detail, bool always = false);
     void CensusProcAddr(std::string_view name, XrResult result, bool resolved);
@@ -2178,6 +2181,11 @@ class OpenXrLayer {
     std::vector<XrActionSuggestedBinding> application_eye_gaze_bindings_;
     bool application_eye_gaze_binding_chain_unsupported_{false};
     DelayedActionSetAttachment<XrActionSet> eye_gaze_action_set_attachment_;
+    // True until the session's action sets are attached (by the application
+    // or by the fallback): only then does xrBeginFrame count frames towards
+    // the fallback attachment and try it, under mutex_. Written under mutex_
+    // beside eye_gaze_action_set_attachment_; read without it.
+    std::atomic<bool> eye_gaze_fallback_possible_{true};
     bool has_logged_eye_gaze_focus_active_{false};
     bool has_logged_eye_gaze_focus_unavailable_{false};
     uint32_t eye_gaze_unavailable_streak_{0};

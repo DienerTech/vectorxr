@@ -933,6 +933,15 @@ static XrResult XRAPI_CALL LayerGetInstanceProcAddr(XrInstance instance, const c
     }
 
     const std::string_view requested(name);
+    // Without an instance OpenXR answers for three functions only. A layer
+    // above may ask for them before it creates its instance: the chain below
+    // answers (or there is none yet: OpenXrLayer::GetInstanceProcAddr). Any
+    // other name is the handle's error, never one of the layer's functions.
+    if (instance == XR_NULL_HANDLE && requested != "xrEnumerateInstanceExtensionProperties" &&
+        requested != "xrEnumerateApiLayerProperties" && requested != "xrCreateInstance") {
+        *function = nullptr;
+        return XR_ERROR_HANDLE_INVALID;
+    }
     // Track application gaze independently of VectorXR's Quadviews feature.
     if (requested == "xrCreateAction") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrCreateAction);
@@ -1018,7 +1027,10 @@ static XrResult XRAPI_CALL LayerGetInstanceProcAddr(XrInstance instance, const c
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateViewConfigurationViews);
         return XR_SUCCESS;
     }
-    if (requested == "xrGetVisibilityMaskKHR") {
+    // XR_KHR_visibility_mask's, where the chain below has it for the instance
+    // (the extension enabled): otherwise the application gets the chain's
+    // answer below, never a function of the layer's.
+    if (requested == "xrGetVisibilityMaskKHR" && depthxr::OpenXrLayer::Instance().HasVisibilityMask()) {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrGetVisibilityMaskKHR);
         return XR_SUCCESS;
     }
@@ -1086,6 +1098,9 @@ static XrResult XRAPI_CALL LayerGetInstanceProcAddr(XrInstance instance, const c
 
     depthxr::OpenXrLayer& layer = depthxr::OpenXrLayer::Instance();
     const XrResult result = layer.GetInstanceProcAddr(instance, name, function);
+    if (XR_FAILED(result)) {
+        *function = nullptr;
+    }
     // The handshake census's own hooks, on functions the runtime has.
     if (layer.HandshakeCensusActive() && XR_SUCCEEDED(result) && *function) {
         depthxr::OpenXrLayer::CensusFunction slot{};

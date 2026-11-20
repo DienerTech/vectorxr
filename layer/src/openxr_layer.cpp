@@ -942,7 +942,9 @@ float4 PSMain(VSOut input) : SV_Target {
         float3 localRange = max(hi - lo, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
         float3 detail = (focus.rgb - avg) * (amount * 2.0);
         detail = clamp(detail, -localRange * 0.5, localRange * 0.5);
-        focus.rgb = saturate(focus.rgb + detail);
+        // No upper clamp: a float (HDR) target keeps its values above 1.0. The detail
+        // is already limited to half the local range, so only negatives need cutting.
+        focus.rgb = max(focus.rgb + detail, 0.0);
     }
     return focus;
 }
@@ -3746,6 +3748,8 @@ XrResult OpenXrLayer::AttachSessionActionSets(XrSession session, const XrSession
         std::scoped_lock lock(mutex_);
         if (attachment_attempt_prepared && session == active_session_) {
             eye_gaze_action_set_attachment_.CompleteAttachment(attachment_attempt, XR_SUCCEEDED(result));
+            eye_gaze_fallback_possible_.store(!eye_gaze_action_set_attachment_.SessionAttachmentCompleted(),
+                                              std::memory_order_release);
         }
         if (XR_SUCCEEDED(result) && attach_info->actionSets) {
             application_attached_action_sets_.insert(attach_info->actionSets,
@@ -3795,6 +3799,8 @@ void OpenXrLayer::TryAttachEyeGazeActionSetFallback(XrSession session) {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
             eye_gaze_action_set_attachment_.CompleteAttachment(*attachment_attempt, XR_SUCCEEDED(result));
+            eye_gaze_fallback_possible_.store(!eye_gaze_action_set_attachment_.SessionAttachmentCompleted(),
+                                              std::memory_order_release);
             if (XR_SUCCEEDED(result)) {
                 pending_eye_gaze_diagnostics_ = std::max(pending_eye_gaze_diagnostics_, 20u);
                 pending_eye_gaze_sync_diagnostics_ = std::max(pending_eye_gaze_sync_diagnostics_, 20u);
@@ -4825,6 +4831,10 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
         // mutex_, the device's lock taken first (GameContextLock).
         d3d11_bridge_.StageReleases(swapchain);
         const GameContextHold context_hold = game_context_->Hold();
+        // Another thread's hand-over may still be forwarding this swapchain's
+        // releases to the runtime without mutex_ (ForwardHandedOverReleases):
+        // the destroy waits for them, as an acquire does.
+        std::unique_lock handover(bridge_handover_mutex_);
         std::scoped_lock lock(mutex_);
         if (submitted_images_) {
             submitted_images_->Forget(swapchain);
@@ -7422,13 +7432,18 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
         std::scoped_lock lock(turbo_mutex_);
         upstream_turbo_.Begin(std::chrono::steady_clock::now());
     }
-    {
-        std::scoped_lock lock(mutex_);
-        if (session == active_session_) {
-            eye_gaze_action_set_attachment_.NoteFrameBoundary();
+    // The frames counted here are the fallback attachment's grace period
+    // only: once the session's action sets are attached there is nothing left
+    // to count or attach, and the frame stays off mutex_.
+    if (eye_gaze_fallback_possible_.load(std::memory_order_acquire)) {
+        {
+            std::scoped_lock lock(mutex_);
+            if (session == active_session_) {
+                eye_gaze_action_set_attachment_.NoteFrameBoundary();
+            }
         }
+        TryAttachEyeGazeActionSetFallback(session);
     }
-    TryAttachEyeGazeActionSetFallback(session);
 
     if (framegen_owns_pacing_.load(std::memory_order_acquire)) {
         const XrResult result = framegen_.BeginFrame(session, frame_begin_info, framegen_calls_);
@@ -12169,6 +12184,11 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
         }
         logged_pivot_space_conversions_.erase(space);
         failed_pivot_space_conversions_.erase(space);
+        // A head-prediction answer kept for the space is not a later space's
+        // that the runtime creates under the same handle.
+        std::erase_if(head_extension_answers_, [space](const HeadExtensionAnswer& answer) {
+            return answer.space == space || answer.base_space == space;
+        });
         was_view = tracked_view_spaces_.erase(space) > 0;
         if (auto node = application_action_spaces_.extract(space)) action_space = std::move(node.mapped());
         was_local = tracked_local_spaces_.erase(space) > 0;
@@ -13186,6 +13206,7 @@ void OpenXrLayer::ResetSessionState() {
     eye_gaze_bindings_ready_ = false;
     eye_gaze_binding_augmentation_disabled_ = false;
     eye_gaze_action_set_attachment_.Reset();
+    eye_gaze_fallback_possible_.store(true, std::memory_order_release);
     has_logged_eye_gaze_focus_active_ = false;
     has_logged_eye_gaze_focus_unavailable_ = false;
     eye_gaze_unavailable_streak_ = 0;
