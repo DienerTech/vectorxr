@@ -42,7 +42,12 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr std::size_t kFramesInFlight = 3;
-constexpr UINT kDescriptorsPerFrame = 1024;
+// A frame's descriptors (frames written together with their measurement):
+// for quad views' four views about 22 measuring dispatches each (8
+// descriptors a dispatch), then per generated frame and view a map (26, see
+// kDescriptorsPerSynthesis), the shading-rate image (8) and the draw (8);
+// with three generated frames 4 * (22 * 8 + 3 * 42) = 1208.
+constexpr UINT kDescriptorsPerFrame = 2048;
 // Captures in flight: four frames of quad views' four color images.
 constexpr UINT kCaptureSlots = 16;
 // GPU timestamps per Execute: its start, the optical flow hardware's wait
@@ -50,9 +55,12 @@ constexpr UINT kCaptureSlots = 16;
 constexpr UINT kTimingStamps = 4;
 // Just-in-time synthesis: submissions in flight (one per refresh) and the
 // descriptors each may use (per view: the shading-rate image, the eye-shift
-// map's passes and the draw).
+// map's passes and the draw). A map is a clear (2) and three dispatches (its
+// splat, resolve and fill): 26. Four views with the eye-shift map alone use
+// 4 * (26 + 8 + 8) and each eye's compose 8 more: 184; the research maps (a
+// motion map, an engine map) add 26 a view each (checked below).
 constexpr std::size_t kSynthesisSlots = 4;
-constexpr UINT kDescriptorsPerSynthesis = 256;
+constexpr UINT kDescriptorsPerSynthesis = 512;
 // A dispatch's descriptors: sampled textures t0-t4, then storage textures
 // u0-u1. Depth captures run outside a frame's descriptor range: one
 // dispatch per capture slot, after every frame's range.
@@ -61,6 +69,10 @@ constexpr UINT kFirstUav = kShaderResources;
 // The root parameter holding the draws' edge fill (b1, FrameGenImage::content).
 constexpr UINT kFillParameter = 3;
 constexpr UINT kDescriptorsPerDispatch = kShaderResources + 2;
+// Just-in-time synthesis at its most: four views, each with three maps, its
+// shading-rate image and its draw, then the two eyes' composes.
+static_assert(kDescriptorsPerSynthesis >=
+              4 * (3 * (2 + 3 * kDescriptorsPerDispatch) + 2 * kDescriptorsPerDispatch) + 2 * kDescriptorsPerDispatch);
 // Engine motion vectors (CaptureMotion): submissions in flight, never waited
 // for, each with a block of descriptors per dispatch (the two eyes'
 // censuses, then the resample's, one or one per eye) and a readback of each
@@ -3099,6 +3111,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = Failure("D3D12 Frame Generation command reset", hr);
             return false;
         }
+        commands_open_ = true;
         descriptor_cursor_ = static_cast<UINT>(slot_index) * kDescriptorsPerFrame;
         descriptor_end_ = descriptor_cursor_ + kDescriptorsPerFrame;
         ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
@@ -3391,7 +3404,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
             Flush(barriers);
         }
-        if (timed) {
+        // The optical flow hardware's step closes the list and reopens it: a
+        // step that failed in between left it closed, with nothing more to
+        // record on it or to close.
+        const bool open = commands_open_;
+        if (timed && open) {
             const UINT first = static_cast<UINT>(slot_index * kTimingStamps);
             commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first + kTimingStamps - 1);
             // The stamps around the optical flow hardware only when it ran.
@@ -3405,17 +3422,23 @@ class D3D12FrameGen final : public FrameGenGpu {
                                             readback_.Get(), (first + kTimingStamps - 1) * sizeof(UINT64));
             }
         }
-        if (profiling_) {
+        if (profiling_ && open) {
             commands_->ResolveQueryData(profile_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0,
                                         static_cast<UINT>(profile_labels_.size() + 1), profile_readback_.Get(), 0);
         }
-        hr = commands_->Close();
-        if (FAILED(hr)) {
-            error = Failure("D3D12 Frame Generation command close", hr);
-            ok = false;
+        if (open) {
+            hr = commands_->Close();
+            commands_open_ = false;
+            if (FAILED(hr)) {
+                // An earlier failure is the cause: its error stays.
+                if (ok) error = Failure("D3D12 Frame Generation command close", hr);
+                ok = false;
+            }
         }
         if (!ok) {
-            // Nothing was submitted: the recorded state transitions never ran.
+            // Nothing was submitted, or only the work before the optical flow
+            // hardware (the slot keeps its fence value): the state
+            // transitions recorded since never ran.
             // Rebuild the views, freeing textures only once earlier
             // submissions have finished with them.
             const bool idle = WaitIdle();
@@ -5969,6 +5992,11 @@ class D3D12FrameGen final : public FrameGenGpu {
                 return HardwareFailed(reason);
             }
         }
+        // The driver signals each registration's value once it is done on
+        // the GPU. The queue that writes the images first (the pack pass
+        // here; a capture's raw pack on the game's queue, which is this
+        // queue whenever captures pack) waits for the last one there, once.
+        work_->Wait(view.hardware_fence.Get(), view.hardware_fence_value);
         view.hardware_extent = input;
         view.hardware_perf = perf;
         view.hardware_fresh = true;
@@ -6194,6 +6222,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                 return false;
             }
         }
+        // The driver signals each registration's value once it is done on
+        // the GPU: the queue that copies into the atlas waits for the last
+        // one there, once.
+        work_->Wait(atlas_.fence.Get(), atlas_.fence_value);
         atlas_.perf = perf;
         atlas_.inputs = inputs;
         atlas_.cells = cells;
@@ -6302,11 +6334,15 @@ class D3D12FrameGen final : public FrameGenGpu {
         const UINT first = static_cast<UINT>(slot_index * kTimingStamps);
         if (query_heap_) commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first + 1);
         HRESULT hr = commands_->Close();
+        commands_open_ = false; // also when Close reports what was recorded
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation command close", hr);
             return false;
         }
         hr = SubmitWork(commands_.Get());
+        // The slot's allocator holds work the queue has now: its next use
+        // waits for this even if the rest of the frame is never submitted.
+        slot.fence_value = fence_value_;
         for (const ViewRecording& recording : recordings) {
             MarkUsed(*recording.view, fence_.Get(), fence_value_);
         }
@@ -6353,6 +6389,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = Failure("D3D12 Frame Generation command reset", hr);
             return false;
         }
+        commands_open_ = true;
         ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
         commands_->SetDescriptorHeaps(1, heaps);
         commands_->SetComputeRootSignature(root_signature_.Get());
@@ -6411,11 +6448,15 @@ class D3D12FrameGen final : public FrameGenGpu {
         const UINT first = static_cast<UINT>(slot_index * kTimingStamps);
         if (query_heap_) commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first + 1);
         HRESULT hr = commands_->Close();
+        commands_open_ = false; // also when Close reports what was recorded
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation command close", hr);
             return false;
         }
         hr = SubmitWork(commands_.Get());
+        // The slot's allocator holds work the queue has now: its next use
+        // waits for this even if the rest of the frame is never submitted.
+        slot.fence_value = fence_value_;
         for (const ViewRecording& recording : recordings) {
             MarkUsed(*recording.view, fence_.Get(), fence_value_);
         }
@@ -6477,6 +6518,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = Failure("D3D12 Frame Generation command reset", hr);
             return false;
         }
+        commands_open_ = true;
         ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
         commands_->SetDescriptorHeaps(1, heaps);
         commands_->SetComputeRootSignature(root_signature_.Get());
@@ -7014,6 +7056,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     UINT descriptor_end_{0};
     ComPtr<ID3D12GraphicsCommandList> commands_;
     ComPtr<ID3D12GraphicsCommandList5> commands5_; // the same list, for variable-rate shading
+    bool commands_open_{false};                     // Execute's list is recording (RunHardwareFlow closes it)
     UINT shading_tile_{0};                          // pixels per shading-rate tile side; 0: no variable-rate shading
     bool world_motion_{true};                       // FrameGenViewRequest::world_motion where depth is in use
     bool occlusion_{true};                          // FrameGenTuning::occlusion allowed
