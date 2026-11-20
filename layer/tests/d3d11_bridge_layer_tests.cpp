@@ -3730,6 +3730,143 @@ void TestUnstagedReleaseUnderHeldContext(Game& game) {
     EndCase(game);
 }
 
+// 4d, as the device's protection is turned on. The game's device has no
+// multithread protection, and its calls came from one thread so far. A game
+// thread releases an image between xrEndFrame's staging and its locks (the
+// second thread: the bridge wants protection on), and, while xrEndFrame hands
+// that release over under the layer's locks (Released, holding the context),
+// acquires another swapchain's image: its staging turns protection on, and
+// it takes the device's lock before the layer's. Driven by events:
+//  - xrEndFrame comes to the layer's GameContextLock, holding none of the
+//    layer's locks: there the game thread makes its release;
+//  - xrEndFrame comes to the bridge's hold of the context for that release,
+//    under the layer's locks: there the game thread starts its acquire, and
+//    is given until it comes to the device's lock, and 200 ms more (to enter
+//    it and wait for the layer's locks), where it gets that far.
+// An xrEndFrame that held nothing of the device's (its protection was off
+// when it looked) then waits for the device's lock under the layer's locks,
+// which the game thread, holding the device's lock, waits for: both calls
+// must return (10 s, FAILED). Holding the device's lock from before its own
+// locks, xrEndFrame's hold for the release is its own lock again, and the
+// game thread's acquire waits for it holding none of the layer's.
+void TestUnstagedReleaseAsProtectionTurnsOn(Game& game) {
+    const std::string name = "unstaged-release-protection-turning-on";
+    BeginCase(name, game);
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(game.context.As(&multithread)), name + ": the game's context has ID3D11Multithread");
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          name + ": a bridged session");
+    Check(Peer::GameContext().Always(),
+          name + ": a bridged session's calls take the device's lock whether its protection is on or not");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target late = MakeTarget(app, ColorInfo(), "an image released late");
+    Target other = MakeTarget(app, ColorInfo(), "another swapchain's image");
+    const std::array<Eye, 2> eyes{{{&left, 0}, {&right, 0}}};
+    Check(Frame(app, game, {&left, &right}, {FrameColor(1, 0), FrameColor(1, 1)}, eyes) == XR_SUCCESS,
+          name + ": a first frame");
+    Check(multithread->GetMultithreadProtected() == FALSE && Contains(Peer::Bridge().Summary(), "secondThread=no"),
+          name + ": one thread so far, and no protection: " + Peer::Bridge().Summary());
+    // Acquired and rendered before; released by the game thread once
+    // xrEndFrame's staging is done.
+    Draw(game, late.images[Acquire(app, late)], FrameColor(2, 0));
+
+    const auto await = [&](HANDLE event, const char* what) {
+        if (WaitForSingleObject(event, 10000) != WAIT_OBJECT_0) {
+            std::cout << "FAILED: " << name << ": " << what
+                      << " within 10 s: deadlocked (xrEndFrame waits for the device's lock holding the layer's "
+                         "locks, which the game thread, holding the device's lock, waits for)\n"
+                      << std::flush;
+            TerminateProcess(GetCurrentProcess(), 1);
+        }
+    };
+    const HANDLE at_lock = CreateEventW(nullptr, TRUE, FALSE, nullptr);       // xrEndFrame, before its locks
+    const HANDLE late_released = CreateEventW(nullptr, TRUE, FALSE, nullptr); // the game thread's release returned
+    const HANDLE handing_over = CreateEventW(nullptr, TRUE, FALSE, nullptr);  // xrEndFrame, at the release's hold
+    const HANDLE acquiring = CreateEventW(nullptr, TRUE, FALSE, nullptr);     // the game thread, at the device's lock
+    const HANDLE acquired = CreateEventW(nullptr, TRUE, FALSE, nullptr);      // the game thread's acquire returned
+    const HANDLE ended = CreateEventW(nullptr, TRUE, FALSE, nullptr);         // xrEndFrame returned
+    const DWORD frame_thread = GetCurrentThreadId();
+    std::atomic<DWORD> game_thread_id{0};
+    std::atomic<bool> armed{false};
+    std::atomic<bool> landed{false};
+    std::atomic<int> unstaged_holds{0};
+    Peer::GameContext().SetWaitHookForTest([&] {
+        const DWORD current = GetCurrentThreadId();
+        if (current == frame_thread) {
+            if (!armed.exchange(false)) return;
+            SetEvent(at_lock);
+            await(late_released, "the game thread's xrReleaseSwapchainImage did not return");
+        } else if (current == game_thread_id.load() && landed.load()) {
+            SetEvent(acquiring);
+        }
+    });
+    // The bridge's first wait for the context on the frame's thread after
+    // the late release: its hand-over, under the layer's locks.
+    Peer::Bridge().SetContextWaitHookForTest([&] {
+        if (GetCurrentThreadId() != frame_thread || !landed.load() || unstaged_holds++ != 0) return;
+        SetEvent(handing_over);
+        if (WaitForSingleObject(acquiring, 500) == WAIT_OBJECT_0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    });
+    XrResult late_release = XR_ERROR_RUNTIME_FAILURE;
+    std::uint32_t other_index = 0;
+    std::thread game_thread([&] {
+        game_thread_id = GetCurrentThreadId();
+        await(at_lock, "xrEndFrame did not come to the device's lock ahead of its own locks");
+        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        late_release = app.api.release(late.swapchain, &release);
+        landed = true;
+        SetEvent(late_released);
+        await(handing_over, "xrEndFrame did not hand the late release over unstaged");
+        other_index = Acquire(app, other);
+        SetEvent(acquired);
+    });
+    // The frame's thread is the one in xrEndFrame: another waits for it.
+    std::thread watch([&] {
+        await(ended, "the frame's xrEndFrame did not return");
+        await(acquired, "the game thread's xrAcquireSwapchainImage did not return");
+    });
+    const std::size_t shown_before = ShownCount();
+    const XrResult framed = Frame(
+        app, game, {&left, &right}, {FrameColor(3, 0), FrameColor(3, 1)}, eyes, nullptr, nullptr, false, {},
+        [&](const XrFrameEndInfo& end) {
+            armed = true;
+            const XrResult result = app.api.end_frame(app.session, &end);
+            SetEvent(ended);
+            return result;
+        });
+    watch.join();
+    game_thread.join();
+    Peer::GameContext().SetWaitHookForTest(nullptr);
+    Peer::Bridge().SetContextWaitHookForTest(nullptr);
+    for (const HANDLE event : {at_lock, late_released, handing_over, acquiring, acquired, ended}) CloseHandle(event);
+    Check(framed == XR_SUCCESS, name + ": the frame " + std::to_string(framed));
+    Check(late_release == XR_SUCCESS, name + ": the late release " + std::to_string(late_release));
+    Check(unstaged_holds.load() >= 1, name + ": the late release was handed over unstaged, in xrEndFrame");
+    Check(multithread->GetMultithreadProtected() != FALSE && Contains(Peer::Bridge().Summary(), "secondThread=yes"),
+          name + ": the game thread's calls turned protection on: " + Peer::Bridge().Summary());
+    const std::vector<ShownFrame> shown = Shown(shown_before);
+    Check(shown.size() == 1 && shown[0].views.size() == 2 && Near(shown[0].views[0].texel, FrameColor(3, 0)) &&
+              Near(shown[0].views[1].texel, FrameColor(3, 1)),
+          name + ": the frame is shown");
+    // And on: the image the game thread acquired, and frames after.
+    Draw(game, other.images[other_index], FrameColor(5, 0));
+    Release(app, other);
+    Check(Frame(app, game, {&left, &right}, {FrameColor(4, 0), FrameColor(4, 1)}, eyes) == XR_SUCCESS,
+          name + ": a frame after");
+    Render(app, game, late, FrameColor(6, 0));
+    CheckValidation(game, name);
+    StopApp(app);
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
 // 4e. The game's own Direct3D 11 session, Frame Generation engaged: it
 // captures each released eye image on the game's context, under the
 // layer's lock (and its own). The game releases the left eye on one thread
@@ -7451,8 +7588,11 @@ int main(int argc, char** argv) {
         TestContextHeldAcrossRelease(game);
         TestQuadViewsUnderHeldContext(game);
         TestUnstagedReleaseUnderHeldContext(game);
+        TestUnstagedReleaseAsProtectionTurnsOn(game);
         TestNativeCaptureUnderHeldContext(game);
         TestNativeGenerateUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "unstaged-release-protection-turning-on") {
+        TestUnstagedReleaseAsProtectionTurnsOn(game);
     } else if (bridged && only && std::string(only) == "native-generate-context-held") {
         TestNativeGenerateUnderHeldContext(game);
     } else if (bridged && only && std::string(only) == "quad-views-context-held") {
@@ -7490,6 +7630,7 @@ int main(int argc, char** argv) {
         TestContextHeldAcrossRelease(game);
         TestQuadViewsUnderHeldContext(game);
         TestUnstagedReleaseUnderHeldContext(game);
+        TestUnstagedReleaseAsProtectionTurnsOn(game);
         TestNativeCaptureUnderHeldContext(game);
         TestNativeGenerateUnderHeldContext(game);
         TestPrivateDepthSession(game, false);

@@ -2761,6 +2761,21 @@ XrResult OpenXrLayer::EndInstance(XrInstance instance, bool in_runtime) {
     // holding the lock, so stopping it under mutex_ would deadlock.
     watch.Step("stopping the layer's background work");
     StopConfigWatcher();
+    // A session still alive was never ended: an interlocked runtime's pending
+    // wait is released as at xrEndSession before the worker is stopped (not
+    // while Frame Generation's presenter thread makes the frame calls).
+    XrSession turbo_session = XR_NULL_HANDLE;
+    {
+        std::scoped_lock lock(mutex_);
+        turbo_session = active_session_;
+    }
+    if (turbo_session != XR_NULL_HANDLE && !framegen_owns_pacing_.load(std::memory_order_acquire)) {
+        watch.Step("releasing Turbo's pending wait");
+        ReleaseTurboPendingWaitForSessionEnd(turbo_session);
+    }
+    // A worker left inside the runtime's xrWaitFrame goes stale here, before
+    // the runtime's instance can go: returning, it publishes nothing and
+    // asks the runtime for nothing more.
     StopTurboAsyncWorker();
     performance_.EndSession(); // stops the sampler (wanted again by PrepareOsd)
     performance_wanted_ = false;
@@ -2827,6 +2842,14 @@ XrResult OpenXrLayer::EndInstance(XrInstance instance, bool in_runtime) {
         PinModulesForAbandonedPresenter();
         logger_.Error("xrDestroyInstance: the runtime's instance is kept for the process's exit (Frame Generation's "
                       "presenter thread never left the runtime).");
+        return XR_SUCCESS;
+    }
+    if (in_runtime && TurboAbandonedWaitPending()) {
+        // Turbo's worker let go inside the runtime's xrWaitFrame is in the
+        // same place: the instance is kept the same way.
+        PinModulesForAbandonedPresenter();
+        logger_.Error("xrDestroyInstance: the runtime's instance is kept for the process's exit (Turbo's worker "
+                      "thread never left the runtime's xrWaitFrame).");
         return XR_SUCCESS;
     }
     watch.Step("in the runtime's xrDestroyInstance");
@@ -3236,7 +3259,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     // immediate context is used under them (bridged or not); Frame
     // Generation's backend uses that context only in the game's own
     // Direct3D 11 sessions (a bridged session's is Direct3D 12).
-    game_context_->Set(d3d11_binding ? d3d11_binding->device : nullptr);
+    // A bridged session always takes the device's lock: the bridge does too, under the layer's own locks.
+    game_context_->Set(d3d11_binding ? d3d11_binding->device : nullptr, d3d11_bridge_.Active());
     framegen_.SetGameContextLock(d3d11_binding && d3d11_binding->device && !d3d11_bridge_.Active() ? game_context_.get()
                                                                                                   : nullptr);
     if (d3d11_binding && d3d11_binding->device) {
@@ -3342,8 +3366,23 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     // Join any in-flight turbo async wait before tearing the session down.
     // The flight recorder keeps running until the runtime's session is gone:
     // a hang in Frame Generation's presenter teardown is what it is for.
+    // An application may skip xrEndSession: an interlocked runtime's pending
+    // wait is released as there, before the wait for it (a session that is
+    // not running refuses the begin, harmlessly). Not while Frame
+    // Generation's presenter thread, stopped further down, makes the
+    // session's frame calls.
+    if (!framegen_owns_pacing_.load(std::memory_order_acquire)) {
+        watch.Step("releasing Turbo's pending wait");
+        ReleaseTurboPendingWaitForSessionEnd(session);
+    }
     watch.Step("joining Turbo's in-flight wait");
     ResetTurboFrameState(false);
+    // A wait the runtime still holds after both: its worker is let go rather
+    // than left to block the next session's, and the runtime's session is
+    // not destroyed under it (below).
+    if (TurboAsyncWorkerBusy()) {
+        StopTurboAsyncWorker(std::chrono::milliseconds(0));
+    }
     // Its sampler thread reads Frame Generation's status: it stops before Frame Generation does.
     watch.Step("stopping the performance sampler");
     performance_.EndSession(); // stops the sampler (wanted again by PrepareOsd)
@@ -3430,8 +3469,19 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
         turbo_trace_.Stop();
         return XR_SUCCESS;
     }
-    watch.Step("in the runtime's xrDestroySession");
-    const XrResult result = next_destroy_session_(session);
+    // Turbo's worker let go inside this session's xrWaitFrame is in the same
+    // place: the runtime's session is kept for the process's exit. The thread
+    // uses nothing of the layer's session, so the layer's own state ends
+    // below as after a destroyed session, and a later session starts clean.
+    const bool turbo_wait_in_runtime = TurboAbandonedWaitPending(session);
+    if (turbo_wait_in_runtime) {
+        PinModulesForAbandonedPresenter();
+        logger_.Error("xrDestroySession: the runtime's session is kept for the process's exit (Turbo's worker "
+                      "thread never left the runtime's xrWaitFrame).");
+    } else {
+        watch.Step("in the runtime's xrDestroySession");
+    }
+    const XrResult result = turbo_wait_in_runtime ? XR_SUCCESS : next_destroy_session_(session);
     turbo_trace_.Stop();
     watch.Step("ending the bridges");
     if (destroying_active && XR_SUCCEEDED(result)) {
@@ -5130,11 +5180,10 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
     NoteThread(ThreadCensus::Call::ReleaseSwapchainImage);
     // In the game's own Direct3D 11 session, Frame Generation captures the
     // released image on the game's context under mutex_: the device's lock
-    // first (GameContextLock). A bridged release only counts the release.
-    GameContextHold context_hold;
-    if (!d3d11_bridge_.Active()) {
-        context_hold = game_context_->Hold();
-    }
+    // first (GameContextLock). A bridged release mostly only counts the
+    // release, but one of an image never waited for goes to the bridge below,
+    // which takes the device's lock itself: taken here first, the order holds.
+    GameContextHold context_hold = game_context_->Hold();
     {
         std::scoped_lock lock(mutex_);
         const auto bridged = tracked_swapchains_.find(swapchain);
@@ -6934,7 +6983,6 @@ XrTime OpenXrLayer::TurboClockNow() {
 std::string OpenXrLayer::TurboTimingConfiguration() const {
     return (turbo_experiment_.enabled
         ? "Experimental Async; submit=" + std::string(turbo_experiment_.wait_for_submit ? "wait" : "overlap") +
-          "; sample=" + (turbo_experiment_.sample_at_entry ? "entry" : "return") +
           "; prediction=" + std::to_string(turbo_experiment_.prediction_percent) + "%" +
           "; clock=" + (turbo_convert_counter_time_ ? "available" : "unavailable") +
           "; cap=" + std::to_string(turbo_experiment_.frame_limit)
@@ -6944,7 +6992,7 @@ std::string OpenXrLayer::TurboTimingConfiguration() const {
 void OpenXrLayer::ConfigureTurboExperiment() {
     turbo_trace_.Stop();
     turbo_experiment_ = resolved_settings_.core.enabled ? resolved_settings_.turbo.experimental : TurboExperimentalSettings{};
-    turbo_limit_last_wait_.reset();
+    turbo_limit_deadline_.reset();
     turbo_trace_last_engaged_ = false;
     turbo_convert_counter_time_ = nullptr;
     if (turbo_clock_enabled_ && next_get_instance_proc_addr_) {
@@ -6965,7 +7013,6 @@ void OpenXrLayer::ConfigureTurboExperiment() {
         ", profile=" + resolved_settings_.turbo.profile_name +
         ", experimental=" + std::to_string(turbo_experiment_.enabled) +
         ", waitForSubmit=" + std::to_string(turbo_experiment_.wait_for_submit) +
-        ", sampleAtEntry=" + std::to_string(turbo_experiment_.sample_at_entry) +
         ", predictionPercent=" + std::to_string(turbo_experiment_.prediction_percent) +
         ", frameLimit=" + std::to_string(turbo_experiment_.frame_limit) +
         ", runtimeClock=" + std::to_string(turbo_convert_counter_time_ != nullptr) +
@@ -7024,20 +7071,29 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
     if (experimental_active && turbo_experiment_.frame_limit > 0) {
         const auto limit_start = std::chrono::steady_clock::now();
         turbo_trace_.Record("limit.enter", trace_id, turbo_experiment_.frame_limit);
-        if (turbo_limit_last_wait_) {
-            std::this_thread::sleep_until(*turbo_limit_last_wait_ +
-                std::chrono::nanoseconds(1'000'000'000 / turbo_experiment_.frame_limit));
+        // Each wait is let through one period after the previous one's
+        // deadline, not after its wake: sleeping late then costs that frame
+        // only, instead of stretching every period. A wait already more than
+        // a period late (a hitch, or a game slower than the cap) starts the
+        // schedule again from now rather than running a burst to catch up.
+        const auto period = std::chrono::nanoseconds(1'000'000'000 / turbo_experiment_.frame_limit);
+        auto deadline = limit_start;
+        if (turbo_limit_deadline_) {
+            deadline = *turbo_limit_deadline_ + period;
+            if (limit_start > deadline + period) {
+                deadline = limit_start;
+            } else {
+                std::this_thread::sleep_until(deadline);
+            }
         }
-        turbo_limit_last_wait_ = std::chrono::steady_clock::now();
+        turbo_limit_deadline_ = deadline;
         turbo_trace_.Record("limit.return", trace_id);
         std::scoped_lock lock(turbo_mutex_);
         turbo_metrics_wait_pending_ms_ += std::chrono::duration<double, std::milli>(
-            *turbo_limit_last_wait_ - limit_start).count();
+            std::chrono::steady_clock::now() - limit_start).count();
     } else {
-        turbo_limit_last_wait_.reset();
+        turbo_limit_deadline_.reset();
     }
-    const auto entry_time = experimental_active && turbo_experiment_.sample_at_entry
-        ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
         if (!frame_pacing_debug_enabled_.load(std::memory_order_relaxed)) {
             const auto result = TraceRuntimeWaitFrame(session, frame_wait_info, frame_state);
@@ -7065,7 +7121,6 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
             turbo_max_returned_display_time_ =
                 std::max(turbo_max_returned_display_time_, frame_state->predictedDisplayTime);
             NoteTurboShouldRenderLocked(turbo_last_should_render_);
-            turbo_last_wait_frame_wall_time_ = wait_end;
         }
         turbo_trace_.Record("wait.return", trace_id, XR_SUCCEEDED(result) ? frame_state->predictedDisplayTime : 0,
                             XR_SUCCEEDED(result) ? frame_state->predictedDisplayPeriod : 0, result);
@@ -7255,8 +7310,6 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
                 // pre-publication shield. This call has not fabricated a frame,
                 // so it can safely resume normal runtime pacing below.
             } else {
-                const auto now = experimental_active && turbo_experiment_.sample_at_entry
-                    ? entry_time : std::chrono::steady_clock::now();
                 XrTime predicted = turbo_last_predicted_display_time_;
                 bool extrapolated = false;
                 // The worker may have handed ownership to the frame thread while
@@ -7288,7 +7341,6 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
                     const auto steps = static_cast<XrDuration>(unended) + (turbo_seq_wait_in_flight_ ? 1 : 0);
                     predicted += steps * turbo_prediction_history_.FrameStep(turbo_last_predicted_display_period_);
                 }
-                turbo_last_wait_frame_wall_time_ = now;
 
                 const XrTime extrapolated_prediction = predicted;
                 if (experimental_active && turbo_experiment_.prediction_percent != 100) {
@@ -7359,7 +7411,8 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
     const auto wait_start = std::chrono::steady_clock::now();
     XrResult result = XR_SUCCESS;
     {
-        std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
+        const auto wait_gate = CurrentTurboRuntimeWaitGate();
+        std::scoped_lock wait_lock(wait_gate->mutex);
         result = TraceRuntimeWaitFrame(session, frame_wait_info, frame_state);
     }
     const double wait_ms =
@@ -7382,8 +7435,6 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
                                                frame_state->predictedDisplayPeriod);
         turbo_last_should_render_ = frame_state->shouldRender == XR_TRUE;
         NoteTurboShouldRenderLocked(turbo_last_should_render_);
-        turbo_last_wait_frame_wall_time_ = experimental_active && turbo_experiment_.sample_at_entry
-            ? entry_time : std::chrono::steady_clock::now();
         frame_state->predictedDisplayTime =
             std::max(frame_state->predictedDisplayTime, turbo_max_returned_display_time_ + 1);
         turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
@@ -7408,7 +7459,9 @@ XrResult OpenXrLayer::PaceWaitFrame(XrSession session,
         }
     }
     if (XR_FAILED(result) && (handshake || turbo_effective_active_.load())) {
-        NoteTurboRuntimeFailure(result, 0, TurboFrameOperation::kWait);
+        // This may not be the frame thread: it acts on the failure at its
+        // next xrEndFrame.
+        DeferTurboRuntimeFailure(result, TurboFrameOperation::kWait);
     }
     turbo_trace_.Record("wait.return", trace_id, XR_SUCCEEDED(result) ? frame_state->predictedDisplayTime : 0,
                         XR_SUCCEEDED(result) ? frame_state->predictedDisplayPeriod : 0, result);
@@ -7502,7 +7555,8 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
         std::scoped_lock lock(turbo_mutex_);
         turbo_frame_begun_ = true;
     } else if (turbo_effective_active_.load()) {
-        NoteTurboRuntimeFailure(result, 0, TurboFrameOperation::kBegin);
+        // As in PaceWaitFrame: left for the frame thread.
+        DeferTurboRuntimeFailure(result, TurboFrameOperation::kBegin);
     }
     return result;
 }
@@ -7824,6 +7878,13 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     // Release the config/render lock so locate calls from other app threads
     // keep flowing — holding it here caused visible judder at locked fps.
     unlock_config();
+
+    // A failed wait or begin on the application's own thread since the last
+    // frame: its fallback or suspension is decided here, on the thread that
+    // owns the pacing verdict. Before this frame's snapshot, so a fallback to
+    // sequenced pacing arms no async handoff, and before this frame's end can
+    // clear the streak those failures are part of.
+    ActOnDeferredTurboRuntimeFailure();
 
     const auto pacing_start = std::chrono::steady_clock::now();
 
@@ -8235,7 +8296,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 const auto wait_start = std::chrono::steady_clock::now();
                 XrResult wait_result = XR_SUCCESS;
                 {
-                    std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
+                    const auto wait_gate = CurrentTurboRuntimeWaitGate();
+                    std::scoped_lock wait_lock(wait_gate->mutex);
                     wait_result = TraceRuntimeWaitFrame(session, &wait_info, &frame_state);
                 }
                 const double wait_ms =
@@ -8453,6 +8515,36 @@ XrPosef ToXrPose(const HeadPredictionPose& pose) {
              static_cast<float>(pose.position.z)}};
 }
 
+// The rotation, in the world space, that turns the orientation `from` to
+// `to` the shorter way round, by `max_degrees` at most; `degrees` is how far
+// it turns.
+HeadQuaternion HeadTurn(const HeadQuaternion& from, const HeadQuaternion& to, double max_degrees, double& degrees) {
+    degrees = 0.0;
+    // to * conjugate(from)
+    const HeadQuaternion back{-from.x, -from.y, -from.z, from.w};
+    HeadQuaternion turn{to.w * back.x + to.x * back.w + to.y * back.z - to.z * back.y,
+                        to.w * back.y - to.x * back.z + to.y * back.w + to.z * back.x,
+                        to.w * back.z + to.x * back.y - to.y * back.x + to.z * back.w,
+                        to.w * back.w - to.x * back.x - to.y * back.y - to.z * back.z};
+    if (turn.w < 0.0) {
+        turn = {-turn.x, -turn.y, -turn.z, -turn.w};
+    }
+    const double axis = std::sqrt(turn.x * turn.x + turn.y * turn.y + turn.z * turn.z);
+    const double length = std::sqrt(axis * axis + turn.w * turn.w);
+    if (!std::isfinite(length) || length <= 0.0 || axis <= 0.0) {
+        return {};
+    }
+    const double angle = 2.0 * std::atan2(axis, turn.w);
+    const double max_angle = max_degrees * kPi / 180.0;
+    if (angle > max_angle) {
+        const double scale = std::sin(max_angle / 2.0) / axis;
+        degrees = max_degrees;
+        return {turn.x * scale, turn.y * scale, turn.z * scale, std::cos(max_angle / 2.0)};
+    }
+    degrees = angle * 180.0 / kPi;
+    return {turn.x / length, turn.y / length, turn.z / length, turn.w / length};
+}
+
 constexpr XrSpaceLocationFlags kHeadPredictionPoseFlags =
     XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
 // A probe is due at most this often until the runtime's limit settles.
@@ -8560,8 +8652,11 @@ void OpenXrLayer::NotePredictionProbeLocked(const std::optional<PredictionLimitE
 }
 
 HeadExtension OpenXrLayer::ExtendHead(const HeadPredictionPlan& plan, XrSpace world_space, XrTime target,
-                                      XrTime now) {
+                                      XrTime now, std::optional<HeadPredictionPose>* at_target) {
     const HeadPredictionTuning tuning{};
+    if (at_target) {
+        at_target->reset();
+    }
     if (!plan.limited || now <= 0 || target - now <= plan.limit) {
         return {};
     }
@@ -8581,7 +8676,78 @@ HeadExtension OpenXrLayer::ExtendHead(const HeadPredictionPlan& plan, XrSpace wo
     anchors.at_target = ToHeadPose(located[0].pose);
     anchors.anchor = ToHeadPose(located[1].pose).orientation;
     anchors.before = ToHeadPose(located[2].pose).orientation;
+    if (at_target) {
+        *at_target = anchors.at_target;
+    }
     return ComputeHeadExtension(anchors, tuning);
+}
+
+HeadExtension OpenXrLayer::HeadExtensionFor(const HeadPredictionPlan& plan, XrSpace world_space, XrTime target,
+                                            XrTime now) {
+    if (!plan.limited) {
+        return {};
+    }
+    // The head kept for exactly this display time, world space and limit:
+    // never another time's.
+    const auto kept_head = [&]() -> std::optional<HeadExtensionHead> {
+        const auto kept = std::find_if(
+            head_extension_heads_.begin(), head_extension_heads_.end(), [&](const HeadExtensionHead& head) {
+                return head.time == target && head.world_space == world_space && head.limit == plan.limit;
+            });
+        return kept == head_extension_heads_.end() ? std::nullopt : std::optional<HeadExtensionHead>(*kept);
+    };
+    // The runtime's answer moves with the moment it is asked, so the turn
+    // kept is not a later locate's: the one from the runtime's head as it
+    // answers now (`at`) to the kept head is.
+    const auto to_kept = [](const HeadExtensionHead& kept, const std::optional<HeadPredictionPose>& at) {
+        HeadExtension extension = kept.extension;
+        if (!extension.applied) {
+            return extension;
+        }
+        if (!at) {
+            return HeadExtension{};
+        }
+        extension.rotation =
+            HeadTurn(at->orientation, kept.head, HeadPredictionTuning{}.max_extension_degrees, extension.degrees);
+        extension.center = at->position;
+        return extension;
+    };
+    std::optional<HeadExtensionHead> kept;
+    {
+        std::scoped_lock lock(mutex_);
+        kept = kept_head();
+    }
+    if (kept) {
+        if (!kept->extension.applied) {
+            return kept->extension;
+        }
+        // One locate, for the head the runtime answers this moment.
+        std::optional<HeadPredictionPose> at;
+        XrSpaceLocation located{XR_TYPE_SPACE_LOCATION};
+        if (XR_SUCCEEDED(next_locate_space_(plan.view_space, world_space, target, &located)) &&
+            (located.locationFlags & kHeadPredictionPoseFlags) == kHeadPredictionPoseFlags) {
+            at = ToHeadPose(located.pose);
+        }
+        return to_kept(*kept, at);
+    }
+    // Extended without the lock (its locates go to the runtime).
+    std::optional<HeadPredictionPose> at_target;
+    const HeadExtension extension = ExtendHead(plan, world_space, target, now, &at_target);
+    std::scoped_lock lock(mutex_);
+    // Another thread's locate of the display time, extended beside this one,
+    // kept its head first: it is this one's too.
+    if (kept = kept_head(); kept) {
+        return to_kept(*kept, at_target);
+    }
+    HeadExtensionHead head{target, world_space, plan.limit, extension, {}};
+    if (extension.applied && at_target) {
+        head.head = ApplyHeadExtension(extension, *at_target).orientation;
+    }
+    if (head_extension_heads_.size() >= kHeadExtensionAnswersKept) {
+        head_extension_heads_.erase(head_extension_heads_.begin());
+    }
+    head_extension_heads_.push_back(head);
+    return extension;
 }
 
 void OpenXrLayer::NoteHeadExtensionLocked(const HeadExtension& extension, XrTime target, XrTime now) {
@@ -8895,8 +9061,36 @@ bool OpenXrLayer::TryTurboAutoFallbackLocked(const std::string& reason,
     return true;
 }
 
+void OpenXrLayer::DeferTurboRuntimeFailure(XrResult result, TurboFrameOperation operation) {
+    const std::uint64_t pending = kTurboDeferredFailurePending |
+        (static_cast<std::uint64_t>(operation) << 32) |
+        static_cast<std::uint32_t>(static_cast<std::int32_t>(result));
+    if (result == XR_ERROR_SESSION_LOST || result == XR_ERROR_INSTANCE_LOST ||
+        result == XR_ERROR_SESSION_NOT_RUNNING) {
+        // Not counted, but it still breaks the stability window; a counted
+        // failure already waiting for the frame thread is kept.
+        std::uint64_t none = 0;
+        turbo_deferred_failure_.compare_exchange_strong(none, pending, std::memory_order_acq_rel);
+        return;
+    }
+    turbo_trace_.Burst();
+    turbo_trace_.Record(operation == TurboFrameOperation::kWait ? "fault.wait" :
+                        operation == TurboFrameOperation::kBegin ? "fault.begin" : "fault.end", 0, result, 0);
+    // Counted before it is left for the frame thread, which must not find the
+    // failure without its count.
+    ++turbo_runtime_error_streak_;
+    turbo_deferred_failure_.store(pending, std::memory_order_release);
+}
+
+void OpenXrLayer::ActOnDeferredTurboRuntimeFailure() {
+    const std::uint64_t pending = turbo_deferred_failure_.exchange(0, std::memory_order_acq_rel);
+    if (pending == 0) return;
+    NoteTurboRuntimeFailure(static_cast<XrResult>(static_cast<std::int32_t>(pending & 0xffffffffu)), 0,
+                            static_cast<TurboFrameOperation>((pending >> 32) & 0xffu), true);
+}
+
 void OpenXrLayer::NoteTurboRuntimeFailure(XrResult result, XrTime submitted_display_time,
-                                          TurboFrameOperation operation) {
+                                          TurboFrameOperation operation, bool counted) {
     std::scoped_lock lock(mutex_);
     // A failure breaks the stability window even below the suspension threshold.
     turbo_stable_accumulated_ms_ = 0.0;
@@ -8908,7 +9102,7 @@ void OpenXrLayer::NoteTurboRuntimeFailure(XrResult result, XrTime submitted_disp
                               operation == TurboFrameOperation::kBegin ? "fault.begin" : "fault.end";
     // Every failure reaches the flight recorder (which freezes its history on
     // fault events), even below the suspension threshold.
-    turbo_trace_.Burst();
+    if (!counted) turbo_trace_.Burst();
     if (operation == TurboFrameOperation::kEnd && result == XR_ERROR_TIME_INVALID) {
         std::optional<TurboPredictionHistory::Prediction> prediction;
         XrTime native_snapshot = 0;
@@ -8944,10 +9138,11 @@ void OpenXrLayer::NoteTurboRuntimeFailure(XrResult result, XrTime submitted_disp
             logger_.Info(detail + ".");
         }
     }
-    turbo_trace_.Record(fault_event, 0, result, submitted_display_time);
+    if (!counted) turbo_trace_.Record(fault_event, 0, result, submitted_display_time);
     // Ownership is re-established structurally by ForwardEndFrame; frame
     // forwarding never stops. Repeated failures still end Turbo's pacing.
-    if (++turbo_runtime_error_streak_ < 3 || turbo_auto_suspended_.load()) return;
+    const int streak = counted ? turbo_runtime_error_streak_.load() : ++turbo_runtime_error_streak_;
+    if (streak < 3 || turbo_auto_suspended_.load()) return;
     const std::string error = result == XR_ERROR_TIME_INVALID
         ? "XR_ERROR_TIME_INVALID (-30): runtime rejected the submitted display time"
         : result == XR_ERROR_CALL_ORDER_INVALID
@@ -9022,7 +9217,8 @@ XrResult OpenXrLayer::OpenTurboRuntimeFrame(XrSession session, XrTime display_ti
     const auto comp_start = std::chrono::steady_clock::now();
     XrResult wait_result = XR_SUCCESS;
     {
-        std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
+        const auto wait_gate = CurrentTurboRuntimeWaitGate();
+        std::scoped_lock wait_lock(wait_gate->mutex);
         wait_result = TraceRuntimeWaitFrame(session, &wait_info, &frame_state);
     }
     const double comp_ms =
@@ -9627,10 +9823,41 @@ void OpenXrLayer::EnsureTurboAsyncWorkerLocked() {
     }
     turbo_async_worker_stop_ = false;
     const std::uint64_t epoch = turbo_async_worker_epoch_;
-    turbo_async_worker_ = std::thread([this, epoch] { TurboAsyncWorkerLoop(epoch); });
+    // The worker keeps the gate of its own generation: one let go inside the
+    // runtime never holds the gate a later worker and session wait through.
+    turbo_async_worker_ = std::thread([this, epoch, wait_gate = turbo_runtime_wait_gate_]() mutable {
+        TurboAsyncWorkerLoop(epoch, std::move(wait_gate));
+    });
 }
 
-void OpenXrLayer::TurboAsyncWorkerLoop(std::uint64_t epoch) {
+std::shared_ptr<OpenXrLayer::TurboRuntimeWaitGate> OpenXrLayer::CurrentTurboRuntimeWaitGate() {
+    std::scoped_lock lock(turbo_mutex_);
+    return turbo_runtime_wait_gate_;
+}
+
+bool OpenXrLayer::TurboAsyncWorkerBusy() {
+    std::shared_future<void> last_job;
+    {
+        std::scoped_lock lock(turbo_mutex_);
+        last_job = turbo_async_worker_job_;
+    }
+    return last_job.valid() && last_job.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready;
+}
+
+bool OpenXrLayer::TurboAbandonedWaitPending(XrSession session) {
+    std::scoped_lock lock(turbo_mutex_);
+    // A job that is ready has left the runtime, and its thread ends without
+    // another call into it.
+    std::erase_if(turbo_abandoned_waits_, [](const TurboAbandonedWait& wait) {
+        return wait.job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+    });
+    return std::any_of(turbo_abandoned_waits_.begin(), turbo_abandoned_waits_.end(),
+                       [session](const TurboAbandonedWait& wait) {
+                           return session == XR_NULL_HANDLE || wait.session == session;
+                       });
+}
+
+void OpenXrLayer::TurboAsyncWorkerLoop(std::uint64_t epoch, std::shared_ptr<TurboRuntimeWaitGate> wait_gate) {
     for (;;) {
         XrSession session = XR_NULL_HANDLE;
         std::uint64_t generation = 0;
@@ -9656,7 +9883,7 @@ void OpenXrLayer::TurboAsyncWorkerLoop(std::uint64_t epoch) {
         XrResult wait_result = XR_SUCCESS;
         std::uint64_t trace_id = 0;
         {
-            std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
+            std::scoped_lock wait_lock(wait_gate->mutex);
             wait_result = CallRuntimeWaitFrame(session, &wait_info, &frame_state, trace_id);
         }
         bool published = false;
@@ -9693,8 +9920,7 @@ void OpenXrLayer::TurboAsyncWorkerLoop(std::uint64_t epoch) {
     }
 }
 
-void OpenXrLayer::StopTurboAsyncWorker() {
-    constexpr std::chrono::milliseconds kWorkerDrainTimeout{2000};
+bool OpenXrLayer::StopTurboAsyncWorker(std::chrono::milliseconds drain_timeout) {
     // The worker runs one job at a time, so its latest job completing means
     // it is idle. Not turbo_async_wait_: session teardown clears that after
     // its own bounded drain even while the wait is still in the runtime, and
@@ -9704,11 +9930,20 @@ void OpenXrLayer::StopTurboAsyncWorker() {
         std::scoped_lock lock(turbo_mutex_);
         last_job = turbo_async_worker_job_;
     }
-    const bool drained = !last_job.valid() || last_job.wait_for(kWorkerDrainTimeout) == std::future_status::ready;
+    const bool drained = !last_job.valid() || last_job.wait_for(drain_timeout) == std::future_status::ready;
+    const bool abandoned = !drained && turbo_async_worker_.joinable();
     {
         std::scoped_lock lock(turbo_mutex_);
         turbo_async_worker_stop_ = true;
         ++turbo_async_worker_epoch_;
+        if (abandoned) {
+            // The wait it is left in goes stale with it: returning later, it
+            // publishes nothing and asks the runtime nothing more. It keeps
+            // the gate it holds; the next worker and session get a new one.
+            ++turbo_async_wait_generation_;
+            turbo_abandoned_waits_.push_back({turbo_async_job_session_, last_job});
+            turbo_runtime_wait_gate_ = std::make_shared<TurboRuntimeWaitGate>();
+        }
         turbo_async_worker_cv_.notify_all();
     }
     if (turbo_async_worker_.joinable()) {
@@ -9733,6 +9968,7 @@ void OpenXrLayer::StopTurboAsyncWorker() {
         turbo_async_job_completion_.reset();
         turbo_async_worker_job_ = {};
     }
+    return abandoned;
 }
 
 bool OpenXrLayer::DrainTurboAsyncWait(std::chrono::milliseconds timeout) {
@@ -9793,7 +10029,8 @@ void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     turbo_async_handed_over_ = false;
     turbo_async_recouple_stalled_ = false;
     turbo_experiment_ = {};
-    turbo_limit_last_wait_.reset();
+    turbo_limit_deadline_.reset();
+    turbo_deferred_failure_.store(0, std::memory_order_release);
     turbo_trace_last_engaged_ = false;
     DrainRuntimePacingWrites();
     // The async wait worker publishes its result while taking turbo_mutex_.
@@ -9863,7 +10100,6 @@ void OpenXrLayer::ResetTurboFrameState(bool stop_recorder) {
     runtime_end_raises_.store(0);
     turbo_prediction_history_.Reset();
     turbo_prediction_fault_log_budget_ = 3;
-    turbo_last_wait_frame_wall_time_.reset();
     turbo_pipelining_logged_ = false;
     turbo_fabricated_wait_log_budget_ = 0;
     turbo_drain_timeout_count_ = 0;
@@ -11454,8 +11690,9 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
                 return;
             }
         }
-        // Extended without the lock (its locates go to the runtime).
-        const HeadExtension extension = ExtendHead(head_plan, head_world_space, time, TurboClockNow());
+        // Extended without the lock (its locates go to the runtime), to the
+        // head the views of this display time turn to (HeadExtensionFor).
+        const HeadExtension extension = HeadExtensionFor(head_plan, head_world_space, time, TurboClockNow());
         const HeadPredictionPose pose = ToHeadPose(location->pose);
         location->pose = ToXrPose(space == head_world_space ? ApplyHeadExtensionInverse(extension, pose)
                                                             : ApplyHeadExtension(extension, pose));
@@ -12189,6 +12426,8 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
         std::erase_if(head_extension_answers_, [space](const HeadExtensionAnswer& answer) {
             return answer.space == space || answer.base_space == space;
         });
+        std::erase_if(head_extension_heads_,
+                      [space](const HeadExtensionHead& head) { return head.world_space == space; });
         was_view = tracked_view_spaces_.erase(space) > 0;
         if (auto node = application_action_spaces_.extract(space)) action_space = std::move(node.mapped());
         was_local = tracked_local_spaces_.erase(space) > 0;
@@ -12579,7 +12818,7 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     }
     const auto& e=resolved_settings_.turbo.experimental;
     if (e.enabled!=turbo_experiment_.enabled || (e.enabled &&
-        (e.wait_for_submit!=turbo_experiment_.wait_for_submit || e.sample_at_entry!=turbo_experiment_.sample_at_entry ||
+        (e.wait_for_submit!=turbo_experiment_.wait_for_submit ||
          e.prediction_percent!=turbo_experiment_.prediction_percent || e.frame_limit!=turbo_experiment_.frame_limit)))
         snapshot.restart=text(OsdText::RestartTurboExperiments);
     if (deferred_quadviews_config_active_) snapshot.restart+=(snapshot.restart.empty()?"":" + ")+text(OsdText::RestartQuadviews);
@@ -13234,6 +13473,7 @@ void OpenXrLayer::ResetSessionState() {
     awaiting_session_start_event_ = false;
     session_create_time_ = 0;
     head_extension_answers_.clear();
+    head_extension_heads_.clear();
     native_quad_focus_shares_eye_poses_ = false;
     has_logged_focus_fov_quirk_convergence_ = false;
     has_logged_pivotxr_spike_mode_ = false;
@@ -15120,7 +15360,10 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
             return;
         }
         const XrTime now = TurboClockNow();
-        const HeadExtension extension = ExtendHead(head_plan, head_world_space, view_locate_info->displayTime, now);
+        // One head per display time: a later locate of it, and VIEW space
+        // located at it, turn to the head its first locate was extended to.
+        const HeadExtension extension =
+            HeadExtensionFor(head_plan, head_world_space, view_locate_info->displayTime, now);
         const XrPosef runtime_view0 = runtime_views[0].pose;
         if (extension.applied) {
             for (uint32_t i = 0; i < runtime_count; ++i) {

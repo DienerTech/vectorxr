@@ -12,7 +12,7 @@ test('old configs retain normal Turbo timing with no experimental targets', () =
 test('orphaned legacy controls remain available for explicit profile assignment', () => {
   const config = defaultConfig()
   config.modules.turbo.experimental = { enabled: false, applicationIds: ['dcs'], waitForSubmit: true,
-    sampleAtEntry: true, predictionPercent: 75, frameLimit: 45 }
+    predictionPercent: 75, frameLimit: 45 }
   assert.deepEqual(normalizeConfig(config).modules.turbo.experimental, { ...config.modules.turbo.experimental, applicationIds: [] })
   config.modules.turbo.experimental.enabled = true
   assert.deepEqual(normalizeConfig(config).modules.turbo.experimental, { ...config.modules.turbo.experimental, applicationIds: [] })
@@ -37,13 +37,19 @@ test('legacy trace toggle is discarded without changing the central log level', 
   assert.equal('timingTrace' in normalized.modules.turbo.experimental, false)
 })
 
+test('retired entry-sampling option in an old config is accepted and dropped', () => {
+  const config = defaultConfig()
+  config.modules.turbo.experimental.sampleAtEntry = true
+  assert.equal('sampleAtEntry' in normalizeConfig(config).modules.turbo.experimental, false)
+})
+
 test('Toolkit starting point keeps application scope and resets optional adjustments', () => {
   const config = defaultConfig()
   const ids = ['dcs']
   config.modules.turbo.experimental = toolkitInspiredTurboExperimental(ids)
   ids.push('other')
   assert.deepEqual(config.modules.turbo.experimental, { ...defaultTurboExperimental(),
-    applicationIds: ['dcs'], enabled: true, waitForSubmit: true, sampleAtEntry: true })
+    applicationIds: ['dcs'], enabled: true, waitForSubmit: true })
   assert.equal(config.modules.turbo.enabled, false)
   assert.equal(config.core.logLevel, 'info')
   assert.deepEqual(normalizeConfig(config).modules.turbo.experimental, { ...config.modules.turbo.experimental, applicationIds: [] })
@@ -97,5 +103,7 @@ test('diagnostics label flights by Turbo strategy', async () => {
   assert.equal(turboSessionStrategy({ buckets: [bucket('sequenced')] }), 'VectorXR · Sequenced')
   assert.equal(turboSessionStrategy({ timingConfiguration: 'Experimental Async; submit=wait; sample=entry; prediction=100%; clock=available; cap=0; trace=x', buckets: [] }), 'Toolkit-style')
   assert.equal(turboSessionStrategy({ timingConfiguration: 'Experimental Async; submit=wait; sample=entry; prediction=90%; clock=available; cap=0; trace=x', buckets: [] }), 'Custom')
+  assert.equal(turboSessionStrategy({ timingConfiguration: 'Experimental Async; submit=wait; prediction=100%; clock=available; cap=0; trace=x', buckets: [] }), 'Toolkit-style')
+  assert.equal(turboSessionStrategy({ timingConfiguration: 'Experimental Async; submit=overlap; prediction=100%; clock=available; cap=0; trace=x', buckets: [] }), 'Custom')
   assert.equal(turboSessionStrategy({ buckets: [bucket('off')] }), 'Unknown strategy')
 })

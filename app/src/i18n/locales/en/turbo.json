@@ -119,8 +119,6 @@
     "summary": {
       "waitForSubmission": "Wait for submission",
       "overlapSubmission": "Overlap submission",
-      "sampleAtEntry": "Sample at entry",
-      "sampleAtReturn": "Sample at return",
       "prediction": "{percent}% prediction",
       "fpsCap": "{fps} fps cap",
       "noCap": "No cap"
@@ -128,7 +126,6 @@
     "advancedTitle": "Advanced timing",
     "advancedIntro": "For experimentation. Most players should leave these alone.",
     "waitForOverlap": "Wait for an overlapping submission",
-    "sampleAtWaitEntry": "Sample prediction timing at wait entry",
     "predictionLabel": "Prediction (%)",
     "frameCapLabel": "Frame cap (fps; 0 = off)",
     "changeNote": "Changing any value switches the profile to Custom. Prediction adjustment requires runtime clock support."

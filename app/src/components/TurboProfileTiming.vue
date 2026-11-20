@@ -6,7 +6,7 @@ const props = defineProps<{ modelValue: TurboExperimentalSettings; pacingLabel?:
 const emit = defineEmits<{ 'update:modelValue': [value: TurboExperimentalSettings] }>()
 type Strategy = 'normal' | 'toolkit' | 'custom'
 const customSelected = ref(false)
-const mode = computed<Strategy>(() => !props.modelValue.enabled ? 'normal' : !customSelected.value && props.modelValue.waitForSubmit && props.modelValue.sampleAtEntry && props.modelValue.predictionPercent === 100 && props.modelValue.frameLimit === 0 ? 'toolkit' : 'custom')
+const mode = computed<Strategy>(() => !props.modelValue.enabled ? 'normal' : !customSelected.value && props.modelValue.waitForSubmit && props.modelValue.predictionPercent === 100 && props.modelValue.frameLimit === 0 ? 'toolkit' : 'custom')
 const strategies: { value: Strategy; labelKey: MessageKey; relaunch: boolean }[] = [
   { value: 'normal', labelKey: 'turbo.strategy.vectorxr', relaunch: false },
   { value: 'toolkit', labelKey: 'turbo.strategy.toolkit', relaunch: true },
@@ -19,7 +19,6 @@ const description = computed(() => mode.value === 'normal'
     : t('turbo.profileTiming.descriptionCustom'))
 const advancedSummary = computed(() => [
   props.modelValue.waitForSubmit ? t('turbo.profileTiming.summary.waitForSubmission') : t('turbo.profileTiming.summary.overlapSubmission'),
-  props.modelValue.sampleAtEntry ? t('turbo.profileTiming.summary.sampleAtEntry') : t('turbo.profileTiming.summary.sampleAtReturn'),
   t('turbo.profileTiming.summary.prediction', { percent: props.modelValue.predictionPercent }),
   props.modelValue.frameLimit ? t('turbo.profileTiming.summary.fpsCap', { fps: props.modelValue.frameLimit }) : t('turbo.profileTiming.summary.noCap'),
 ].join(' · '))
@@ -53,7 +52,6 @@ function patch(value: Partial<TurboExperimentalSettings>) { emit('update:modelVa
         <p class="text-xs text-muted">{{ t('turbo.profileTiming.advancedIntro') }}</p>
         <div class="grid gap-2 sm:grid-cols-2">
           <label class="flex items-center gap-2.5"><input :checked="modelValue.waitForSubmit" type="checkbox" class="accent-depthxr-copper" @change="patch({ waitForSubmit: ($event.target as HTMLInputElement).checked })" />{{ t('turbo.profileTiming.waitForOverlap') }}</label>
-          <label class="flex items-center gap-2.5"><input :checked="modelValue.sampleAtEntry" type="checkbox" class="accent-depthxr-copper" @change="patch({ sampleAtEntry: ($event.target as HTMLInputElement).checked })" />{{ t('turbo.profileTiming.sampleAtWaitEntry') }}</label>
         </div>
         <div class="grid gap-3 sm:grid-cols-2">
           <label class="text-xs text-muted">{{ t('turbo.profileTiming.predictionLabel') }}<input :value="modelValue.predictionPercent" type="number" min="50" max="100" step="1" class="app-input mt-1 block w-full rounded-[0.75rem] px-3 py-1.5 text-sm" @input="patch({ predictionPercent: Number(($event.target as HTMLInputElement).value) })" /></label>

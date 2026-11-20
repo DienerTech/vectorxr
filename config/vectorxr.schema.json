@@ -1530,7 +1530,8 @@
             },
             "sampleAtEntry": {
               "type": "boolean",
-              "default": false
+              "deprecated": true,
+              "description": "Legacy field, ignored."
             },
             "predictionPercent": {
               "type": "integer",
@@ -1648,7 +1649,8 @@
                   },
                   "sampleAtEntry": {
                     "type": "boolean",
-                    "default": false
+                    "deprecated": true,
+                    "description": "Legacy field, ignored."
                   },
                   "predictionPercent": {
                     "type": "integer",

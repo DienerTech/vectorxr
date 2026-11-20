@@ -119,8 +119,6 @@
     "summary": {
       "waitForSubmission": "Aguardar o envio",
       "overlapSubmission": "Sobrepor o envio",
-      "sampleAtEntry": "Amostrar na entrada",
-      "sampleAtReturn": "Amostrar no retorno",
       "prediction": "{percent}% de previsão",
       "fpsCap": "Limite de {fps} fps",
       "noCap": "Sem limite"
@@ -128,7 +126,6 @@
     "advancedTitle": "Tempo avançado",
     "advancedIntro": "Para experimentação. A maioria dos jogadores deve deixar isto como está.",
     "waitForOverlap": "Aguardar um envio sobreposto",
-    "sampleAtWaitEntry": "Amostrar o tempo de previsão na entrada da espera",
     "predictionLabel": "Previsão (%)",
     "frameCapLabel": "Limite de quadros (fps; 0 = desligado)",
     "changeNote": "Alterar qualquer valor muda o perfil para Personalizada. O ajuste de previsão exige suporte ao relógio do runtime."

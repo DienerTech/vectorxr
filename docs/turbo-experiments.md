@@ -18,15 +18,15 @@ Changing Log Level applies live: Info pauses detailed timing and Debug resumes i
 
 ## If OpenXR Toolkit felt smoother
 
-Set the game's custom profile to the **Toolkit-style** strategy. It uses submission waiting **on**, entry sampling **on**, prediction **100%**, and frame cap **0 (off)**, and leaves the central log level unchanged. Save and relaunch. Changing any value under **Advanced timing** switches the profile to **Custom**.
+Set the game's custom profile to the **Toolkit-style** strategy. It uses submission waiting **on**, prediction **100%**, and frame cap **0 (off)**, and leaves the central log level unchanged. Save and relaunch. Changing any value under **Advanced timing** switches the profile to **Custom**.
 
-Toolkit sampled before its shared frame lock and serialized overlapping frame calls. Its background wait completion and repeated-poll handling changed predictions dynamically; this path did not search automatically for optimal settings. Dampening defaulted to 100% and throttling to off. See the [inspected Toolkit source revision](https://github.com/mbucchia/OpenXR-Toolkit/blob/6b9ecb69a4b2dc714b14a86407868af315d02531/XR_APILAYER_MBUCCHIA_toolkit/layer.cpp#L1876).
+Toolkit serialized overlapping frame calls. Its background wait completion and repeated-poll handling changed predictions dynamically; this path did not search automatically for optimal settings. Dampening defaulted to 100% and throttling to off. See the [inspected Toolkit source revision](https://github.com/mbucchia/OpenXR-Toolkit/blob/6b9ecb69a4b2dc714b14a86407868af315d02531/XR_APILAYER_MBUCCHIA_toolkit/layer.cpp#L1876).
 
 The Toolkit-style strategy approximates those timing effects. VectorXR retains its bounded submission wait, persistent worker, runtime visibility state, and safety handling. Toolkit used different limiter scheduling and applied dampening to ordinary runtime waits too; VectorXR dampens fabricated Turbo predictions. Your Toolkit version, settings, and rendering path may differ, so this is a comparison starting point rather than identical compatibility.
 
 1. Record the VectorXR strategy in a repeatable scene. Keep resolution, refresh rate, reprojection settings, and logging the same.
 2. Compare the starting point using both head rotation and translation, observing cockpit and terrain. If it worsens presentation, switch back to the VectorXR strategy.
-3. To isolate the useful difference, turn submission waiting off for one run, restore it, then turn entry sampling off for another. Keep the better combination.
+3. To isolate the useful difference, turn submission waiting off for one run. Keep the better setting.
 4. Only then consider optional adjustments: for head-motion wobble, test 90% prediction, then 80%, returning toward 100% if tracking feels delayed or worse. For a known reprojection target, test a matching application FPS cap (45 only for a 45 FPS target), returning to 0 if pacing worsens. These are exploratory comparisons, not established fixes, and the cap does not control ASW.
 
 ## Change one control at a time
@@ -36,7 +36,6 @@ With the Toolkit-style or Custom strategy, the profile's applications use Async 
 | Control | Default | Effect while experimental Turbo is active |
 | --- | --- | --- |
 | Wait for an overlapping submission | Off | Waits for an in-progress submission and handoff before returning the next app frame prediction. A 50 ms timeout falls back to the existing protected handoff. This is a bounded experiment, not a reproduction of Toolkit's locking implementation. |
-| Sample prediction timing at wait entry | Off | Samples elapsed app-wait time before internal waiting instead of when returning a fabricated prediction. |
 | Prediction dampening | 100% | Values from 50–99% shorten a fabricated prediction's horizon toward the current runtime clock. Requires the runtime's Windows clock conversion extension; otherwise the log reports that dampening is bypassed. Predictions remain strictly increasing. |
 | Application frame cap | 0 (off) | Caps app frame-wait cadence at 20–240 FPS while Turbo is active. It does not enable ASW, change headset refresh rate, or guarantee compositor cadence. |
 

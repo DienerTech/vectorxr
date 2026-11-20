@@ -113,8 +113,6 @@
     "summary": {
       "waitForSubmission": "제출 대기",
       "overlapSubmission": "제출 겹침",
-      "sampleAtEntry": "진입 시 샘플링",
-      "sampleAtReturn": "반환 시 샘플링",
       "prediction": "예측 {percent}%",
       "fpsCap": "{fps} fps 상한",
       "noCap": "상한 없음"
@@ -122,7 +120,6 @@
     "advancedTitle": "고급 타이밍",
     "advancedIntro": "실험용입니다. 대부분의 플레이어는 그대로 두는 것이 좋습니다.",
     "waitForOverlap": "겹치는 제출 대기",
-    "sampleAtWaitEntry": "대기 진입 시 예측 타이밍 샘플링",
     "predictionLabel": "예측(%)",
     "frameCapLabel": "프레임 상한(fps, 0 = 끄기)",
     "changeNote": "값을 변경하면 프로필이 사용자 지정으로 전환됩니다. 예측 조정에는 런타임 클럭 지원이 필요합니다."

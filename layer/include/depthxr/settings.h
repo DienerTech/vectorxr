@@ -451,7 +451,6 @@ struct TurboExperimentalSettings {
     bool enabled{false};
     std::vector<std::string> application_ids;
     bool wait_for_submit{false};
-    bool sample_at_entry{false};
     int prediction_percent{100};
     int frame_limit{0};
 };

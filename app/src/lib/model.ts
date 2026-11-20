@@ -632,19 +632,18 @@ export interface TurboExperimentalSettings {
   enabled: boolean
   applicationIds: string[]
   waitForSubmit: boolean
-  sampleAtEntry: boolean
   predictionPercent: number
   frameLimit: number
 }
 
 export function defaultTurboExperimental(): TurboExperimentalSettings {
-  return { enabled: false, applicationIds: [], waitForSubmit: false, sampleAtEntry: false,
+  return { enabled: false, applicationIds: [], waitForSubmit: false,
     predictionPercent: 100, frameLimit: 0 }
 }
 
 export function toolkitInspiredTurboExperimental(applicationIds: string[] = []): TurboExperimentalSettings {
   return { ...defaultTurboExperimental(), applicationIds: [...applicationIds], enabled: true,
-    waitForSubmit: true, sampleAtEntry: true }
+    waitForSubmit: true }
 }
 
 export function normalizeTurboExperimental(value: unknown): TurboExperimentalSettings {
@@ -655,7 +654,6 @@ export function normalizeTurboExperimental(value: unknown): TurboExperimentalSet
     enabled: input.enabled === true,
     applicationIds: Array.isArray(input.applicationIds) ? [...new Set(input.applicationIds.filter((id): id is string => typeof id === 'string' && id.length > 0))] : [],
     waitForSubmit: input.waitForSubmit === true,
-    sampleAtEntry: input.sampleAtEntry === true,
     predictionPercent: integer(input.predictionPercent, 50, 100, 100),
     frameLimit: integer(input.frameLimit, 20, 240, 0),
   }

@@ -685,14 +685,34 @@ class OpenXrLayer {
     void PublishTurboAsyncHandoffLocked();
     void CancelTurboAsyncHandoffLocked(const char* reason);
     void EnsureTurboAsyncWorkerLocked();
-    void StopTurboAsyncWorker();
-    void TurboAsyncWorkerLoop(std::uint64_t epoch);
+    // Stops the worker, waiting up to `drain_timeout` for its latest job. One
+    // still inside the runtime's xrWaitFrame is let go instead of joined;
+    // returns true when that happened (see turbo_abandoned_waits_).
+    bool StopTurboAsyncWorker(std::chrono::milliseconds drain_timeout = std::chrono::milliseconds(2000));
+    // Serializes real xrWaitFrame calls (see turbo_runtime_wait_gate_).
+    struct TurboRuntimeWaitGate {
+        std::mutex mutex;
+    };
+    void TurboAsyncWorkerLoop(std::uint64_t epoch, std::shared_ptr<TurboRuntimeWaitGate> wait_gate);
+    // The gate every real xrWaitFrame of the current worker generation goes
+    // through (takes turbo_mutex_).
+    std::shared_ptr<TurboRuntimeWaitGate> CurrentTurboRuntimeWaitGate();
+    // The worker's latest job has not completed: it is queued or inside the
+    // runtime's xrWaitFrame.
+    bool TurboAsyncWorkerBusy();
+    // A worker let go inside the runtime's xrWaitFrame is still there, for
+    // `session` or (XR_NULL_HANDLE) for any session. The runtime's session and
+    // instance are not destroyed under it.
+    bool TurboAbandonedWaitPending(XrSession session = XR_NULL_HANDLE);
     // Waits for the pipelined runtime xrWaitFrame without consuming it. Returns
     // false if it is still outstanding after `timeout`; teardown never waits
     // unbounded on a runtime call that may only release on a later submit.
     bool DrainTurboAsyncWait(std::chrono::milliseconds timeout);
-    // EndSession only: releases an interlocked off-thread wait with a balancing
-    // begin/empty submit, then waits a bounded time for it to complete.
+    // Session teardown only (xrEndSession, and xrDestroySession or
+    // xrDestroyInstance for a session the application never ended), with no
+    // layer lock held: releases an interlocked off-thread wait with a
+    // balancing begin/empty submit, then waits a bounded time for it to
+    // complete. A session that is not running refuses the begin harmlessly.
     void ReleaseTurboPendingWaitForSessionEnd(XrSession session);
     // stop_recorder=false leaves the flight recorder running (xrDestroySession
     // stops it once Frame Generation's presenter is down).
@@ -1135,7 +1155,10 @@ class OpenXrLayer {
     TurboExperimentalSettings turbo_experiment_;
     bool turbo_clock_enabled_{false};
     PFN_xrVoidFunction turbo_convert_counter_time_{nullptr};
-    std::optional<std::chrono::steady_clock::time_point> turbo_limit_last_wait_;
+    // The experimental frame cap's deadline for the app wait last let through
+    // (wait thread). The next one is a period later, so a late wake is not
+    // added to every period after it.
+    std::optional<std::chrono::steady_clock::time_point> turbo_limit_deadline_;
     bool turbo_trace_last_engaged_{false};
     XrResult TraceRuntimeWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*);
     XrResult CallRuntimeWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*, std::uint64_t& trace_id);
@@ -1782,7 +1805,6 @@ class OpenXrLayer {
     bool turbo_seq_wait_in_flight_{false}; // turbo_mutex_
     TurboPredictionHistory turbo_prediction_history_; // turbo_mutex_, no pacing decisions
     int turbo_prediction_fault_log_budget_{3}; // turbo_mutex_
-    std::optional<std::chrono::steady_clock::time_point> turbo_last_wait_frame_wall_time_;
     // Toggle binding state (mutex_-guarded, polled from EndFrame like Depth's).
     bool turbo_toggle_enabled_{true};
     bool turbo_toggle_binding_was_down_{false};
@@ -1801,8 +1823,20 @@ class OpenXrLayer {
     // forwarding: ForwardEndFrame re-establishes a known runtime frame state
     // (see OpenTurboRuntimeFrame), and three consecutive failures fall back or
     // suspend Turbo for the session while frames continue at runtime pacing.
+    // Frame thread only: it writes the pacing-verdict state below. `counted`
+    // is a failure DeferTurboRuntimeFailure already traced and counted.
     void NoteTurboRuntimeFailure(XrResult result, XrTime submitted_display_time,
-                                 TurboFrameOperation operation = TurboFrameOperation::kEnd);
+                                 TurboFrameOperation operation = TurboFrameOperation::kEnd, bool counted = false);
+    // The same from the application's wait/begin thread, which may not be the
+    // frame thread: the failure is traced and counted here, and the frame
+    // thread acts on it at its next xrEndFrame (ActOnDeferredTurboRuntimeFailure).
+    void DeferTurboRuntimeFailure(XrResult result, TurboFrameOperation operation);
+    void ActOnDeferredTurboRuntimeFailure();
+    // The last failure DeferTurboRuntimeFailure left for the frame thread: 0
+    // for none, else kTurboDeferredFailurePending, the operation in bits
+    // 32-39 and the XrResult in the low 32.
+    static constexpr std::uint64_t kTurboDeferredFailurePending = std::uint64_t{1} << 40;
+    std::atomic<std::uint64_t> turbo_deferred_failure_{0};
     // Frame thread only. Opens the runtime frame a submit needs when none is
     // open. A second xrWaitFrame must never be stacked on a waited-but-unbegun
     // frame: the spec makes it block until a begin that would never arrive.
@@ -1857,6 +1891,14 @@ class OpenXrLayer {
     // Frame-submission-thread only (resolved under the config lock at
     // EndFrame, consumed after it is released); the sequenced state machine
     // below is turbo_mutex_-guarded because WaitFrame/BeginFrame consult it.
+    // The same rule holds for the rest of the pacing-verdict state
+    // (turbo_pacing_source_, turbo_reprobe_of_, turbo_fallback_early_,
+    // turbo_pacing_verdict_pending_, runtime_pacing_write_future_,
+    // turbo_stable_accumulated_ms_, the drain-timeout window): the frame
+    // thread reads it without a lock after releasing the config lock, so no
+    // other thread may write it, with or without mutex_. A failure seen on the
+    // application's wait/begin thread is handed over in atomics
+    // (DeferTurboRuntimeFailure) and acted on here.
     TurboPacingMode turbo_pacing_mode_{TurboPacingMode::kAsync};
     TurboPacingSource turbo_pacing_source_{TurboPacingSource::kProbing};
     bool turbo_pacing_resolved_{false};
@@ -1926,8 +1968,21 @@ class OpenXrLayer {
     bool turbo_frame_begun_{false};
     // Serializes every real xrWaitFrame we issue or forward — the spec makes
     // concurrent waits app-UB, and a handshake/compensation wait must never
-    // overlap a steady-state one.
-    std::mutex turbo_runtime_wait_mutex_;
+    // overlap a steady-state one. It belongs to one worker generation: the
+    // worker holds its gate across the runtime call, so a worker let go inside
+    // the runtime (StopTurboAsyncWorker) keeps the gate it started with, and
+    // the next session's waits get a new one instead of queueing behind a wait
+    // that may never return. The pointer is turbo_mutex_-guarded; callers copy
+    // it (CurrentTurboRuntimeWaitGate) and lock the gate without turbo_mutex_.
+    std::shared_ptr<TurboRuntimeWaitGate> turbo_runtime_wait_gate_{std::make_shared<TurboRuntimeWaitGate>()};
+    // (turbo_mutex_) The latest job of each worker let go inside the runtime's
+    // xrWaitFrame, with the session it waits in. Ready once that thread has
+    // left the runtime; entries are dropped then.
+    struct TurboAbandonedWait {
+        XrSession session{XR_NULL_HANDLE};
+        std::shared_future<void> job;
+    };
+    std::vector<TurboAbandonedWait> turbo_abandoned_waits_;
     // Hang forensics: a budget of debug markers around every blocking call in
     // the pipelined path (End, steady wait, swapchain acquire/wait, owed
     // begin) so a hardlock's log ends at the exact culprit. Refilled at each
@@ -1973,7 +2028,16 @@ class OpenXrLayer {
     std::optional<PredictionLimitEstimate> ProbeRuntimePredictionLimit(const HeadPredictionPlan& plan,
                                                                        XrSpace world_space);
     void NotePredictionProbeLocked(const std::optional<PredictionLimitEstimate>& estimate);
-    HeadExtension ExtendHead(const HeadPredictionPlan& plan, XrSpace world_space, XrTime target, XrTime now);
+    // `at_target`: the runtime's answer for the target, when it gave one.
+    HeadExtension ExtendHead(const HeadPredictionPlan& plan, XrSpace world_space, XrTime target, XrTime now,
+                             std::optional<HeadPredictionPose>* at_target = nullptr);
+    // The head extension of one display time in one world space, for
+    // xrLocateViews and xrLocateSpace alike: the first locate of the display
+    // time extends the head (ExtendHead) and its head is kept
+    // (head_extension_heads_); every later one turns the runtime's answer of
+    // its own moment to that same head. Takes mutex_ itself; its locates go
+    // to the runtime without it.
+    HeadExtension HeadExtensionFor(const HeadPredictionPlan& plan, XrSpace world_space, XrTime target, XrTime now);
     void NoteHeadExtensionLocked(const HeadExtension& extension, XrTime target, XrTime now);
     std::string HeadPredictionOsdDetail() const;
     PredictionLimitTracker head_prediction_limit_;
@@ -2320,6 +2384,18 @@ class OpenXrLayer {
     };
     static constexpr std::size_t kHeadExtensionAnswersKept = 8;
     std::vector<HeadExtensionAnswer> head_extension_answers_;
+    // The head one display time was extended to in one world space, as the
+    // first locate of that time (views or VIEW space) extended it: the views
+    // and VIEW space located at that time later turn to the same head
+    // (HeadExtensionFor). Never used for another time. mutex_.
+    struct HeadExtensionHead {
+        XrTime time{0};
+        XrSpace world_space{XR_NULL_HANDLE};
+        XrTime limit{0};
+        HeadExtension extension;  // as first computed; not applied: the runtime's answers stay
+        HeadQuaternion head;      // the extended head's orientation in the world space
+    };
+    std::vector<HeadExtensionHead> head_extension_heads_;
     bool awaiting_session_start_event_{false};
     XrTime session_create_time_{0};
     uint32_t stale_session_event_logs_{0};

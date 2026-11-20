@@ -18,7 +18,7 @@ export function turboSessionStrategy(session: Pick<TurboMetricsSession, 'timingC
   const timing = session.timingConfiguration ?? ''
   if (timing.startsWith('Experimental')) {
     const value = (key: string) => new RegExp(`${key}=([^;]+)`).exec(timing)?.[1]?.trim()
-    const toolkit = value('submit') === 'wait' && value('sample') === 'entry' && value('prediction') === '100%' && value('cap') === '0'
+    const toolkit = value('submit') === 'wait' && (value('sample') ?? 'entry') === 'entry' && value('prediction') === '100%' && value('cap') === '0'
     return toolkit ? t('turbo.strategy.toolkit') : t('turbo.strategy.custom')
   }
   const modes = session.buckets.map(bucket => bucket.state).filter(state => state !== 'off')

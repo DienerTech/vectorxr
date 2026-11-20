@@ -150,7 +150,7 @@ void TestTurboExperimentalConfig() {
     const auto dcs = depthxr::ResolveTurboSettings(configured.document, "DCS.exe");
     const auto other = depthxr::ResolveTurboSettings(configured.document, "Other.exe");
     Expect(dcs.experimental.enabled && dcs.experimental.wait_for_submit &&
-           dcs.experimental.sample_at_entry && dcs.experimental.frame_limit == 45 &&
+           dcs.experimental.frame_limit == 45 &&
            dcs.experimental.prediction_percent == 75, "Selected application's experimental settings were lost");
     Expect(!other.experimental.enabled, "Experiments escaped the application allowlist");
     const auto turbo_off = parse(R"({"enabled":false,"experimental":{"enabled":true,"applicationIds":["dcs"]}})");

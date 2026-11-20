@@ -232,7 +232,7 @@ test('Turbo overlap produces a non-blocking warning naming the affected applicat
   config.applications = [dcs, msfs]
   assert.deepEqual(configWarnings(config), [])
   config.modules.turbo.profiles = [{ id: 'turbo-dcs', name: 'DCS', enabled: true, applicationIds: ['dcs', 'msfs'], disableSafety: false,
-    experimental: { enabled: false, applicationIds: [], waitForSubmit: false, sampleAtEntry: false, predictionPercent: 100, frameLimit: 0 } }]
+    experimental: { enabled: false, applicationIds: [], waitForSubmit: false, predictionPercent: 100, frameLimit: 0 } }]
   config.modules.framegen.profiles = [createFrameGenProfile(defaultFrameGenSettings(), ['dcs'])]
   const [warning] = configWarnings(config)
   assert.equal(warning, 'Turbo and Frame Generation are both on for DCS. Frame Generation takes over frame pacing; Turbo stays off in sessions where Frame Generation runs.')
