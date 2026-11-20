@@ -14,6 +14,12 @@
       "label": "Affichage à l'écran",
       "subtitle": "Affichage dans le casque, placement et affectations"
     },
+    "screenshots": {
+      "label": "Captures d'écran"
+    },
+    "mirror": {
+      "label": "Miroir stabilisé"
+    },
     "registry": {
       "label": "Registre des applications",
       "subtitle": "Inscrire des applications pour l'attribution des profils",
@@ -81,7 +87,13 @@
   },
   "sidebar": {
     "appSettings": "Paramètres de l'application",
+    "applications": "Applications",
+    "capture": "Capture et miroir",
+    "openxrUtilities": "Utilitaires OpenXR",
     "enhancements": "Améliorations OpenXR",
+    "performance": "Performances",
+    "lookAndFeel": "Rendu visuel",
+    "control": "Commandes",
     "suiteOff": "Les effets d'exécution de VectorXR sont désactivés",
     "moduleTitle": "{subtitle}. {status}",
     "saveHint": "Enregistrez les modifications pour appliquer les paramètres. Chaque amélioration indique quelles modifications nécessitent un redémarrage de l'application VR.",
@@ -115,6 +127,8 @@
     "issuesFound_other": "{count} problèmes de validation trouvés",
     "issuesHint": "Vous pouvez quand même appliquer — les erreurs apparaîtront dans le panneau Validation et l'enregistrement sera bloqué jusqu'à leur résolution.",
     "valid": "La structure de la configuration et les plages de valeurs semblent valides.",
+    "networkPathsTitle": "Les chemins réseau ne sont pas importés",
+    "networkPathsHint": "Ce fichier désigne des fichiers ou des dossiers situés sur un autre ordinateur. VectorXR ouvre ces chemins dans chaque jeu ; ils sont donc ignorés : le dossier des captures d'écran revient au dossier par défaut, et les sons et images à ceux fournis. Choisissez-les à nouveau après l'importation si vous le souhaitez.",
     "applyToEditor": "Appliquer à l'éditeur",
     "importAndSave": "Importer et enregistrer"
   },

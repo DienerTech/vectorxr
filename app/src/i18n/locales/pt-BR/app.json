@@ -14,6 +14,12 @@
       "label": "Exibição na tela",
       "subtitle": "Exibição no headset, posicionamento e atribuições"
     },
+    "screenshots": {
+      "label": "Capturas de tela"
+    },
+    "mirror": {
+      "label": "Espelho estabilizado"
+    },
     "registry": {
       "label": "Registro de aplicativos",
       "subtitle": "Registre aplicativos para atribuir perfis",
@@ -81,7 +87,13 @@
   },
   "sidebar": {
     "appSettings": "Configurações do aplicativo",
+    "applications": "Aplicativos",
+    "capture": "Captura e espelho",
+    "openxrUtilities": "Utilitários OpenXR",
     "enhancements": "Aprimoramentos OpenXR",
+    "performance": "Desempenho",
+    "lookAndFeel": "Aparência",
+    "control": "Controle",
     "suiteOff": "Os efeitos de execução do VectorXR estão desligados",
     "moduleTitle": "{subtitle}. {status}",
     "saveHint": "Salve as alterações para aplicar as configurações. Cada aprimoramento indica quais alterações exigem reiniciar o aplicativo de VR.",
@@ -115,6 +127,8 @@
     "issuesFound_other": "{count} problemas de validação encontrados",
     "issuesHint": "Você ainda pode aplicar — os erros aparecerão no painel Validação e o salvamento ficará bloqueado até que sejam resolvidos.",
     "valid": "A estrutura e as faixas de valores da configuração parecem válidas.",
+    "networkPathsTitle": "Caminhos de rede não são importados",
+    "networkPathsHint": "Este arquivo aponta para arquivos ou pastas em outro computador. O VectorXR abre esses caminhos dentro de cada jogo, por isso eles são deixados de fora: a pasta de capturas de tela volta ao padrão, e os sons e as imagens voltam aos integrados. Escolha-os novamente após importar, se quiser.",
     "applyToEditor": "Aplicar ao editor",
     "importAndSave": "Importar e salvar"
   },

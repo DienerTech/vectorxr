@@ -3,6 +3,7 @@
   "configParse": "{path} を解析できません: {detail}",
   "configReplace": "{path} を置き換えられません: {detail}",
   "directoryMissing": "ディレクトリが存在しません: {path}",
+  "folderCreate": "{path} を作成できません: {detail}",
   "soundMissing": "サウンド ファイルが見つかりません: {path}",
   "sessionInactive": "OpenXR セッションはアクティブではなくなりました",
   "diagnosticUnavailable": "この OpenXR セッションでは診断用の可視化を使用できません",

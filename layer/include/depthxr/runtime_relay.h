@@ -17,6 +17,7 @@ struct RuntimeControlDocument {
     std::uint64_t revision{0};
     std::uint64_t expires_at_unix_milliseconds{0};
     std::optional<bool> quadviews_diagnostic_visualization;
+    std::optional<bool> mirror_visible;
 };
 
 struct QuadViewDimensions {
@@ -54,6 +55,12 @@ struct RuntimeStatusDocument {
     std::string framegen_flow;
     std::string framegen_flow_mode;
     std::string framegen_flow_reason;
+    // The stabilized mirror window: MirrorStateName ("off", "active",
+    // "hidden", ...) and a reason in English, for the app.
+    std::string mirror_state;
+    std::string mirror_reason;
+    // Present only while this session has a mirror window the app can control.
+    std::optional<bool> mirror_visible;
     // Present while the session runs with Frame Generation on.
     std::optional<RuntimeFrameGenRates> framegen_rates;
     std::vector<QuadViewDimensions> quadviews_dimensions;

@@ -52,6 +52,8 @@
     "depthLock": "Tiefe: Depth Lock A/B",
     "osdToggle": "OSD: ein-/ausblenden",
     "osdCycle": "OSD: Layout wechseln",
+    "screenshot": "Aufnahme & Spiegel: Screenshot aufnehmen",
+    "mirrorToggle": "Aufnahme & Spiegel: Spiegelfenster ein- oder ausblenden",
     "turboToggle": "Turbo: A/B-Umschaltung",
     "turboMetrics": "Turbo: Metrikerfassung",
     "framegenToggle": "Frame Generation: A/B-Umschaltung",

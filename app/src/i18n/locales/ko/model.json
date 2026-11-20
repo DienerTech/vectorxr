@@ -51,6 +51,8 @@
     "depthLock": "깊이: Depth Lock A/B",
     "osdToggle": "OSD: 표시/숨기기",
     "osdCycle": "OSD: 레이아웃 전환",
+    "screenshot": "캡처 및 미러: 스크린샷 촬영",
+    "mirrorToggle": "캡처 및 미러: 미러 창 표시 또는 숨기기",
     "turboToggle": "Turbo: A/B 전환",
     "turboMetrics": "Turbo: 메트릭 캡처",
     "framegenToggle": "Frame Generation: A/B 전환",

@@ -70,6 +70,8 @@ int g_creates = 0;
 std::vector<XrSwapchain> g_destroyed; // swapchains the layer destroyed
 int g_wait_timeouts = 0; // number of upcoming output waits that time out
 int g_wait_timeouts_on_create = 0; // g_wait_timeouts once the next output swapchain is made
+std::function<XrResult(XrSwapchain, XrDuration)> g_output_wait;
+std::function<XrResult(XrSwapchain)> g_output_release;
 // Each output image wait takes this long (the runtime slow to hand images
 // back): the presenter thread writes its refresh that much later.
 std::atomic<std::chrono::microseconds> g_wait_image_delay{std::chrono::microseconds(0)};
@@ -117,11 +119,15 @@ XrResult XRAPI_PTR Acquire(XrSwapchain swapchain, const XrSwapchainImageAcquireI
     images.acquired.push_back(*index);
     return XR_SUCCESS;
 }
-XrResult XRAPI_PTR WaitImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo*) {
+XrResult XRAPI_PTR WaitImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* info) {
     if (const std::chrono::microseconds delay = g_wait_image_delay.load(); delay.count() > 0) {
         SleepPrecise(std::chrono::steady_clock::now() + delay);
     }
     std::scoped_lock lock(g_xr_mutex);
+    if (g_output_wait) {
+        const XrResult result = g_output_wait(swapchain, info->timeout);
+        if (result != XR_SUCCESS) return result;
+    }
     if (g_wait_timeouts > 0) {
         --g_wait_timeouts;
         return XR_TIMEOUT_EXPIRED;
@@ -136,6 +142,10 @@ XrResult XRAPI_PTR Release(XrSwapchain swapchain, const XrSwapchainImageReleaseI
     if (images.acquired.empty() || images.waited == 0) {
         g_release_violation = true;
         return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    if (g_output_release) {
+        const XrResult result = g_output_release(swapchain);
+        if (XR_FAILED(result)) return result;
     }
     images.acquired.pop_front();
     --images.waited;
@@ -395,6 +405,8 @@ struct GpuLog {
     // Writes refused because newer captures replaced the images they needed
     // in a view's history ring (FrameGenGpu::Writable said so beforehand).
     std::atomic<int> ring_refusals{0};
+    // Let the game analyze another frame before the next attempted JIT write.
+    std::atomic<bool> hold_outputs{false};
     // Analyses whose source images were not captured at their release.
     std::atomic<int> execute_uncaptured{0};
     // Game waits held for the GPU: (mark, the newest begun frame's mark
@@ -691,6 +703,7 @@ class FakeGpu final : public FrameGenGpu {
         return it == analyzed_.end() || std::chrono::steady_clock::now() >= it->measured_at;
     }
     bool Writable(std::uint64_t frame, bool exact) const override {
+        if (log_->hold_outputs) return false;
         std::scoped_lock lock(analyzed_mutex_);
         const auto it = std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == frame; });
         return it != analyzed_.end() && WritableLocked(*it, exact);
@@ -1469,6 +1482,55 @@ struct Runtime {
     std::vector<Submission> log;
 };
 
+// All observations use the dispatch mutex, including the runtime's log.
+struct RefusedOutputRelease {
+    Runtime& runtime;
+    XrSwapchain eye;
+    int remaining;
+    int attempts{0};
+    std::uint32_t cursor{0};
+    int prior_releases{0};
+    std::size_t first{0};
+    std::size_t past{0};
+    bool recovered{false};
+
+    XrResult operator()(XrSwapchain swapchain) {
+        if (swapchain != eye || recovered) return XR_SUCCESS;
+        const auto& images = g_images.at(eye);
+        if (attempts++ == 0) {
+            first = runtime.log.size();
+            cursor = images.cursor;
+            prior_releases = g_releases[eye];
+        }
+        Check(images.cursor == cursor && images.acquired.size() == 1 && images.waited == 1 &&
+                  g_written[eye].size() == 1,
+              "refused release: retry the same written image without acquiring, waiting or writing again");
+        if (remaining > 0) {
+            --remaining;
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+        recovered = true;
+        past = runtime.log.size();
+        return XR_SUCCESS;
+    }
+
+    void CheckSubmissions() const {
+        Check(recovered && attempts >= 2, "refused release: the runtime accepted the retry");
+        for (std::size_t i = first; i < past; ++i) {
+            const auto& used = runtime.log[i].swapchains;
+            Check(std::find(used.begin(), used.end(), eye) == used.end(),
+                  "refused release: no submission names the incomplete pair, even to repeat its old views");
+        }
+        bool fresh = false;
+        for (std::size_t i = past; i < runtime.log.size(); ++i) {
+            const auto& submission = runtime.log[i];
+            fresh = fresh || (submission.swapchains.size() == 2 && submission.swapchains[1] == eye &&
+                               submission.releases[1] > prior_releases + 1);
+        }
+        Check(fresh, "refused release: a fresh stereo write is presented after the retry on the same outputs");
+    }
+};
+
 // --- application ------------------------------------------------------------------
 
 const XrSwapchain kLeft = reinterpret_cast<XrSwapchain>(0x11);
@@ -1744,6 +1806,42 @@ void TestExtrapolationPacing() {
 
 bool IsAppImage(const std::vector<XrSwapchain>& swapchains) {
     return swapchains.size() == 2 && swapchains[0] == kLeft && swapchains[1] == kRight;
+}
+
+// Both ways the batch backend releases its outputs: inline after writing
+// them, and on the game's slot when the presenter thread interpolates.
+void TestBatchOutputReleaseRefusal() {
+    for (bool threaded : {false, true}) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        gpu.threaded = runtime.paced = threaded;
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+        App app(presenter, runtime);
+        app.eye_speed = 0.5;
+        for (int i = 0; i < 12; ++i) app.Frame();
+        const auto warm = runtime.Snapshot();
+        const auto generated = std::find_if(warm.rbegin(), warm.rend(), [](const Submission& entry) {
+            return entry.swapchains.size() == 2 && !IsAppImage(entry.swapchains);
+        });
+        Check(generated != warm.rend(), "batch release: generated outputs were presented first");
+        RefusedOutputRelease fault{runtime, generated->swapchains[1], 1};
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = std::ref(fault);
+        }
+        for (int i = 0; i < 12; ++i) app.Frame();
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = {};
+            fault.CheckSubmissions();
+            Check(fault.past > fault.first && IsAppImage(runtime.log[fault.first].swapchains),
+                  "batch release: the rejected batch yields its slot to the game frame");
+        }
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation && runtime.mismatched_images == 0,
+              "batch release: ordered calls and every eye image matches its submitted pose");
+    }
 }
 
 void TestTripleInterpolation() {
@@ -3341,6 +3439,46 @@ void TestJitWaitsForNoGameFrame() {
           "jit unready: refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
               std::to_string(status.output_fps) + " fps, " + std::to_string(exhausted) + "/s ring exhausted)");
     Check(!runtime.ordering_violation && !g_release_violation, "jit unready: calls stayed ordered");
+    presenter.Stop();
+}
+
+// Between the first threaded wait and the game's first threaded end the
+// presenter repeats the last passthrough frame. Its color is still current
+// while the game has released just the new depth image.
+void TestJitDropsReplacedDepthAtStartup() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const XrFrameState state = app->Wait();
+    app->Begin();
+    Check(presenter.Status().threaded, "startup depth: a threaded frame is open");
+    // Allow an in-flight submission to finish before inspecting the next.
+    const auto repeated_depth = [&] {
+        const std::size_t target = runtime.Submissions() + 2;
+        const auto deadline = std::chrono::steady_clock::now() + 1s;
+        while (runtime.Submissions() < target && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(1ms);
+        }
+        std::scoped_lock lock(g_xr_mutex);
+        Check(runtime.submitted_depth.size() >= target && IsAppImage(runtime.submitted_swapchains.back()),
+              "startup depth: the presenter repeats the game's colors while it renders");
+        return static_cast<bool>(runtime.submitted_depth.back());
+    };
+    Check(repeated_depth(), "startup depth: the current depth accompanies its colors");
+    const auto image = (app->image + 1) % 3;
+    presenter.NoteRelease(kDepthChain, image);
+    presenter.CaptureOnRelease(kDepthChain, image);
+    Check(!repeated_depth(), "startup depth: newer depth never accompanies the previous colors");
+    for (auto color : {kLeft, kRight}) {
+        presenter.NoteRelease(color, image);
+        presenter.CaptureOnRelease(color, image);
+    }
+    Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "startup depth: game end");
     presenter.Stop();
 }
 
@@ -9795,16 +9933,34 @@ void TestQuadOutputsResized() {
     const std::size_t first = runtime.Submissions();
     const std::vector<XrSwapchain> old_outputs = runtime.Snapshot().back().swapchains;
     Check(ShowsFrameGenOutputs(runtime.Snapshot().back()), "resized: composing first");
+    std::vector<std::pair<XrSwapchain, XrDuration>> waits;
     {
-        // The new images are not handed back at once: the last frame
-        // written is shown again meanwhile.
+        // The first new eye takes part of the refresh and the second
+        // times out. The presenter must retry that same image next time.
         std::scoped_lock lock(g_xr_mutex);
-        g_wait_timeouts_on_create = 2;
+        g_output_wait = [&](XrSwapchain swapchain, XrDuration timeout) {
+            if (std::find(old_outputs.begin(), old_outputs.end(), swapchain) != old_outputs.end() ||
+                waits.size() >= 3) return XR_SUCCESS;
+            waits.emplace_back(swapchain, timeout);
+            if (waits.size() == 1) SleepPrecise(std::chrono::steady_clock::now() + 2ms);
+            if (waits.size() == 2) return XR_TIMEOUT_EXPIRED;
+            if (waits.size() == 3) {
+                Check(g_images[swapchain].acquired.size() == 1 && g_releases[waits[0].first] == 0,
+                      "resized: the first eye stays waited and neither eye is released or reacquired on timeout");
+            }
+            return XR_SUCCESS;
+        };
     }
     app.canvas = {1400, 1300};
     app.Run(600ms);
     {
         std::scoped_lock lock(g_xr_mutex);
+        g_output_wait = {};
+        Check(waits.size() == 3 && waits[0].first != waits[1].first && waits[1].first == waits[2].first,
+              "resized: only the timed-out eye is waited again");
+        Check(waits[0].second <= kPeriod && waits[1].second >= 0 && waits[1].second <= kPeriod - 1'000'000 &&
+                  waits[2].second == 0,
+              "resized: the eyes share one refresh of wait time, then the held image is polled");
         Check(g_creates == 4 && g_create_sizes[2].first == 1400 && g_create_sizes[3].second == 1300,
               "resized: each eye's output is made anew once, at the new size (" + std::to_string(g_creates) + " made)");
         Check(std::count(g_destroyed.begin(), g_destroyed.end(), old_outputs[0]) == 1 &&
@@ -9833,6 +9989,126 @@ void TestQuadOutputsResized() {
                                   std::to_string(old_after_new) + ")");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "resized: calls stayed ordered");
+}
+
+// A 2x stereo game can supply a successful analysis between each refusal.
+// Only a complete output write resolves a persistent output failure.
+void TestStereoJitOutputReleasePause() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    presenter.SetRetryPolicy(300ms, 1);
+    app->eye_speed = 0.5;
+    for (int i = 0; i < 12; ++i) app->Frame();
+    const auto warm = runtime.Snapshot();
+    const auto generated = std::find_if(warm.rbegin(), warm.rend(), [](const Submission& entry) {
+        return entry.swapchains.size() == 2 && !IsAppImage(entry.swapchains);
+    });
+    Check(generated != warm.rend(), "stereo JIT release: generated a complete pair first");
+    for (const bool persistent : {false, true}) {
+        const auto before = presenter.Status();
+        RefusedOutputRelease fault{runtime, generated->swapchains[1], persistent ? 100000 : 2};
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = [&](XrSwapchain chain) {
+                const XrResult released = fault(chain);
+                if (XR_FAILED(released)) gpu.hold_outputs = true;
+                return released;
+            };
+        }
+        const unsigned strikes = persistent ? 3 : 2;
+        for (unsigned strike = 1; strike <= strikes; ++strike) {
+            gpu.hold_outputs = false;
+            for (int i = 0; i < 12 && presenter.Status().failures < before.failures + strike; ++i) app->Frame();
+            const auto status = presenter.Status();
+            Check(status.failures == before.failures + strike, "stereo JIT release: one failure per refusal");
+            if (strike == 3) {
+                Check(status.state == FrameGenState::kPaused && status.retry_pending,
+                      "stereo JIT release: the third refusal pauses despite a successful analysis between refusals");
+            } else {
+                Check(status.state == FrameGenState::kActive, "stereo JIT release: one or two refusals stay active");
+                const int analyzed = gpu.analyzes;
+                for (int i = 0; i < 12 && gpu.analyzes == analyzed; ++i) app->Frame();
+                Check(gpu.analyzes > analyzed, "stereo JIT release: another game frame analyzed while release is pending");
+            }
+        }
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            fault.remaining = 0;
+        }
+        gpu.hold_outputs = false;
+        for (int i = 0; i < 120; ++i) {
+            app->Frame();
+            std::scoped_lock lock(g_xr_mutex);
+            const auto& entry = runtime.log.back();
+            if (fault.recovered && entry.swapchains == generated->swapchains &&
+                entry.releases[1] > fault.prior_releases + 1) break;
+        }
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = {};
+            fault.CheckSubmissions();
+        }
+        Check(presenter.Status().state == FrameGenState::kActive && presenter.Status().threaded,
+              "stereo JIT release: generation recovered on the same outputs");
+    }
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation && runtime.mismatched_images == 0,
+          "stereo JIT release: calls stayed ordered and every eye image matches its submitted pose");
+}
+
+// The first eye's new image is already the one visible to xrEndFrame
+// when the second release fails on the same outputs used last refresh.
+void TestJitOutputReleaseRefusal() {
+    for (bool persistent : {false, true}) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        presenter.SetQuadDecline(300ms, 300ms);
+        QuadApp app(presenter, runtime);
+        for (int i = 0; i < 3; ++i) app.Frame();
+        app.Run(400ms);
+        const auto last = runtime.Snapshot().back();
+        Check(ShowsFrameGenOutputs(last), "JIT release: presented a complete pair before the refusal");
+        RefusedOutputRelease fault{runtime, last.swapchains[1], persistent ? 100000 : 2};
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = std::ref(fault);
+        }
+        if (persistent) {
+            app.Run(2000ms, 4000us, [&] {
+                const auto status = presenter.Status();
+                return status.quad_declining && !status.threaded;
+            });
+            const auto status = presenter.Status();
+            Check(status.quad_declining && !status.threaded, "JIT release: repeated refusal returns quad views to the layer");
+            std::scoped_lock lock(g_xr_mutex);
+            Check(!fault.recovered && fault.attempts >= 10, "JIT release: the stopped run still owns the refused image");
+            fault.remaining = 0;
+        }
+        // Also exercise recovery across a stopped compositor whose cleanup
+        // was refused. Wait for a complete new pair to reach the runtime.
+        app.Run(2000ms, 4000us, [&] {
+            std::scoped_lock lock(g_xr_mutex);
+            const auto& entry = runtime.log.back();
+            return fault.recovered && entry.swapchains == last.swapchains && entry.releases[1] > fault.prior_releases + 1;
+        });
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = {};
+            fault.CheckSubmissions();
+        }
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation && runtime.mismatched_images == 0 &&
+                  runtime.not_stereo == 0 && !runtime.used_destroyed,
+              "JIT release: calls stayed ordered and both eyes show the images written for their poses");
+    }
 }
 
 // Frames the layer composes one after another (the claim finds every frame
@@ -16121,6 +16397,7 @@ int main(int argc, char** argv) {
     RUN(TestCompositionRefusalSurvivesRuntimeFailure);
     RUN(TestCompositionQuadUnsupportedChains);
     RUN(TestInterpolationPacing);
+    RUN(TestBatchOutputReleaseRefusal);
     RUN(TestWorkingMemoryAskedOncePerSecond);
     RUN(TestExtrapolationPacing);
     RUN(TestTripleInterpolation);
@@ -16152,6 +16429,7 @@ int main(int argc, char** argv) {
     RUN(TestSlowDynamicHorizonJitterReported);
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
+    RUN(TestStereoJitOutputReleasePause);
     RUN(TestJitEdgeFill);
     RUN(TestJitEyeShiftReported);
     RUN(TestEyeProbe);
@@ -16161,6 +16439,7 @@ int main(int argc, char** argv) {
     RUN(TestJitInterpolation);
     RUN(TestJitDynamicInterpolation);
     RUN(TestJitWaitsForNoGameFrame);
+    RUN(TestJitDropsReplacedDepthAtStartup);
     RUN(TestJitModeSwitchRestarts);
     RUN(TestToggleOffReadsOff);
     RUN(TestToggleOffLogsNoEngagement);
@@ -16253,6 +16532,7 @@ int main(int argc, char** argv) {
     RUN(TestQuadStandbyRecordsViewTargets);
     RUN(TestQuadClaimNeedsLatestCapture);
     RUN(TestQuadOutputsResized);
+    RUN(TestJitOutputReleaseRefusal);
     RUN(TestQuadAsIsShowsNewestImage);
     RUN(TestQuadNoOpenFrameOnBlankingRuntime);
     RUN(TestQuadFailedWriteRepeatsLastShown);

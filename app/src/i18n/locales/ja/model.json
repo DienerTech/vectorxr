@@ -51,6 +51,8 @@
     "depthLock": "深度: Depth Lock A/B",
     "osdToggle": "OSD: 表示/非表示",
     "osdCycle": "OSD: レイアウトの切り替え",
+    "screenshot": "キャプチャとミラー: スクリーンショットの撮影",
+    "mirrorToggle": "キャプチャとミラー: ミラー ウィンドウの表示/非表示",
     "turboToggle": "Turbo: A/B 切り替え",
     "turboMetrics": "Turbo: メトリックの記録",
     "framegenToggle": "Frame Generation: A/B 切り替え",

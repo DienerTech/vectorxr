@@ -124,8 +124,25 @@ struct OsdSettings {
     std::vector<InputBinding> cycle_bindings{InputBinding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F11"}}};
 };
 
+enum class ScreenshotEyes {
+    Both,
+    Left,
+    Right,
+};
+
+// Full-resolution screenshots (screenshot.h): global, in every game.
+struct ScreenshotSettings {
+    // Any one of the list's bindings saves a screenshot; none means none bound.
+    std::vector<InputBinding> bindings;
+    ScreenshotEyes eyes{ScreenshotEyes::Both};
+    // An absolute folder (UTF-8) the games' folders go under; empty: VectorXR
+    // in the user's Pictures folder.
+    std::string folder;
+};
+
 struct CoreSettings {
     OsdSettings osd;
+    ScreenshotSettings screenshot;
     bool enabled{true};
     LogLevel log_level{LogLevel::Info};
     int log_retention_files{7};
@@ -619,6 +636,70 @@ struct FrameGenResolvedSettings : FrameGenSettings {
     FrameGenDiagnosticView diagnostic_view{FrameGenDiagnosticView::kOff};
 };
 
+enum class MirrorEye {
+    Left,
+    Right,
+};
+
+enum class MirrorAspect {
+    k16x9,
+    k16x10,
+    k4x3,
+    k1x1,
+    k21x9,
+};
+
+// Stabilized mirror window (mirror.h): a desktop window in the game's
+// process that shows one eye of the frame the game submits, with the head's
+// shake smoothed out, for streaming and recording. The headset's frame is
+// not changed. Off unless turned on for the game. Changes apply live.
+struct MirrorSettings {
+    // 0-100: 0 follows the head exactly (a plain mirror), 100 smooths most.
+    double smoothing{60.0};
+    // Takes the head's roll out, so the horizon stays level.
+    bool level_horizon{false};
+    MirrorEye eye{MirrorEye::Left};
+    // 0-40, percent: how far the picture is zoomed in, which is the room the
+    // stabilization has before an edge of the eye's image would show.
+    double margin{15.0};
+    MirrorAspect aspect{MirrorAspect::k16x9};
+    // The picture's width in pixels when the window first opens (its height
+    // follows the aspect), 320-3840.
+    int width{1280};
+    // The most frames a second the window shows, 15-120.
+    int frame_rate{60};
+    // Fills a monitor, borderless, instead of being a window: for people in
+    // the room watching on a monitor or a television. The picture then has
+    // the monitor's shape (aspect and width are not used). `monitor` is the
+    // monitor's Windows device name (such as the one ending in DISPLAY2);
+    // none chosen, or one that is not connected, and the mirror is a window.
+    bool fill_monitor{false};
+    std::string monitor;
+};
+
+struct MirrorProfile {
+    std::string name;
+    bool enabled{true};
+    ProfileMode mode{ProfileMode::Custom};
+    std::vector<std::string> application_ids;
+    MirrorSettings settings;
+};
+
+struct MirrorModuleConfig {
+    bool enabled{false};
+    // Any one shows or hides the window in the running game; none bound,
+    // none.
+    std::vector<InputBinding> bindings;
+    MirrorSettings defaults;
+    std::vector<MirrorProfile> profiles;
+};
+
+struct MirrorResolvedSettings : MirrorSettings {
+    bool enabled{false};
+    std::string profile_name;
+    std::vector<InputBinding> bindings;
+};
+
 struct ConfigDocument {
     int version{3};
     CoreSettings core;
@@ -628,6 +709,7 @@ struct ConfigDocument {
     QuadViewsModuleConfig quadviews;
     TurboModuleConfig turbo;
     FrameGenModuleConfig framegen;
+    MirrorModuleConfig mirror;
 };
 
 struct ResolvedRuntimeConfig {
@@ -638,6 +720,7 @@ struct ResolvedRuntimeConfig {
     QuadViewsResolvedSettings quadviews;
     TurboResolvedSettings turbo;
     FrameGenResolvedSettings framegen;
+    MirrorResolvedSettings mirror;
 };
 
 const char* ToString(LogLevel level);
@@ -669,6 +752,10 @@ const char* ToString(FrameGenDiagnosticView view);
 const char* ToString(FrameGenMultiplier multiplier);
 std::optional<FrameGenMultiplier> ParseFrameGenMultiplier(const std::string& value);
 std::optional<FrameGenDiagnosticView> ParseFrameGenDiagnosticView(const std::string& value);
+const char* ToString(MirrorEye eye);
+std::optional<MirrorEye> ParseMirrorEye(const std::string& value);
+const char* ToString(MirrorAspect aspect);
+std::optional<MirrorAspect> ParseMirrorAspect(const std::string& value);
 const char* ToString(ProfileMode mode);
 std::optional<ProfileMode> ParseProfileMode(const std::string& value);
 const char* ToString(PivotResponseMode mode);

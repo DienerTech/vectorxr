@@ -31,6 +31,7 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 #include "depthxr/quadviews_sizing.h"
+#include "depthxr/runtime_relay.h"
 #include "test_adapter.h"
 #include "test_gates.h"
 
@@ -167,6 +168,13 @@ class D3D11BridgeLayerTestPeer {
         OpenXrLayer& layer = OpenXrLayer::Instance();
         std::scoped_lock lock(layer.mutex_);
         return layer.quadviews_diagnostic_visualization_enabled_;
+    }
+    // The session's id in the VectorXR app's runtime relay (its status and
+    // control files); empty without a session.
+    static std::string RuntimeRelaySessionId() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.runtime_relay_session_id_;
     }
     // Whether the app's live control can show the overlay in the session.
     static bool QuadViewsDiagnosticVisualizationAvailable() {
@@ -693,8 +701,7 @@ struct StandIn {
     // The next `refusals` acquires of these swapchains fail.
     std::vector<XrSwapchain> refuse_acquire;
     int refusals{0};
-    // The next `wait_refusals` waits on these swapchains fail, the image
-    // handed back all the same (it may be released).
+    // The next `wait_refusals` waits fail without handing back the image.
     std::vector<XrSwapchain> refuse_wait;
     int wait_refusals{0};
     // Each stereo view's field of view, as xrLocateViews returns it.
@@ -1926,12 +1933,12 @@ XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo
     // released (OpenXR's order: a wait only after the image waited before it
     // was released).
     if (chain->waits >= chain->acquires || chain->waits > chain->releases) return XR_ERROR_CALL_ORDER_INVALID;
-    ++chain->waits;
     const std::vector<XrSwapchain>& refused = g_runtime.refuse_wait;
     if (g_runtime.wait_refusals > 0 && std::find(refused.begin(), refused.end(), swapchain) != refused.end()) {
         --g_runtime.wait_refusals;
         return XR_ERROR_RUNTIME_FAILURE;
     }
+    ++chain->waits;
     return XR_SUCCESS;
 }
 
@@ -4705,10 +4712,9 @@ void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
               << " texels): digest " << hex.str() << ", frame 0 band " << Text(readbacks.front()[2]) << " / "
               << Text(readbacks.front()[eye_texels + 2]) << "\n";
 
-    // An output the runtime hands back with an error is released with
-    // nothing drawn, and that frame is split into layers. Frame Generation
-    // is told of every release of the outputs all the same: the runtime
-    // shows the image released last wherever a frame shows the swapchain.
+    // A hard wait error on the right eye splits this frame. Nothing is
+    // released for that eye until its same acquisition is waited on and
+    // drawn into on the next frame.
     const std::array<XrSwapchain, 2> outputs = Peer::CompositorOutputs();
     if (GpuNegativeControlsAllowed()) {
         const auto runtime_releases = [](XrSwapchain swapchain) {
@@ -4729,16 +4735,31 @@ void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
         }
         const auto [d3d11_before, split_before] = Peer::QuadFrames();
         Check(QuadFrame(app, game, targets, kFrames + 3) == XR_SUCCESS, "a quad frame whose right output's wait fails");
+        int acquired_right = 0;
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            const StandInSwapchain* right = FindSwapchain(outputs[1]);
+            Check(right && !right->acquired.empty(), "the right output is still acquired after the failed wait");
+            acquired_right = right->acquires;
+        }
+        Check(runtime_releases(outputs[1]) == released_before[1] && Peer::FrameGenReleases(outputs[1]) == told_before[1],
+              "a refused wait neither releases the right image nor tells Frame Generation there is a new image");
         Check(QuadFrame(app, game, targets, kFrames + 4) == XR_SUCCESS, "a quad frame after it");
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            Check(FindSwapchain(outputs[1])->acquires == acquired_right,
+                  "the next composed frame reuses the right eye's pending acquisition");
+        }
         const auto [d3d11_after, split_after] = Peer::QuadFrames();
         Check(d3d11_after == d3d11_before + 1 && split_after == split_before + 1,
               "the frame whose output wait failed is split, the one after it composed");
         for (int eye = 0; eye < 2; ++eye) {
             const int released = runtime_releases(outputs[eye]) - released_before[eye];
             const std::uint64_t told = Peer::FrameGenReleases(outputs[eye]) - told_before[eye];
-            Check(released == 2 && told == 2, "output " + std::to_string(eye) + ": the runtime got " +
-                                                  std::to_string(released) + " releases, Frame Generation was told of " +
-                                                  std::to_string(told));
+            const int expected = eye == 0 ? 2 : 1;
+            Check(released == expected && told == static_cast<std::uint64_t>(expected),
+                  "output " + std::to_string(eye) + ": the runtime got " + std::to_string(released) +
+                      " releases, Frame Generation was told of " + std::to_string(told));
         }
     } else {
         std::cout << "FG_TEST_NO_STALL=1: skipped refused compositor-output wait control\n";
@@ -4829,6 +4850,111 @@ bool BetweenFrames(const std::optional<Color>& corner, const std::optional<Color
 // last frame written (logged), and when they keep failing the layer composes
 // for a while. Toggled off, the Direct3D 11 compositor composes again, with
 // the right colours, and no frame shown on the way is black.
+// A session the game began with stereo views while Quadviews is on (DCS
+// without Options > VR > Use Quad View) has no quad views to draw the
+// diagnostic overlay into: the app's control is unavailable, and the
+// overlay's binding does not show it, logging why instead.
+void TestQuadViewsOverlayInStereoSession(Game& game) {
+    CaseSettings settings;
+    settings.framegen = false;
+    settings.quadviews = true;
+    settings.diagnostic_binding = true;
+    BeginCase("quad-views-overlay-stereo", game, settings);
+    App app = StartApp(); // no XR_VARJO_quad_views
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const std::vector<Color> colors{FrameColor(4, 0), FrameColor(4, 1)};
+    const auto frame = [&](const std::string& at) {
+        Check(Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS,
+              at + ": xrEndFrame");
+    };
+    frame("stereo frame");
+    Check(!Peer::QuadViewsDiagnosticVisualizationAvailable(),
+          "overlay: the app cannot show it in a session begun with stereo views");
+
+    Peer::HoldQuadViewsDiagnosticBinding(true);
+    frame("binding pressed");
+    Peer::HoldQuadViewsDiagnosticBinding(false);
+    frame("binding released");
+    Peer::HoldQuadViewsDiagnosticBinding(std::nullopt);
+    Check(!Peer::QuadViewsDiagnosticVisualization(),
+          "overlay: its binding does not show it in a session begun with stereo views");
+
+    // The VectorXR app's Show visualization button: the session's status
+    // tells the app it cannot show the overlay (the button stays disabled),
+    // and a show command the app sends anyway is not taken.
+    {
+        const std::string session_id = Peer::RuntimeRelaySessionId();
+        Check(!session_id.empty(), "the session has a runtime relay id");
+        const std::filesystem::path root = depthxr::ResolveRuntimeRelayRoot();
+        const std::filesystem::path control_path = depthxr::RuntimeControlPath(root, session_id);
+        std::error_code ec;
+        std::filesystem::create_directories(control_path.parent_path(), ec);
+        {
+            std::ofstream stream(control_path, std::ios::trunc);
+            stream << "{\n"
+                   << "  \"protocolVersion\": 1,\n"
+                   << "  \"targetSessionId\": \"" << session_id << "\",\n"
+                   << "  \"revision\": 1,\n"
+                   << "  \"expiresAtUnixMilliseconds\": " << depthxr::RuntimeRelayUnixMilliseconds() + 60'000 << ",\n"
+                   << "  \"desired\": { \"quadviewsDiagnosticVisualization\": true }\n"
+                   << "}\n";
+        }
+        const std::filesystem::path status_path = depthxr::RuntimeStatusPath(root, session_id);
+        const std::uint64_t written_after = depthxr::RuntimeRelayUnixMilliseconds();
+        std::string status;
+        // The relay polls twice a second and writes the status at least once
+        // a second: wait for a status written after the command.
+        for (int attempt = 0; attempt < 40; ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            frame("app command pending");
+            std::ifstream stream(status_path, std::ios::binary);
+            std::ostringstream text;
+            text << stream.rdbuf();
+            status = text.str();
+            const auto at = status.find("\"updatedAtUnixMilliseconds\": ");
+            if (at != std::string::npos &&
+                std::strtoull(status.c_str() + at + 29, nullptr, 10) > written_after + 600)
+                break;
+        }
+        Check(Contains(status, "\"capabilities\": { \"quadviewsDiagnosticVisualization\": false"),
+              "overlay: the session tells the app it cannot show it, so its Show visualization button is "
+              "disabled: " + status);
+        Check(Contains(status, "\"acknowledgedRevision\": 0,") &&
+                  Contains(status, "\"state\": { \"quadviewsDiagnosticVisualization\": false"),
+              "overlay: the app's show command is not taken: " + status);
+        Check(!Peer::QuadViewsDiagnosticVisualization(),
+              "overlay: the app does not show it in a session begun with stereo views");
+        std::filesystem::remove(control_path, ec);
+    }
+
+    for (int eye = 0; eye < 2; ++eye) {
+        const ShownView& view = g_runtime.frames.back().views[eye];
+        Check(Near(view.texel, colors[eye]), "the runtime shows the game's frame, " +
+                                                 (view.texel ? Text(*view.texel) : "nothing") + ", rendered " +
+                                                 Text(colors[eye]));
+    }
+
+    const std::string log = Peer::Log();
+    Check(Count(log, "Quadviews INACTIVE (application began a STEREO session") == 1,
+          "the log tells the session is stereo");
+    Check(!Contains(log, "Quadviews diagnostic visualization shown via "),
+          "overlay: the log never tells it shown");
+    Check(Count(log, "Quadviews diagnostic visualization is unavailable (") == 1 &&
+              Contains(log, "the application began a STEREO session, so there are no quad views to show. "
+                            "The application did not enable XR_VARJO_quad_views"),
+          "overlay: the binding's press logs why it is unavailable, once");
+    Check(app.api.destroy_swapchain(left.swapchain) == XR_SUCCESS &&
+              app.api.destroy_swapchain(right.swapchain) == XR_SUCCESS,
+          "the swapchains are destroyed");
+    StopApp(app);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
 void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
     CaseSettings settings;
     settings.quadviews = true;
@@ -7341,6 +7467,8 @@ int main(int argc, char** argv) {
         TestDepthRects(game, false, false);
     } else if (bridged && only && std::string(only) == "runtime-stall-outside-layer-lock") {
         TestRuntimeStallOutsideLayerLock(game);
+    } else if (bridged && only && std::string(only) == "quad-views-overlay-stereo") {
+        TestQuadViewsOverlayInStereoSession(game);
     } else if (bridged && only && std::string(only) == "toolkit-below-framegen-off") {
         TestToolkitBelowKeepsFrameGenOff(game);
     } else if (bridged && only && std::string(only).rfind("gpu-bound-dynamic", 0) == 0) {
@@ -7373,6 +7501,7 @@ int main(int argc, char** argv) {
         TestToolkitBelowKeepsFrameGenOff(game);
         TestBridgedQuadViewsComposed(game, false);
         TestBridgedQuadViewsComposed(game, true);
+        TestQuadViewsOverlayInStereoSession(game);
         TestBridgedQuadFrameGen(game, "extrapolate");
         TestBridgedQuadFrameGen(game, "interpolate");
         TestBridgedQuadFrameGenGeometry(game);

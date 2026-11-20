@@ -98,9 +98,9 @@ class FrameGenQueueSubstitution {
     // (thread-safe; without substitution they are forwarded as they are).
     // `lazy`: the swapchain's images are captured by Frame Generation, which
     // shows images of its own only.
-    // Acquire: held-back calls whose work has run go first; while the
-    // runtime would have no image left to hand out, the oldest held-back
-    // release is waited for on the CPU (for a while).
+    // Acquire: drain ready calls in order. A full swapchain gets one bounded
+    // attempt to free an image. With room for the runtime's next acquire,
+    // held-back image waits are only polled.
     XrResult Acquire(XrSwapchain swapchain, std::uint32_t image_count, const Calls& next,
                      const XrSwapchainImageAcquireInfo* info, std::uint32_t* index);
     // Wait: held back (XR_SUCCESS at once) while a lazy release before it is,

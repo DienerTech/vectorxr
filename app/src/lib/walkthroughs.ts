@@ -30,6 +30,8 @@ const timing: Partial<Record<GuideId, { bpm: number; bars: number[] }>> = {
   pivot: { bpm: 100, bars: [3, 3, 3, 3, 3] },
   depth: { bpm: 92, bars: [3, 3, 3, 3] },
   osd: { bpm: 104, bars: [2, 3, 3, 3, 3] },
+  screenshots: { bpm: 108, bars: [2, 3, 3, 3] },
+  mirror: { bpm: 94, bars: [3, 3, 3, 3, 3, 3] },
 }
 
 export const walkthroughs: Partial<Record<GuideId, Walkthrough>> = Object.fromEntries(

@@ -390,6 +390,34 @@ FrameGenResolvedSettings ResolveFrameGenSettings(const ConfigDocument& config, s
     return resolved;
 }
 
+const MirrorProfile* FindMatchingMirrorProfile(const ConfigDocument& config, std::string_view exe_name) {
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (!application) {
+        return nullptr;
+    }
+    for (const MirrorProfile& profile : config.mirror.profiles) {
+        if (profile.enabled &&
+            std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) !=
+                profile.application_ids.end()) {
+            return &profile;
+        }
+    }
+    return nullptr;
+}
+
+MirrorResolvedSettings ResolveMirrorSettings(const ConfigDocument& config, std::string_view exe_name) {
+    MirrorResolvedSettings resolved;
+    resolved.enabled = config.mirror.enabled;
+    resolved.bindings = config.mirror.bindings;
+    static_cast<MirrorSettings&>(resolved) = config.mirror.defaults;
+    if (const MirrorProfile* profile = FindMatchingMirrorProfile(config, exe_name)) {
+        resolved.enabled = true;
+        resolved.profile_name = profile->name;
+        static_cast<MirrorSettings&>(resolved) = profile->settings;
+    }
+    return resolved;
+}
+
 ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::string_view exe_name) {
     ResolvedRuntimeConfig resolved;
     resolved.core = config.core;
@@ -399,6 +427,7 @@ ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::st
     resolved.quadviews = ResolveQuadViewsSettings(config, exe_name);
     resolved.turbo = ResolveTurboSettings(config, exe_name);
     resolved.framegen = ResolveFrameGenSettings(config, exe_name);
+    resolved.mirror = ResolveMirrorSettings(config, exe_name);
     return resolved;
 }
 

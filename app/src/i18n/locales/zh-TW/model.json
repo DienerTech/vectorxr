@@ -51,6 +51,8 @@
     "depthLock": "深度：Depth Lock A/B",
     "osdToggle": "OSD：顯示／隱藏",
     "osdCycle": "OSD：切換版面配置",
+    "screenshot": "擷取與鏡像：擷取螢幕畫面",
+    "mirrorToggle": "擷取與鏡像：顯示或隱藏鏡像視窗",
     "turboToggle": "Turbo：A/B 切換",
     "turboMetrics": "Turbo：擷取效能指標",
     "framegenToggle": "Frame Generation：A/B 切換",

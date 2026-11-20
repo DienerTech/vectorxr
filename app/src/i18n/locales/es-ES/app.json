@@ -14,6 +14,12 @@
       "label": "Información en pantalla",
       "subtitle": "Panel en el visor, ubicación y asignaciones"
     },
+    "screenshots": {
+      "label": "Capturas de pantalla"
+    },
+    "mirror": {
+      "label": "Espejo estabilizado"
+    },
     "registry": {
       "label": "Registro de aplicaciones",
       "subtitle": "Registra aplicaciones para asignarles perfiles",
@@ -81,7 +87,13 @@
   },
   "sidebar": {
     "appSettings": "Configuración de la aplicación",
+    "applications": "Aplicaciones",
+    "capture": "Captura y espejo",
+    "openxrUtilities": "Utilidades de OpenXR",
     "enhancements": "Mejoras de OpenXR",
+    "performance": "Rendimiento",
+    "lookAndFeel": "Aspecto visual",
+    "control": "Control",
     "suiteOff": "Los efectos de VectorXR en tiempo de ejecución están desactivados",
     "moduleTitle": "{subtitle}. {status}",
     "saveHint": "Guarda los cambios para aplicar la configuración. Cada mejora indica qué cambios requieren reiniciar la aplicación de RV.",
@@ -115,6 +127,8 @@
     "issuesFound_other": "Se encontraron {count} problemas de validación",
     "issuesHint": "Puedes aplicarla igualmente: los errores aparecerán en el panel Validación y no se podrá guardar hasta que se resuelvan.",
     "valid": "La estructura de la configuración y los rangos de valores parecen válidos.",
+    "networkPathsTitle": "Las rutas de red no se importan",
+    "networkPathsHint": "Este archivo hace referencia a archivos o carpetas de otro equipo. VectorXR abre estas rutas dentro de cada juego, por lo que se omiten: la carpeta de capturas vuelve a la predeterminada, y los sonidos y las imágenes a los integrados. Vuelve a elegirlos después de importar si los quieres.",
     "applyToEditor": "Aplicar al editor",
     "importAndSave": "Importar y guardar"
   },

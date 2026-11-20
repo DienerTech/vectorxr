@@ -152,6 +152,21 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     target_compile_definitions(depthxr_osd PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
     target_link_libraries(depthxr_osd PUBLIC depthxr_core OpenXR::openxr_loader Vulkan::Headers d3d11 d3d12 d3dcompiler gdi32)
 
+    # The images a game submits: formats, readback and screenshots
+    # (submitted_image.h, screenshot.h).
+    add_library(depthxr_imaging STATIC src/submitted_image.cpp src/submitted_image_gpu.cpp
+        src/submitted_image_mirror.cpp src/submitted_image_vulkan.cpp src/mirror.cpp
+        src/mirror_window.cpp src/screenshot.cpp)
+    target_include_directories(depthxr_imaging PUBLIC include)
+    target_compile_features(depthxr_imaging PUBLIC cxx_std_20)
+    target_compile_definitions(depthxr_imaging PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12)
+    # Only the Vulkan mirror's source sees OpenXR's Vulkan types (the Vulkan
+    # headers alone: nothing of Vulkan is linked, the game's loader is used).
+    set_source_files_properties(src/submitted_image_vulkan.cpp PROPERTIES COMPILE_DEFINITIONS XR_USE_GRAPHICS_API_VULKAN)
+    target_link_libraries(depthxr_imaging PUBLIC depthxr_core OpenXR::openxr_loader d3d11 d3d12 dxgi user32 gdi32 advapi32
+        windowscodecs ole32 uuid)
+    target_link_libraries(depthxr_imaging PRIVATE Vulkan::Headers)
+
     # Frame Generation compute shaders. One HLSL source compiles to DXBC for
     # Direct3D 11 and 12 (fxc from the Windows SDK) and to SPIR-V for Vulkan.
     # The Windows SDK's dxc is built without SPIR-V code generation, so a
@@ -169,6 +184,32 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         list(APPEND _framegen_fxc_hints "${_framegen_kit_bin}/x64")
     endforeach()
     find_program(DEPTHXR_FXC fxc HINTS ${_framegen_fxc_hints} REQUIRED)
+    # The stabilized mirror window's shaders, the same way.
+    set(_mirror_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/mirror.hlsl")
+    set(_mirror_out "${CMAKE_CURRENT_BINARY_DIR}/mirror")
+    file(MAKE_DIRECTORY "${_mirror_out}")
+    set(_mirror_headers "")
+    foreach(_mirror_shader VS PS)
+        if(_mirror_shader STREQUAL "VS")
+            set(_mirror_args -T vs_5_0 -E VSMain)
+            set(_mirror_name kMirrorVsDxbc)
+        else()
+            set(_mirror_args -T ps_5_0 -E PSMain)
+            set(_mirror_name kMirrorPsDxbc)
+        endif()
+        string(TOLOWER "${_mirror_shader}" _mirror_file)
+        set(_mirror_header "${_mirror_out}/mirror_${_mirror_file}.h")
+        add_custom_command(
+            OUTPUT "${_mirror_header}"
+            COMMAND "${DEPTHXR_FXC}" -nologo ${_mirror_args} -D "MIRROR_${_mirror_shader}=1" -O3 -WX
+                    -Vn ${_mirror_name} -Fh "${_mirror_header}" "${_mirror_hlsl}"
+            DEPENDS "${_mirror_hlsl}"
+            COMMENT "Compiling mirror window ${_mirror_shader} (DXBC)"
+            VERBATIM)
+        list(APPEND _mirror_headers "${_mirror_header}")
+    endforeach()
+    target_sources(depthxr_imaging PRIVATE ${_mirror_headers})
+    target_include_directories(depthxr_imaging PRIVATE "${_mirror_out}")
     set(DEPTHXR_DXC "")
     if(DEPTHXR_FRAMEGEN_SPIRV)
         depthxr_cached_archive(_dxc_archive dxc_2025_07_14.zip
@@ -349,6 +390,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         depthxr_core
         depthxr_osd
         depthxr_framegen
+        depthxr_imaging
         OpenXR::openxr_loader
         d3d11
         d3dcompiler
@@ -667,6 +709,26 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         endforeach()
         # COST: CTest starts the longest tests first, before it has timings of its own.
         set_tests_properties(${_presenter_tests} PROPERTIES TIMEOUT 600 COST 200)
+        # The submitted-image module and screenshots: the CPU half with no
+        # argument, readback on the software adapter (WARP) with d3d11 or d3d12.
+        add_executable(depthxr_imaging_tests tests/imaging_tests.cpp)
+        target_link_libraries(depthxr_imaging_tests PRIVATE depthxr_imaging dxgi)
+        target_compile_definitions(depthxr_imaging_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12)
+        add_test(NAME depthxr_imaging_tests COMMAND depthxr_imaging_tests)
+        add_test(NAME depthxr_imaging_d3d11_tests COMMAND depthxr_imaging_tests d3d11)
+        add_test(NAME depthxr_imaging_d3d12_tests COMMAND depthxr_imaging_tests d3d12)
+        set_tests_properties(depthxr_imaging_tests depthxr_imaging_d3d11_tests depthxr_imaging_d3d12_tests PROPERTIES TIMEOUT 120)
+        # The stabilized mirror window: the CPU half (and the window itself,
+        # never put on the desktop) with no argument, the draw and frames
+        # presented to such a window on the software adapter (WARP) with d3d11
+        # or d3d12.
+        add_executable(depthxr_mirror_tests tests/mirror_tests.cpp)
+        target_link_libraries(depthxr_mirror_tests PRIVATE depthxr_imaging dxgi dxguid)
+        target_compile_definitions(depthxr_mirror_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12)
+        add_test(NAME depthxr_mirror_tests COMMAND depthxr_mirror_tests)
+        add_test(NAME depthxr_mirror_d3d11_tests COMMAND depthxr_mirror_tests d3d11)
+        add_test(NAME depthxr_mirror_d3d12_tests COMMAND depthxr_mirror_tests d3d12)
+        set_tests_properties(depthxr_mirror_tests depthxr_mirror_d3d11_tests depthxr_mirror_d3d12_tests PROPERTIES TIMEOUT 120)
         add_executable(depthxr_osd_tests tests/osd_tests.cpp)
         target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
         target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
@@ -692,6 +754,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             depthxr_core
             depthxr_osd
             depthxr_framegen
+            depthxr_imaging
             OpenXR::openxr_loader
             d3d11
             d3dcompiler
@@ -712,7 +775,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
 
         add_executable(depthxr_pivot_pose_tests tests/pivot_pose_tests.cpp src/openxr_layer.cpp)
         target_include_directories(depthxr_pivot_pose_tests PRIVATE include)
-        target_link_libraries(depthxr_pivot_pose_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+        target_link_libraries(depthxr_pivot_pose_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen depthxr_imaging
             OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
         target_compile_definitions(depthxr_pivot_pose_tests PRIVATE DEPTHXR_TESTING
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
@@ -721,16 +784,25 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
 
         add_executable(depthxr_pivot_snap_tests tests/pivot_snap_tests.cpp src/openxr_layer.cpp)
         target_include_directories(depthxr_pivot_snap_tests PRIVATE include)
-        target_link_libraries(depthxr_pivot_snap_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+        target_link_libraries(depthxr_pivot_snap_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen depthxr_imaging
             OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
         target_compile_definitions(depthxr_pivot_snap_tests PRIVATE DEPTHXR_TESTING
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
         add_test(NAME depthxr_pivot_snap_tests COMMAND depthxr_pivot_snap_tests)
         set_tests_properties(depthxr_pivot_snap_tests PROPERTIES TIMEOUT 30)
 
+        add_executable(depthxr_mirror_layer_tests tests/mirror_layer_tests.cpp src/openxr_layer.cpp)
+        target_include_directories(depthxr_mirror_layer_tests PRIVATE include)
+        target_link_libraries(depthxr_mirror_layer_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen depthxr_imaging
+            OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
+        target_compile_definitions(depthxr_mirror_layer_tests PRIVATE DEPTHXR_TESTING
+            WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
+        add_test(NAME depthxr_mirror_layer_tests COMMAND depthxr_mirror_layer_tests)
+        set_tests_properties(depthxr_mirror_layer_tests PROPERTIES TIMEOUT 60)
+
         add_executable(depthxr_pivot_gaze_tests tests/pivot_gaze_tests.cpp src/openxr_layer.cpp src/layer_entry.cpp)
         target_include_directories(depthxr_pivot_gaze_tests PRIVATE include)
-        target_link_libraries(depthxr_pivot_gaze_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+        target_link_libraries(depthxr_pivot_gaze_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen depthxr_imaging
             OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
         target_compile_definitions(depthxr_pivot_gaze_tests PRIVATE DEPTHXR_TESTING
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
@@ -739,7 +811,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
 
         add_executable(depthxr_eye_gaze_tests tests/eye_gaze_tests.cpp src/openxr_layer.cpp)
         target_include_directories(depthxr_eye_gaze_tests PRIVATE include)
-        target_link_libraries(depthxr_eye_gaze_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+        target_link_libraries(depthxr_eye_gaze_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen depthxr_imaging
             OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
         target_compile_definitions(depthxr_eye_gaze_tests PRIVATE DEPTHXR_TESTING
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
@@ -750,7 +822,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # xrLocateSpace, against a stand-in runtime (CPU only).
         add_executable(depthxr_head_prediction_layer_tests tests/head_prediction_layer_tests.cpp src/openxr_layer.cpp)
         target_include_directories(depthxr_head_prediction_layer_tests PRIVATE include)
-        target_link_libraries(depthxr_head_prediction_layer_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+        target_link_libraries(depthxr_head_prediction_layer_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen depthxr_imaging
             OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
         target_compile_definitions(depthxr_head_prediction_layer_tests PRIVATE DEPTHXR_TESTING
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
@@ -761,7 +833,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_executable(depthxr_spacewarp_probe_tests tests/spacewarp_probe_tests.cpp src/openxr_layer.cpp
             src/layer_entry.cpp)
         target_include_directories(depthxr_spacewarp_probe_tests PRIVATE include)
-        target_link_libraries(depthxr_spacewarp_probe_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+        target_link_libraries(depthxr_spacewarp_probe_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen depthxr_imaging
             OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
         target_compile_definitions(depthxr_spacewarp_probe_tests PRIVATE DEPTHXR_TESTING
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
@@ -778,7 +850,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         set_source_files_properties(tests/d3d11_bridge_layer_tests.cpp PROPERTIES
             COMPILE_DEFINITIONS XR_USE_GRAPHICS_API_D3D12)
         target_include_directories(depthxr_d3d11_bridge_layer_tests PRIVATE include)
-        target_link_libraries(depthxr_d3d11_bridge_layer_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+        target_link_libraries(depthxr_d3d11_bridge_layer_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen depthxr_imaging
             OpenXR::openxr_loader d3d11 d3d12 d3dcompiler dxgi shlwapi)
         target_compile_definitions(depthxr_d3d11_bridge_layer_tests PRIVATE DEPTHXR_TESTING
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
@@ -843,6 +915,16 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             "DEPTHXR_VULKAN_LAYER_DIR=\"${_vk_layer_dir_define}\"")
         add_test(NAME depthxr_vulkan_bridge_tests COMMAND depthxr_vulkan_bridge_tests)
         set_tests_properties(depthxr_vulkan_bridge_tests PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+        # The stabilized mirror window for a Vulkan game: the game queue's copy
+        # into an image shared with the mirror's own Direct3D 12 device, on a
+        # GPU (77 without one, as the bridge's suite).
+        add_executable(depthxr_mirror_vulkan_tests tests/mirror_vulkan_tests.cpp)
+        target_link_libraries(depthxr_mirror_vulkan_tests PRIVATE depthxr_imaging Vulkan::Headers d3d12 dxgi dxguid)
+        target_compile_definitions(depthxr_mirror_vulkan_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+            XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN
+            "DEPTHXR_VULKAN_LAYER_DIR=\"${_vk_layer_dir_define}\"")
+        add_test(NAME depthxr_mirror_vulkan_tests COMMAND depthxr_mirror_vulkan_tests)
+        set_tests_properties(depthxr_mirror_vulkan_tests PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
         # The Vulkan bridge through the layer's own hooks with a Vulkan game
         # against the stand-in runtime of the Direct3D 11 bridge's layer tests.
         # Only the test sees the Vulkan and Direct3D 12 OpenXR types.
@@ -851,7 +933,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         set_source_files_properties(tests/vulkan_bridge_layer_tests.cpp PROPERTIES
             COMPILE_DEFINITIONS "XR_USE_GRAPHICS_API_D3D12;XR_USE_GRAPHICS_API_VULKAN")
         target_include_directories(depthxr_vulkan_bridge_layer_tests PRIVATE include)
-        target_link_libraries(depthxr_vulkan_bridge_layer_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+        target_link_libraries(depthxr_vulkan_bridge_layer_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen depthxr_imaging
             OpenXR::openxr_loader d3d11 d3d12 d3dcompiler dxgi shlwapi)
         target_compile_definitions(depthxr_vulkan_bridge_layer_tests PRIVATE DEPTHXR_TESTING
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}"
@@ -859,7 +941,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_vulkan_bridge_layer_tests COMMAND depthxr_vulkan_bridge_layer_tests)
         set_tests_properties(depthxr_vulkan_bridge_layer_tests PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
         if(DEPTHXR_REQUIRE_HW_TESTS)
-            set_tests_properties(depthxr_vulkan_bridge_tests depthxr_vulkan_bridge_layer_tests PROPERTIES
+            set_tests_properties(depthxr_vulkan_bridge_tests depthxr_vulkan_bridge_layer_tests
+                                 depthxr_mirror_vulkan_tests PROPERTIES
                                  ENVIRONMENT "VECTORXR_TESTS_REQUIRE_HW=1")
         endif()
     endif()
@@ -957,6 +1040,9 @@ if(DEPTHXR_BUILD_TESTS)
         depthxr_turbo_frame_tests
         depthxr_pivot_pose_tests
         depthxr_pivot_snap_tests
+        depthxr_imaging_tests
+        depthxr_mirror_tests
+        depthxr_mirror_layer_tests
         depthxr_pivot_gaze_tests
         depthxr_eye_gaze_tests
         depthxr_head_prediction_layer_tests

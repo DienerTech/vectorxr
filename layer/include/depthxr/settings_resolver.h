@@ -15,6 +15,8 @@ QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config,
 TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::string_view exe_name);
 const FrameGenProfile* FindMatchingFrameGenProfile(const ConfigDocument& config, std::string_view exe_name);
 FrameGenResolvedSettings ResolveFrameGenSettings(const ConfigDocument& config, std::string_view exe_name);
+const MirrorProfile* FindMatchingMirrorProfile(const ConfigDocument& config, std::string_view exe_name);
+MirrorResolvedSettings ResolveMirrorSettings(const ConfigDocument& config, std::string_view exe_name);
 ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::string_view exe_name);
 
 } // namespace depthxr

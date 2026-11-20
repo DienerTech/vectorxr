@@ -1,5 +1,35 @@
 [
   {
+    "version": "0.21.0",
+    "date": "2026-11-19",
+    "title": "Screenshots, Stabilized Mirror, and App Navigation",
+    "summary": "Draft for VectorXR 0.21.0 Core, based on 0.20.2. Capture full-resolution screenshots, open a stabilized desktop mirror, and find settings faster in the reorganized sidebar. This release also improves Turbo and Frame Generation recovery.",
+    "items": [
+      {
+        "html": "<strong>Capture & Mirror</strong>",
+        "items": [
+          "<strong>Screenshots.</strong> Assign a keyboard or device binding to save one or both eyes as full-resolution PNGs in Direct3D 11 and Direct3D 12 games. VectorXR saves files in the background.",
+          "<strong>Stabilized Mirror.</strong> Smooth head rotation in a desktop window for streaming, recording, or a spectator display. The headset view stays the same. The mirror supports Direct3D 11, Direct3D 12, and Vulkan. Enable it before launching a Vulkan game."
+        ]
+      },
+      {
+        "html": "<strong>App</strong>",
+        "items": [
+          "<strong>Grouped sidebar.</strong> Capture & Mirror has separate pages for each utility. Registry and Discovery have their own pages under Applications. The sidebar remembers which groups you collapse.",
+          "<strong>Guides.</strong> Both capture utilities include walkthroughs with optional music."
+        ]
+      },
+      {
+        "html": "<strong>Fixes</strong>",
+        "items": [
+          "Frame Generation retries output images that the runtime is slow to return and presents complete image sets. Deferred swapchain work is bounded during game image acquisition.",
+          "Turbo preserves timing across mode handoffs. The Quadviews overlay stays off when the game began the session in stereo.",
+          "Direct3D 11 rendering and copies run independently of the game’s conditional rendering state. Imported network paths for screenshots and binding sounds are cleared and listed in the preview."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.20.2",
     "date": "2026-11-14",
     "title": "Guides, and Crash Fixes for Virtual Desktop and DLSS 5 Mods",

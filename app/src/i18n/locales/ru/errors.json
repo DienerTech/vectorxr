@@ -3,6 +3,7 @@
   "configParse": "Не удалось разобрать {path}: {detail}",
   "configReplace": "Не удалось заменить {path}: {detail}",
   "directoryMissing": "Папка не существует: {path}",
+  "folderCreate": "Не удалось создать {path}: {detail}",
   "soundMissing": "Звуковой файл не найден: {path}",
   "sessionInactive": "Сеанс OpenXR больше не активен",
   "diagnosticUnavailable": "Диагностическая визуализация недоступна для этого сеанса OpenXR",

@@ -3,6 +3,7 @@
   "configParse": "无法解析 {path}：{detail}",
   "configReplace": "无法替换 {path}：{detail}",
   "directoryMissing": "目录不存在：{path}",
+  "folderCreate": "无法创建 {path}：{detail}",
   "soundMissing": "找不到声音文件：{path}",
   "sessionInactive": "OpenXR 会话已不再活动",
   "diagnosticUnavailable": "此 OpenXR 会话无法使用诊断可视化",

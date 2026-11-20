@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include <openxr/openxr.h>
 
@@ -30,6 +31,13 @@ namespace depthxr {
 // XR_KHR_D3D12_enable on the instance); otherwise every call goes straight to
 // the runtime.
 //
+// The stabilized mirror window of a Vulkan game that is not bridged shares
+// its picture with Direct3D 12 the same way (submitted_image.h). When only
+// the mirror is wanted for the instance (the mirror on for the executable,
+// the bridge not), the same four functions add the mirror's names, which
+// are the bridge's memory-sharing ones: no semaphore sharing, and timeline
+// semaphores are left as the game has them.
+//
 // One OpenXR instance at a time (the layer allows no more).
 
 // At xrCreateInstance, after the runtime made `instance` (and at
@@ -38,7 +46,13 @@ namespace depthxr {
 // of an extension list's two-call idiom agree), and where what was added is
 // reported.
 void ResetVulkanEnableHooks(XrInstance instance, PFN_xrGetInstanceProcAddr next_get_instance_proc_addr,
-                            bool bridge_wanted, std::function<void(const std::string&)> log);
+                            bool bridge_wanted, std::function<void(const std::string&)> log,
+                            bool mirror_wanted = false);
+
+// The Vulkan extensions the mirror window needs on a game's instance and
+// device to share its picture with Direct3D 12 (a subset of the bridge's).
+const std::vector<const char*>& VulkanMirrorInstanceExtensions();
+const std::vector<const char*>& VulkanMirrorDeviceExtensions();
 
 // For the layer's xrGetInstanceProcAddr: the layer's own function for `name`
 // when it is one of the four and the runtime offers it; null otherwise (the

@@ -6,6 +6,7 @@
 #include <vulkan/vulkan_core.h>
 #include <openxr/openxr_platform.h>
 
+#include "depthxr/d3d11_predication.h"
 #include "depthxr/framegen_d3d11_bridge.h"
 
 #include "bridge_depth_ps.h"
@@ -1027,6 +1028,7 @@ struct D3D11Bridge::Impl {
 
     // CopyDepthToTwin's calls, holding the context.
     void CopyDepthToTwinHeld(const Swapchain& chain, Image& image, ID3D11DeviceContext4* context) {
+        const ScopedD3D11Unpredicated unpredicated(context);
         // The output merger: only its depth target changes, and only while it
         // is the image. Its render targets are set again up to the last one
         // bound, with its unordered-access views kept: a view in a slot the
@@ -1133,6 +1135,7 @@ struct D3D11Bridge::Impl {
             CopyDepthToTwin(chain, image);
         }
         if (chain.mode == Mode::kResolve) {
+            const ScopedD3D11Unpredicated unpredicated(context11.Get());
             const DXGI_FORMAT format = ResolveFormat(chain.format);
             for (UINT slice = 0; slice < chain.array_size; ++slice) {
                 const UINT subresource = D3D11CalcSubresource(0, slice, 1);

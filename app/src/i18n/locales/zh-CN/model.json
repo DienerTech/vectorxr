@@ -51,6 +51,8 @@
     "depthLock": "深度：Depth Lock A/B",
     "osdToggle": "OSD：显示/隐藏",
     "osdCycle": "OSD：切换布局",
+    "screenshot": "捕获与镜像：截图",
+    "mirrorToggle": "捕获与镜像：显示或隐藏镜像窗口",
     "turboToggle": "Turbo：A/B 切换",
     "turboMetrics": "Turbo：指标捕获",
     "framegenToggle": "Frame Generation：A/B 切换",

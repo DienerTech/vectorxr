@@ -89,6 +89,12 @@ struct Swapchain {
     std::optional<std::uint32_t> released;
     std::uint32_t releases{0};
     std::string calls;
+    XrResult wait_result{XR_SUCCESS};
+    XrResult release_result{XR_SUCCESS};
+    std::uint32_t acquire_attempts{0};
+    std::uint32_t wait_attempts{0};
+    std::uint32_t release_attempts{0};
+    XrDuration last_wait_timeout{0};
 };
 
 class Runtime {
@@ -101,17 +107,21 @@ class Runtime {
     XrResult Acquire(XrSwapchain handle, std::uint32_t* index) {
         std::scoped_lock lock(mutex);
         Swapchain& chain = chains.at(handle);
-        Check(chain.acquired.size() < chain.images, "runtime acquire has an image available");
+        ++chain.acquire_attempts;
+        if (chain.acquired.size() == chain.images) return XR_ERROR_CALL_ORDER_INVALID;
         const std::uint32_t image = chain.next++ % chain.images;
         chain.acquired.push_back(image);
         if (index) *index = image;
         chain.calls += 'a';
         return XR_SUCCESS;
     }
-    XrResult Wait(XrSwapchain handle) {
+    XrResult Wait(XrSwapchain handle, XrDuration timeout) {
         std::scoped_lock lock(mutex);
         Swapchain& chain = chains.at(handle);
         Check(!chain.acquired.empty() && !chain.waited, "runtime waits exactly once for its oldest acquired image");
+        ++chain.wait_attempts;
+        chain.last_wait_timeout = timeout;
+        if (chain.wait_result != XR_SUCCESS) return chain.wait_result;
         chain.waited = true;
         chain.calls += 'w';
         return XR_SUCCESS;
@@ -120,6 +130,8 @@ class Runtime {
         std::scoped_lock lock(mutex);
         Swapchain& chain = chains.at(handle);
         Check(!chain.acquired.empty() && chain.waited, "runtime releases its oldest waited image");
+        ++chain.release_attempts;
+        if (XR_FAILED(chain.release_result)) return chain.release_result;
         if (release_entered) {
             SetEvent(release_entered);
             Check(WaitForSingleObject(release_resume, 5000) == WAIT_OBJECT_0, "resume the held runtime call");
@@ -143,8 +155,8 @@ Runtime* g_runtime{nullptr};
 XrResult XRAPI_PTR Acquire(XrSwapchain swapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
     return g_runtime->Acquire(swapchain, index);
 }
-XrResult XRAPI_PTR Wait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo*) {
-    return g_runtime->Wait(swapchain);
+XrResult XRAPI_PTR Wait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* info) {
+    return g_runtime->Wait(swapchain, info->timeout);
 }
 XrResult XRAPI_PTR Release(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo*) {
     return g_runtime->Release(swapchain);
@@ -244,6 +256,119 @@ void StoppedSourceTest(ID3D12Device* device) {
           "showing the original source drains releases and the wait between them in order");
     Check(h.runtime_marker.Reaches(h.runtime_queue), "the first pass-through source refresh reaches the compositor");
     std::cout << "Stopped producer, captured source, and pass-through drain passed\n";
+}
+
+XrResult XRAPI_PTR RefuseWait(XrSwapchain, const XrSwapchainImageWaitInfo*) {
+    return XR_ERROR_RUNTIME_FAILURE;
+}
+
+XrResult XRAPI_PTR RefuseRelease(XrSwapchain, const XrSwapchainImageReleaseInfo*) {
+    return XR_ERROR_RUNTIME_FAILURE;
+}
+
+void DirectCallRetryTest(ID3D12Device* device) {
+    Harness h(device);
+    h.substitution.SetRuntimeQueuesOnlyFirstUse(true);
+    const FrameGenQueueSubstitution::Calls refuse_wait{Acquire, RefuseWait, Release};
+    const FrameGenQueueSubstitution::Calls refuse_release{Acquire, Wait, RefuseRelease};
+    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    std::uint32_t image = 0;
+    for (std::uint32_t i = 0; i < 2; ++i) {
+        Check(h.substitution.Acquire(kSource, 3, kCalls, &acquire, &image) == XR_SUCCESS && image == i,
+              "two queued acquisitions");
+    }
+    Check(h.substitution.Wait(kSource, false, refuse_wait, &wait) == XR_ERROR_RUNTIME_FAILURE,
+          "the runtime's wait error reaches the caller");
+    Check(h.substitution.Wait(kSource, false, kCalls, &wait) == XR_SUCCESS, "retry the first image's wait");
+    Check(h.substitution.Release(kSource, false, refuse_release, &release) == XR_ERROR_RUNTIME_FAILURE &&
+              h.Chain(kSource).find("held=2 ") != std::string::npos &&
+              h.Chain(kSource).find("runtimeReleased=0") != std::string::npos,
+          "a refused release is still held by the caller and has never reached the runtime");
+    Check(h.substitution.Release(kSource, false, kCalls, &release) == XR_SUCCESS &&
+              h.substitution.Wait(kSource, false, kCalls, &wait) == XR_SUCCESS &&
+              h.substitution.Release(kSource, false, kCalls, &release) == XR_SUCCESS,
+          "release the first image and then wait and release the second");
+    h.Frame(kSource, false); // first use of image 2
+    h.Frame(kSource, false); // second use of image 0
+    Check(h.substitution.Describe().find("unorderedWaits=1") != std::string::npos,
+          "the retried wait ordered image 0, so its second use needs no new fence");
+}
+
+void DeferredCallRetryTest(ID3D12Device* device) {
+    Harness h(device);
+    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    std::uint32_t image = 0;
+    h.HoldGame(1);
+    for (int i = 0; i < 3; ++i) h.Frame(kSource, true);
+    h.FinishGame(1);
+    const FrameGenQueueSubstitution::Calls refuse_release{Acquire, Wait, RefuseRelease};
+    Check(h.substitution.Acquire(kSource, 3, refuse_release, &acquire, &image) == XR_ERROR_RUNTIME_FAILURE &&
+              h.runtime.chains.at(kSource).acquired.size() == 3,
+          "all images remain acquired while the runtime refuses the oldest deferred release");
+    const FrameGenQueueSubstitution::Calls refuse_wait{Acquire, RefuseWait, Release};
+    h.substitution.Flush(kSource, refuse_wait, false);
+    Check(h.runtime.chains.at(kSource).releases == 1 &&
+              h.Chain(kSource).find("heldWaits=2 heldReleases=2") != std::string::npos,
+          "a refused deferred wait holds every later release behind it");
+    h.Submit({kSource}, false);
+    Check(h.runtime.chains.at(kSource).calls == "awaarwrwr" && h.runtime.chains.at(kSource).acquired.empty(),
+          "the retried operations drain all three acquisitions in runtime order");
+    Check(!h.errors.empty(), "deferred refusals were logged");
+    h.errors.clear(); // these refusals were injected
+}
+
+void AcquireDeferredRefusalBudgetTest(ID3D12Device* device) {
+    Harness h(device);
+    auto& source = h.runtime.chains.at(kSource);
+    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    constexpr std::uint32_t no_image = ~std::uint32_t{0};
+    std::uint32_t image = no_image;
+    const auto next_image = [&] { return h.substitution.Acquire(kSource, 3, kCalls, &acquire, &image); };
+    h.HoldGame(1);
+    for (int i = 0; i < 3; ++i) h.Frame(kSource, true);
+    h.FinishGame(1);
+    Check(source.calls == "awaa" && source.acquire_attempts == 3 && source.wait_attempts == 1,
+          "available slots were acquired directly while the first release was pending");
+
+    source.release_result = XR_ERROR_INSTANCE_LOST;
+    Check(next_image() == XR_ERROR_INSTANCE_LOST && image == no_image && source.release_attempts == 1 &&
+              source.acquire_attempts == 3 && source.acquired.size() == 3,
+          "a required release is attempted once and instance loss reaches the caller without an acquire");
+
+    source.release_result = XR_SUCCESS;
+    source.wait_result = XR_ERROR_SESSION_LOST;
+    Check(next_image() == XR_ERROR_SESSION_LOST && image == no_image && source.acquire_attempts == 3 &&
+              source.acquired.size() == 2 && source.wait_attempts == 2 && source.last_wait_timeout == 0,
+          "session loss from an optional poll reaches the caller even with a free slot");
+
+    source.wait_result = XR_TIMEOUT_EXPIRED;
+    Check(next_image() == XR_SUCCESS && image == 0 && source.wait_attempts == 3 && source.last_wait_timeout == 0 &&
+              source.acquire_attempts == 4 && source.acquired.size() == 3,
+          "a deferred wait that cannot complete at once permits a real acquire when a slot is free");
+    image = no_image;
+    Check(next_image() == XR_ERROR_RUNTIME_FAILURE && image == no_image && source.wait_attempts == 4 &&
+              source.last_wait_timeout > 0 && source.last_wait_timeout <= 1'000'000'000 &&
+              source.acquire_attempts == 4 && source.release_attempts == 2,
+          "a full chain makes one bounded wait attempt and cannot hand a timeout or a fake index to the game");
+
+    source.wait_result = XR_SUCCESS;
+    Check(next_image() == XR_SUCCESS && image == 1 && source.calls == "awaarawrwra",
+          "retry drains the original waits and releases in FIFO order and returns the runtime's next index");
+    Check(next_image() == XR_SUCCESS && image == 2, "the last free image can be acquired");
+    image = no_image;
+    Check(next_image() == XR_ERROR_CALL_ORDER_INVALID && image == no_image && source.acquire_attempts == 7,
+          "the runtime decides over-acquire when the game itself still owns every image");
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    for (int i = 0; i < 3; ++i) {
+        Check(h.substitution.Wait(kSource, false, kCalls, &wait) == XR_SUCCESS &&
+                  h.substitution.Release(kSource, false, kCalls, &release) == XR_SUCCESS,
+              "the game can still wait and release each of its three actual acquisitions");
+    }
+    Check(source.acquired.empty(), "every acquired image was returned once");
+    h.errors.clear(); // the injected failures above are expected
 }
 
 void StoppedShownLayerTest(ID3D12Device* device) {
@@ -489,11 +614,14 @@ int main(int argc, char** argv) {
         FirstShownImageTest(device.Get());
         ShownLayerPipelinedWaitTest(device.Get());
         AcquireExhaustionTest(device.Get());
+        DeferredCallRetryTest(device.Get());
+        AcquireDeferredRefusalBudgetTest(device.Get());
         FirstUseOrderingTest(device.Get(), false);
         FirstUseOrderingTest(device.Get(), true);
     } else {
         std::cout << "FG_TEST_NO_STALL=1: skipped GPU fence-hold controls\n";
     }
+    DirectCallRetryTest(device.Get());
     BusyDiagnosticsTest(device.Get());
     Check(SUCCEEDED(device->GetDeviceRemovedReason()), "queue tests leave the device healthy");
     ComPtr<ID3D12InfoQueue> messages;

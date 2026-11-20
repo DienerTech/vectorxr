@@ -301,6 +301,10 @@ bool SameFov(const XrCompositionLayerProjectionView& a, const XrCompositionLayer
            a.fov.angleUp == b.fov.angleUp && a.fov.angleDown == b.fov.angleDown;
 }
 
+std::string OutputReleaseError(XrResult result) {
+    return "output image release failed (" + std::to_string(result) + ")";
+}
+
 // Edge fill: output images whose margins are this many pixels wider than a
 // frame asks for at most are kept (EnsureOutputs).
 constexpr std::uint32_t kEdgeFillSlack = 64;
@@ -1136,6 +1140,7 @@ void FrameGenPresenter::Stop() {
     last_real_ = {};
     extrapolated_ = {};
     consecutive_failures_ = consecutive_demotions_ = 0;
+    jit_output_failed_ = false;
     // A claimed quad frame ending after this is swallowed (EndFrame).
     quad_offered_ = quad_mode_ = quad_switch_pending_ = false;
     quad_claim_id_.reset();
@@ -1933,6 +1938,7 @@ bool FrameGenPresenter::Toggle() {
         // back only once it has run that long again (MaybeRetryLocked).
         user_enabled_ = true;
         consecutive_failures_ = consecutive_demotions_ = 0;
+        jit_output_failed_ = false;
         paused_at_.reset();
         last_pause_at_ = Clock::now();
         DynamicReenableLocked(Clock::now());
@@ -4136,6 +4142,7 @@ void FrameGenPresenter::MaybeRetryLocked() {
     paused_at_.reset();
     last_pause_at_ = now; // the quiet stretch starts when it runs again
     consecutive_failures_ = consecutive_demotions_ = 0;
+    jit_output_failed_ = false;
     healthy_streak_ = 0;
     DynamicReenableLocked(Clock::now());
     if (logger_) {
@@ -4641,8 +4648,9 @@ void FrameGenPresenter::LogMemoryBudgetLocked() {
     }
 }
 
-void FrameGenPresenter::NoteFailureLocked(const std::string& error) {
+void FrameGenPresenter::NoteFailureLocked(const std::string& error, bool jit_output) {
     ++failures_;
+    if (jit_output) jit_output_failed_ = true;
     if (++consecutive_failures_ >= kFailuresBeforePause) {
         PauseLocked("generation failed: " + error);
     } else if (logger_) {
@@ -5063,6 +5071,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                 // Shown as it is when the presenter thread starts: only while
                 // nothing newer was released into its swapchains.
                 RecordColorReleasesLocked(passthrough_copy_);
+                RecordDepthReleasesLocked(passthrough_copy_);
                 if (compositor_running_) {
                     // The presenter thread is about to start: its first
                     // slots show this frame, not the one before.
@@ -6520,9 +6529,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     // Every output here was acquired and waited; release them all so the
     // next frame starts clean (or the caller does, once it may replace what
     // the runtime shows). Unwritten images are not submitted this frame.
-    if (release && count) {
-        ReleaseOutputs();
-    }
+    const XrResult released = release && count ? ReleaseOutputs(output_sets_.size()) : XR_SUCCESS;
 
     std::scoped_lock lock(mutex_);
     if (!ok) {
@@ -6557,11 +6564,20 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         NoteFailureLocked(error);
         return false;
     }
+    if (XR_FAILED(released)) {
+        NoteFailureLocked(OutputReleaseError(released));
+        return false;
+    }
     gpu_ms_ = gpu_ms;
     if (working_bytes) working_bytes_ = working_bytes;
     depth_status_ = depth;
     world_delta_ = world_delta;
-    consecutive_failures_ = 0;
+    // At 2x the game may analyze another real frame every two refreshes
+    // while the compositor is still failing to deliver the same stereo pair.
+    if (!analyze || composition || !jit_output_failed_) {
+        consecutive_failures_ = 0;
+        jit_output_failed_ = false;
+    }
     // Stage 6: a session in Lead counts its frames (the controller holds the
     // vectors at Assist for so many), those the vectors led (the backend's
     // say), those held at Assist, and those led with the optical flow
@@ -7032,6 +7048,15 @@ void FrameGenPresenter::ShowOutput(XrCompositionLayerProjectionView& view, const
 
 bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std::size_t sets, std::string& error,
                                       bool keep_replaced) {
+    if (output_release_pending_) {
+        // Only refused images are still acquired and waited. Finish that
+        // batch before any new acquire, GPU write or swapchain replacement.
+        const XrResult result = ReleaseOutputs(output_sets_.size());
+        if (XR_FAILED(result)) {
+            error = OutputReleaseError(result);
+            return false;
+        }
+    }
     const std::uint32_t count = static_cast<std::uint32_t>(specs.size());
     if (!output_sets_.empty() && output_sets_.front().size() != count) {
         if (keep_replaced) {
@@ -7281,9 +7306,10 @@ bool FrameGenPresenter::AcquireOutputs(std::size_t sets, std::string& error, boo
     return true;
 }
 
-void FrameGenPresenter::ReleaseOutputs() {
-    for (auto& set : output_sets_) {
-        for (Output& output : set) {
+XrResult FrameGenPresenter::ReleaseOutputs(std::size_t sets) {
+    XrResult result = XR_SUCCESS;
+    for (std::size_t i = 0; i < sets; ++i) {
+        for (Output& output : output_sets_[i]) {
             if (!output.acquired || !output.waited) {
                 continue;
             }
@@ -7291,12 +7317,18 @@ void FrameGenPresenter::ReleaseOutputs() {
             {
                 std::scoped_lock submit(submit_mutex_);
                 const PresenterCall call(*this, "xrReleaseSwapchainImage");
-                xr_.release(output.swapchain, &release);
+                const XrResult released = xr_.release(output.swapchain, &release);
+                if (XR_FAILED(released)) {
+                    result = released;
+                    continue;
+                }
             }
             output.acquired = false;
             output.waited = false;
         }
     }
+    output_release_pending_ = XR_FAILED(result);
+    return result;
 }
 
 void FrameGenPresenter::TrimOutputs(std::size_t keep) {
@@ -7358,7 +7390,7 @@ void FrameGenPresenter::DestroyRetiredOutputs() {
 
 void FrameGenPresenter::DestroyOutputs() {
     DestroyRetiredOutputs();
-    ReleaseOutputs();
+    ReleaseOutputs(output_sets_.size());
     for (auto& set : output_sets_) {
         for (Output& output : set) {
             if (output.swapchain && ForgetSwapchain(output.swapchain)) {
@@ -7369,6 +7401,7 @@ void FrameGenPresenter::DestroyOutputs() {
         }
     }
     output_sets_.clear();
+    output_release_pending_ = false;
     std::scoped_lock lock(mutex_);
     output_kinds_.clear();
     output_bytes_ = output_set_bytes_ = 0;
@@ -7400,7 +7433,8 @@ void FrameGenPresenter::RecordDepthReleasesLocked(FrameCopy& copy) const {
     for (FrameCopy::Layer& layer : copy.layers) {
         layer.depth_releases.assign(layer.depth.size(), 0);
         for (std::size_t view = 0; view < layer.depth.size(); ++view) {
-            if (const auto it = swapchains_.find(layer.depth[view].subImage.swapchain); it != swapchains_.end()) {
+            if (!layer.depth[view]) continue;
+            if (const auto it = swapchains_.find(layer.depth[view]->subImage.swapchain); it != swapchains_.end()) {
                 layer.depth_releases[view] = it->second.releases;
             }
         }
@@ -7411,10 +7445,11 @@ void FrameGenPresenter::DropStaleDepthLocked(FrameCopy& copy) const {
     // The runtime reads a swapchain's newest image: once the game has
     // released its next depth image, the copied chain describes that one.
     for (FrameCopy::Layer& layer : copy.layers) {
-        for (std::size_t view = 0; view < layer.has_depth.size() && view < layer.depth_releases.size(); ++view) {
-            const auto it = swapchains_.find(layer.depth[view].subImage.swapchain);
-            if (layer.has_depth[view] && it != swapchains_.end() && it->second.releases != layer.depth_releases[view]) {
-                layer.has_depth[view] = 0;
+        for (std::size_t view = 0; view < layer.depth.size() && view < layer.depth_releases.size(); ++view) {
+            if (!layer.depth[view]) continue;
+            const auto it = swapchains_.find(layer.depth[view]->subImage.swapchain);
+            if (it != swapchains_.end() && it->second.releases != layer.depth_releases[view]) {
+                layer.depth[view].reset();
             }
         }
     }
@@ -7477,6 +7512,7 @@ bool FrameGenPresenter::CopyFrame(const XrFrameEndInfo& info, FrameCopy& copy, s
     copy = {};
     if (!SupportedFrameChains(info, unsupported)) return false;
     copy.blend_mode = info.environmentBlendMode;
+    if (info.layers) copy.layers.reserve(info.layerCount);
     for (std::uint32_t i = 0; i < info.layerCount; ++i) {
         const XrCompositionLayerBaseHeader* header = info.layers ? info.layers[i] : nullptr;
         if (!header) {
@@ -7505,15 +7541,13 @@ bool FrameGenPresenter::CopyFrame(const XrFrameEndInfo& info, FrameCopy& copy, s
             if (source.viewCount && source.views) {
                 layer.views.assign(source.views, source.views + source.viewCount);
             }
-            layer.depth.assign(layer.views.size(), XrCompositionLayerDepthInfoKHR{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR});
-            layer.has_depth.assign(layer.views.size(), 0);
             for (std::size_t view = 0; view < layer.views.size(); ++view) {
                 const auto* next = static_cast<const XrBaseInStructure*>(layer.views[view].next);
                 layer.views[view].next = nullptr;
                 if (next && next->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
+                    if (layer.depth.empty()) layer.depth.resize(layer.views.size());
                     layer.depth[view] = *reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(next);
-                    layer.depth[view].next = nullptr;
-                    layer.has_depth[view] = 1;
+                    layer.depth[view]->next = nullptr;
                 }
             }
             if (!copy.has_projection) {
@@ -7561,13 +7595,14 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
         FrameCopy::Layer& layer = copy.layers[i];
         const void* header = nullptr;
         switch (layer.type) {
-        case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
+        case XR_TYPE_COMPOSITION_LAYER_PROJECTION: {
             // A claimed quad frame's four views never reach the runtime: it
             // is shown only through the eye views composed from it.
             if (copy.has_projection && i == copy.projection_index && !generated &&
                 (copy.projection_stale || copy.quad)) {
                 continue;
             }
+            bool depth = true;
             if (generated && copy.has_projection && i == copy.projection_index) {
                 // The real frame's depth describes its own image and eye
                 // position. A generated frame moves content and is seen from
@@ -7578,26 +7613,23 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
                 // copy of the real frame keeps it (while the game has not
                 // released a newer depth image: DropStaleDepthLocked).
                 // Nor on an image widened by edge fill (SameFov).
-                bool depth = generated_depth && layer.views.size() == generated->size();
+                depth = generated_depth && layer.views.size() == generated->size();
                 for (std::size_t view = 0; depth && view < layer.views.size(); ++view) {
                     depth = SameFov(layer.views[view], (*generated)[view]);
                 }
                 layer.views = *generated;
-                layer.depth.resize(layer.views.size(), XrCompositionLayerDepthInfoKHR{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR});
-                layer.has_depth.resize(layer.views.size(), 0);
-                if (!depth) {
-                    std::fill(layer.has_depth.begin(), layer.has_depth.end(), std::uint8_t{0});
-                }
                 layer.projection.space = generated_space;
                 layer.projection.layerFlags = generated_flags;
             }
             for (std::size_t view = 0; view < layer.views.size(); ++view) {
-                layer.views[view].next = layer.has_depth[view] ? &layer.depth[view] : nullptr;
+                layer.views[view].next = depth && view < layer.depth.size() && layer.depth[view]
+                                             ? &*layer.depth[view] : nullptr;
             }
             layer.projection.viewCount = static_cast<std::uint32_t>(layer.views.size());
             layer.projection.views = layer.views.data();
             header = &layer.projection;
             break;
+        }
         case XR_TYPE_COMPOSITION_LAYER_QUAD:
             header = &layer.quad;
             break;
@@ -7887,8 +7919,8 @@ void FrameGenPresenter::StripSwapchain(FrameCopy& copy, XrSwapchain swapchain) {
         switch (layer.type) {
         case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
             for (std::size_t view = 0; view < layer.views.size(); ++view) {
-                if (layer.has_depth[view] && layer.depth[view].subImage.swapchain == swapchain) {
-                    layer.has_depth[view] = 0;
+                if (view < layer.depth.size() && layer.depth[view] && layer.depth[view]->subImage.swapchain == swapchain) {
+                    layer.depth[view].reset();
                 }
                 if (layer.views[view].subImage.swapchain == swapchain) {
                     // The primary projection stays for generated views,
@@ -8901,14 +8933,19 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         WakeSlots();
         lock.unlock();
         if (interpolate) {
-            ReleaseOutputs();
+            ReleaseOutputs(output_sets_.size());
         }
         return XR_SUCCESS;
     }
     const SlotOffer offer = *slot_offer_;
     lock.unlock();
     if (interpolate) {
-        ReleaseOutputs();
+        const XrResult released = ReleaseOutputs(output_sets_.size());
+        if (XR_FAILED(released) && between_ok) {
+            std::scoped_lock state_lock(mutex_);
+            between_ok = false;
+            NoteFailureLocked(OutputReleaseError(released));
+        }
     }
 
     // A late frame skips the frames interpolated for the slots it missed;
@@ -9432,7 +9469,6 @@ bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projectio
         jit.previous_analyzed = jit_frames_.back().analyzed;
         jit.previous_motion_not_before = jit_frames_.back().motion_not_before;
     }
-    RecordDepthReleasesLocked(copy);
     jit.copy = std::move(copy);
     jit.kinds = std::move(analysis.kinds);
     jit.velocity = std::move(analysis.velocity);
@@ -9561,6 +9597,7 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
     // Shown as it is (the fallback when nothing is written), only while its
     // images are still the newest in their swapchains.
     RecordColorReleasesLocked(copy);
+    RecordDepthReleasesLocked(copy);
     if (measure) {
         // Its four views never reach the runtime as they are.
         if (!claimed) {
@@ -9579,8 +9616,7 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
         kept.time = frame.target_time;
         kept.as_is = true;
         kept.scored = true; // scored below: nothing of it waits for the GPU
-        RecordDepthReleasesLocked(copy);
-        kept.copy = copy;
+        kept.copy = std::move(copy);
         trace_.Record("keep", kept.id, kept.time, 0, 0, 0, 1);
         jit_frames_.push_back(std::move(kept));
         while (jit_frames_.size() > JitRingLocked(quad_mode_)) {
@@ -9790,7 +9826,8 @@ bool FrameGenPresenter::JitCopyOnly(const JitFrame& frame, const JitChoice& choi
 
 bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice& choice,
                                       const std::optional<JitFrame>& fallback, const JitChoice& fallback_choice,
-                                      std::vector<XrCompositionLayerProjectionView>& views, JitWrite& write) {
+                                      XrDuration refresh_period, std::vector<XrCompositionLayerProjectionView>& views,
+                                      JitWrite& write) {
     write = {};
     bool unmeasured = false; // a moved frame written as its real frame's exact copy
     double lock_wait_ms = 0.0;
@@ -9977,12 +10014,17 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             write.error = error;
             // Composing quad views, failures hand the views back to the
             // layer for a while instead (CompositorLoop).
-            if (!quad) NoteFailureLocked(error);
+            if (!quad) NoteFailureLocked(error, true);
             return false;
         }
     }
     std::vector<FrameGenImage> images;
+    // This write serves one refresh. A runtime holding its output images
+    // gets at most that much wait time across all eyes; the next refresh
+    // retries the acquired images and can show the last complete pair meanwhile.
+    const auto wait_deadline = Clock::now() + std::chrono::nanoseconds(std::min(refresh_period, kOutputWaitTimeout));
     for (Output& output : output_sets_.front()) {
+        const bool retry = output.acquired;
         if (!output.acquired) {
             XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
             XrResult acquired;
@@ -9996,7 +10038,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
                 ++totals_.unwritten_failed;
                 write.failed = true;
                 write.error = "output image acquire failed (" + std::to_string(acquired) + ")";
-                if (!quad) NoteFailureLocked(write.error);
+                if (!quad) NoteFailureLocked(write.error, true);
                 return false;
             }
             output.acquired = true;
@@ -10004,7 +10046,12 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         }
         if (!output.waited) {
             XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-            wait.timeout = kOutputWaitTimeout;
+            // An image that missed an earlier refresh has already used its
+            // blocking wait. Poll it on later refreshes so repeats stay paced.
+            if (!retry) {
+                wait.timeout = std::max<XrDuration>(
+                    0, std::chrono::duration_cast<std::chrono::nanoseconds>(wait_deadline - Clock::now()).count());
+            }
             const XrResult waited = [&] {
                 const PresenterCall call(*this, "xrWaitSwapchainImage");
                 return xr_.wait(output.swapchain, &wait);
@@ -10088,15 +10135,27 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         write.error = error.empty() ? std::string("the GPU could not write the frame") : error;
         return false;
     }
-    for (Output& output : output_sets_.front()) {
-        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        {
-            std::scoped_lock submit(submit_mutex_);
-            const PresenterCall call(*this, "xrReleaseSwapchainImage");
-            xr_.release(output.swapchain, &release);
+    const XrResult released = ReleaseOutputs(1);
+    if (XR_FAILED(released)) {
+        std::scoped_lock lock(mutex_);
+        // An end frame names swapchains, not image indices. Even the last
+        // frame's views would now show some of this write if they share an
+        // output. A complete pair on retired swapchains can still repeat.
+        const auto& outputs = output_sets_.front();
+        if (std::any_of(jit_views_.begin(), jit_views_.end(), [&](const auto& view) {
+                return std::any_of(outputs.begin(), outputs.end(), [&](const Output& output) {
+                    return output.swapchain == view.subImage.swapchain;
+                });
+            })) {
+            jit_views_.clear();
+            jit_exact_ = false;
         }
-        output.acquired = false;
-        output.waited = false;
+        ++totals_.unwritten_failed;
+        ++repeated_;
+        write.failed = true;
+        write.error = OutputReleaseError(released);
+        if (!quad) NoteFailureLocked(write.error, true);
+        return false;
     }
     // The real frame's views, showing the images just written, seen from
     // where the eye is at the frame's time (where depth is used). Composed,
@@ -10133,6 +10192,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     }
     std::scoped_lock lock(mutex_);
     consecutive_failures_ = 0;
+    jit_output_failed_ = false;
     AddSample(synth_lock_ms_, lock_wait_ms);
     // How far a moved frame of a real frame generated with depth followed
     // the eyes (eyeShiftMm), as Generate counts the frames it writes.
@@ -10380,7 +10440,8 @@ void FrameGenPresenter::CompositorLoop() {
             lock.unlock();
             std::vector<XrCompositionLayerProjectionView> written_views;
             JitWrite write;
-            const bool written = source && SynthesizeJit(source, choice, fallback, fallback_choice, written_views, write);
+            const bool written = source &&
+                SynthesizeJit(source, choice, fallback, fallback_choice, period, written_views, write);
             if (probe && written && !write.exact) {
                 ProbeEyeLocate(session, *source, choice.mode == FrameGenSynthesisMode::kExtrapolate, written_views,
                                probe_time);
@@ -10475,7 +10536,7 @@ void FrameGenPresenter::CompositorLoop() {
             // composed, past frames written first, while one is current: its
             // own images and views, early (a written frame shown after it
             // steps back a frame, which beats a blank refresh).
-            const auto show_as_is = [&](FrameCopy copy, std::uint64_t id, XrTime made_for) {
+            const auto show_as_is = [&](const FrameCopy& copy, std::uint64_t id, XrTime made_for) {
                 AsIs current = CurrentAsIsLocked(copy, id, made_for);
                 if (!current.copy && runtime_blanks_open_frames_) {
                     current = CurrentAsIsLocked(copy, id, made_for, true);
@@ -10711,7 +10772,7 @@ void FrameGenPresenter::CompositorLoop() {
         // once the run that wrote them has ended (they would stay through
         // standing by otherwise, at headset resolution).
         lock.unlock();
-        ReleaseOutputs();
+        ReleaseOutputs(output_sets_.size());
         DestroyRetiredOutputs();
         lock.lock();
     }

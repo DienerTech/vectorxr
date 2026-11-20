@@ -6363,6 +6363,8 @@ void TestRuntimeRelayControlAndStatusRoundTrip() {
     status.framegen_flow = "shader";
     status.framegen_flow_mode = "auto";
     status.framegen_flow_reason = "hardware late";
+    status.mirror_state = "hidden";
+    status.mirror_reason = "the window is hidden";
     status.quadviews_diagnostic_visualization_available = true;
     status.quadviews_diagnostic_visualization_enabled = true;
     const std::filesystem::path status_path = depthxr::RuntimeStatusPath(test_directory, session_id);
@@ -6377,6 +6379,9 @@ void TestRuntimeRelayControlAndStatusRoundTrip() {
                status_content.str().find("\"framegenFlowMode\": \"auto\"") != std::string::npos &&
                status_content.str().find("\"framegenFlowReason\": \"hardware late\"") != std::string::npos,
            "Runtime status lost the active Interpolate flow and its reason");
+    Expect(status_content.str().find("\"mirrorState\": \"hidden\"") != std::string::npos &&
+               status_content.str().find("\"mirrorReason\": \"the window is hidden\"") != std::string::npos,
+           "Runtime status lost the mirror window's state and reason");
     Expect(status_content.str().find("\"framegen\":") == std::string::npos,
            "Runtime status wrote Frame Generation rates for a session without it");
     status_stream.close(); // an open reader keeps the atomic replace from taking the file
@@ -6472,6 +6477,90 @@ void TestQuadViewConvergenceKeepsInsetOffsetsAligned() {
     Expect(std::abs((std::tan(views[2].fov.angle_right) - std::tan(views[2].fov.angle_left)) -
                     original_left_inset_span) < 0.0001,
            "Inset horizontal FoV span changed under convergence");
+}
+
+std::string MirrorConfig(const std::string& mirror_module) {
+    return R"({"version":3,"core":{"enabled":true,"logLevel":"info"},)"
+           R"("applications":[{"id":"dcs","name":"DCS","enabled":true,"match":{"exe":"DCS.exe"}},)"
+           R"({"id":"ac","name":"Assetto Corsa","enabled":true,"match":{"exe":"acs.exe"}}],)"
+           R"("modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},)"
+           R"("bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},)"
+           R"("pivotxr":{"enabled":false,"defaults":{},"profiles":[]})" +
+           (mirror_module.empty() ? std::string() : std::string(R"(,"mirror":)") + mirror_module) + "}}";
+}
+
+void TestMirrorConfigParsingAndResolution() {
+    const auto absent = depthxr::ParseConfig(MirrorConfig(""));
+    const depthxr::MirrorSettings built_in;
+    Expect(absent.ok && !absent.document.mirror.enabled && absent.document.mirror.profiles.empty() &&
+               absent.document.mirror.bindings.empty(),
+           "A config without a mirror block must leave the mirror window off, with no binding");
+    Expect(built_in.smoothing == 60.0 && !built_in.level_horizon && built_in.eye == depthxr::MirrorEye::Left &&
+               built_in.margin == 15.0 && built_in.aspect == depthxr::MirrorAspect::k16x9 && built_in.width == 1280 &&
+               built_in.frame_rate == 60 && !built_in.fill_monitor && built_in.monitor.empty(),
+           "The mirror window's defaults must be the app's");
+    Expect(!depthxr::ResolveRuntimeConfig(absent.document, "DCS.exe").mirror.enabled,
+           "The mirror window must resolve off without a mirror block");
+
+    // As the app writes it: whole numbers as floats where the field is a number.
+    const auto parsed = depthxr::ParseConfig(MirrorConfig(
+        R"({"enabled":false,"bindings":[{"type":"keyboard","chord":["Ctrl","Alt","M"]}],)"
+        R"("defaults":{"smoothing":60.0,"levelHorizon":false,"eye":"left","margin":15.0,"aspect":"16:9",)"
+        R"("width":1280,"frameRate":60},)"
+        R"("profiles":[{"name":"Off one","enabled":false,"applicationIds":["dcs"],"settings":{"smoothing":99}},)"
+        R"({"name":"Stream","enabled":true,"mode":"custom","applicationIds":["dcs"],)"
+        R"("settings":{"smoothing":82.5,"levelHorizon":true,"eye":"right","margin":25,"aspect":"21:9",)"
+        R"("width":1920,"frameRate":30,"fillMonitor":true,"monitor":"\\\\.\\DISPLAY2"}}]})"));
+    Expect(parsed.ok, "A mirror block must parse: " + parsed.error);
+    Expect(parsed.warnings.empty(), "A complete mirror block must not warn");
+    Expect(parsed.document.mirror.bindings.size() == 1 && parsed.document.mirror.profiles.size() == 2,
+           "The mirror's binding and both profiles must parse");
+
+    const auto dcs = depthxr::ResolveRuntimeConfig(parsed.document, "C:\\Games\\DCS.exe").mirror;
+    Expect(dcs.enabled && dcs.profile_name == "Stream", "The first enabled mirror profile must own its application");
+    Expect(dcs.smoothing == 82.5 && dcs.level_horizon && dcs.eye == depthxr::MirrorEye::Right && dcs.margin == 25.0 &&
+               dcs.aspect == depthxr::MirrorAspect::k21x9 && dcs.width == 1920 && dcs.frame_rate == 30 &&
+               dcs.fill_monitor && dcs.monitor == "\\\\.\\DISPLAY2",
+           "A mirror profile's settings must resolve as written");
+    Expect(dcs.bindings.size() == 1, "The mirror's binding is the module's, whatever the profile");
+    const auto other = depthxr::ResolveRuntimeConfig(parsed.document, "acs.exe").mirror;
+    Expect(!other.enabled && other.bindings.size() == 1,
+           "An application without a mirror profile must stay off while the default profile is off");
+
+    const auto defaults_on = depthxr::ParseConfig(MirrorConfig(R"({"enabled":true,"defaults":{"aspect":"4:3"}})"));
+    Expect(defaults_on.ok, "A mirror default profile must parse");
+    const auto via_defaults = depthxr::ResolveRuntimeConfig(defaults_on.document, "acs.exe").mirror;
+    Expect(via_defaults.enabled && via_defaults.aspect == depthxr::MirrorAspect::k4x3 &&
+               via_defaults.smoothing == 60.0 && via_defaults.width == 1280 && via_defaults.profile_name.empty(),
+           "The mirror default profile must apply to applications without their own, a value left out the default");
+    for (const char* aspect : {"16:9", "16:10", "4:3", "1:1", "21:9"}) {
+        const auto each = depthxr::ParseConfig(
+            MirrorConfig(std::string(R"({"defaults":{"aspect":")") + aspect + R"("}})"));
+        Expect(each.ok && std::string(depthxr::ToString(each.document.mirror.defaults.aspect)) == aspect,
+               std::string("A mirror aspect must parse and name itself: ") + aspect);
+    }
+
+    for (const char* bad : {R"({"defaults":{"smoothing":101}})", R"({"defaults":{"smoothing":-1}})",
+                            R"({"defaults":{"margin":41}})", R"({"defaults":{"margin":"15"}})",
+                            R"({"defaults":{"eye":"both"}})", R"({"defaults":{"aspect":"3:2"}})",
+                            R"({"defaults":{"width":319}})", R"({"defaults":{"width":3841}})",
+                            R"({"defaults":{"width":1280.5}})", R"({"defaults":{"frameRate":14}})",
+                            R"({"defaults":{"frameRate":121}})", R"({"defaults":{"levelHorizon":"yes"}})",
+                            R"({"profiles":[{"name":"x","settings":{}}]})",
+                            R"({"profiles":[{"applicationIds":["dcs"],"settings":{"smoothing":150}}]})",
+                            R"({"defaults":{"fillMonitor":1}})", R"({"defaults":{"monitor":7}})",
+                            R"({"defaults":{"monitor":"01234567890123456789012345678901234567890123456789012345678901234"}})",
+                            R"({"bindings":"F9"})", R"({"enabled":"yes"})"}) {
+        Expect(!depthxr::ParseConfig(MirrorConfig(bad)).ok,
+               std::string("An invalid mirror block was accepted: ") + bad);
+    }
+    const auto fill_only =
+        depthxr::ParseConfig(MirrorConfig(R"({"enabled":true,"defaults":{"fillMonitor":true,"monitor":""}})"));
+    Expect(fill_only.ok && fill_only.document.mirror.defaults.fill_monitor &&
+               fill_only.document.mirror.defaults.monitor.empty(),
+           "Fill a monitor with no monitor chosen must parse (the mirror is then a window)");
+    const auto unknown = depthxr::ParseConfig(MirrorConfig(R"({"defaults":{"smoothing":1,"zoom":3}})"));
+    Expect(unknown.ok && !unknown.warnings.empty(), "An unknown mirror key must warn, not fail");
 }
 
 void TestDepthSubmissionRestorePreservesApplicationDeltas() {
@@ -8101,6 +8190,7 @@ int main() {
     TestStereoBoostScalesRotatedEyeBaseline();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();
     TestDepthSubmissionRestorePreservesApplicationDeltas();
+    TestMirrorConfigParsingAndResolution();
     TestPivotYawAmplifiesBeyondDeadzone();
     TestPivotYawNoOpInsideDeadzone();
     TestSwapchainImageQueuePreservesFifo();

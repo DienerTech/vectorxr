@@ -2974,6 +2974,20 @@ std::vector<std::uint64_t> VulkanBridge::Images(XrSwapchain swapchain) const {
     return images;
 }
 
+std::vector<void*> VulkanBridge::SharedImages(XrSwapchain swapchain) const {
+    std::vector<void*> images;
+    if (!impl_) {
+        return images;
+    }
+    std::scoped_lock lock(impl_->mutex);
+    if (const Impl::Swapchain* chain = impl_->Find(swapchain)) {
+        for (const Impl::Image& image : chain->images) {
+            images.push_back(image.twin.Get());
+        }
+    }
+    return images;
+}
+
 XrResult VulkanBridge::EnumerateImages(XrSwapchain swapchain, std::uint32_t capacity, std::uint32_t* count,
                                        XrSwapchainImageBaseHeader* images) const {
     const std::vector<std::uint64_t> handles = Images(swapchain);

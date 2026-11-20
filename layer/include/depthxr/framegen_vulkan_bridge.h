@@ -193,6 +193,15 @@ class VulkanBridge {
     bool HasUnmirrored() const;
     // The VkImage handles the game renders into, by image index (empty when not bridged).
     std::vector<std::uint64_t> Images(XrSwapchain swapchain) const;
+    // The Direct3D 12 side of those images, by image index (ID3D12Resource
+    // pointers, not referenced; empty when not bridged, null for an image
+    // that is not shared: private depth): the textures the game's Vulkan
+    // images are imported from. A colour one is made for simultaneous
+    // access, so a reader on the bridge's queue (the mirror window) needs no
+    // state of its own on it and is in nobody's way, unlike a reader of the
+    // runtime's image, which Frame Generation's queue takes right after the
+    // bridge's copy.
+    std::vector<void*> SharedImages(XrSwapchain swapchain) const;
     // The application's xrEnumerateSwapchainImages of a bridged swapchain
     // (XrSwapchainImageVulkanKHR structures), with the two-call idiom.
     XrResult EnumerateImages(XrSwapchain swapchain, std::uint32_t capacity, std::uint32_t* count,

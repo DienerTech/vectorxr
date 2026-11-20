@@ -30,6 +30,10 @@ The **Home** tab is a status dashboard:
 
 - **System Health** shows whether the runtime is enabled and the VectorXR layer is registered.
   Use **View Health** for details or **Export Debug** to collect a support ZIP.
+- **Applications** contains **Registry** and **Discovery**. Under **OpenXR Utilities**,
+  expand **Capture & Mirror** for the **Screenshots** and **Stabilized Mirror** pages.
+  OpenXR Enhancements are grouped into **Performance**, **Look and Feel**, and **Control**.
+  The sidebar remembers which groups you collapse.
 - The **Active overview** lists the five Enhancements — **Quadviews**, **Turbo**, **Frame
   Generation**, **Pivot**, and **Depth**, including the default profile and enabled custom-profile counts. These summarize
   your configuration; an Active badge does not mean a VR application is currently running.
@@ -463,7 +467,9 @@ API-layer, runtime, and in-game VR changes also require a full game restart.
 **Why is Show visualization unavailable?**
 
 Live app control requires an active VectorXR synthesized D3D11 Quadviews session. Start a compatible
-quad-view application with the VectorXR profile enabled. Native Varjo composition does not expose
+quad-view application with the VectorXR profile enabled. A game that starts its session with ordinary
+stereo views (Quadviews off in the game's own settings) has no quad views to visualize, so the button
+stays disabled and the in-headset shortcut does nothing. Native Varjo composition does not expose
 this visualization; the saved in-headset shortcut also begins each new session with the overlay off.
 It is also unavailable in the rare session where Frame Generation generates frames from the composed
 image instead of composing the quad views itself, and the app reads **Unavailable in the active
@@ -1270,6 +1276,142 @@ is toggled off for a baseline. The current pacing state and experimental indicat
 Pausing collection queues the complete captured data with its live status cleared, even
 if an earlier periodic save is still running. Resuming retains the same capture and
 excludes the paused interval. File writes run in the background.
+
+## Capture & Mirror
+
+Open **Capture & Mirror** in the sidebar to select **Screenshots** or **Stabilized Mirror**.
+
+### Screenshots
+
+A screenshot saves each eye's image at the full resolution of the image the game hands to the
+headset, as a PNG file of the frame the game rendered. It is the picture before the runtime's lens
+correction and reprojection, so it is sharper and larger than a capture of the desktop mirror.
+
+Set it up on the **Screenshots** page:
+
+- **Take Screenshot** is the binding: a keyboard chord or a button on a device. It takes several
+  bindings, one for each device you use; any one of them acts. There is no binding by default,
+  so screenshots are off until you add one.
+- **Eyes to save**: **Both eyes** (two files, ending in `_L` and `_R`), **Left eye** or
+  **Right eye**.
+- **Screenshot folder**: by default `VectorXR` in your Pictures folder. Each game gets a folder
+  of its own inside, named after its program file, and files are named
+  `<game>_<date>_<time>_L.png` (for example `DCS_20261110_213005_042_L.png`). **Choose Folder**
+  picks another place, **Use Default** goes back, and **Open Folder** shows it in Explorer.
+
+Press the binding in the headset. The image is copied on the GPU and converted and written in
+the background, so the game does not stall; a large image takes a second or two to appear in
+the folder. When the binding's sound is on, the activate sound plays once the files are saved
+and the deactivate sound if the screenshot could not be taken. The VectorXR log names each
+file, or says why none was saved. While one screenshot is still being written, another press
+is refused.
+
+What is saved:
+
+- Only the part of the image the game submitted for the eye, without the unused area around
+  it, and without the VectorXR On-Screen Display or any overlay from another tool.
+- With **Quadviews** composed by VectorXR, the complete image for each eye: the focus area
+  over the surrounding view. Where the runtime composes quad views itself (Varjo), or Frame
+  Generation composes them, the two full-field views are saved without the focus views, and
+  the log says so.
+- With **Frame Generation**, a frame the game rendered.
+- Colors: 8-bit images are saved as they are. HDR-style (16-bit float) and 10-bit images are
+  clamped to the displayable range and converted to sRGB. The file is always opaque.
+
+Graphics API support and file sizes
+
+- Direct3D 11 and Direct3D 12 games. Vulkan games are not supported yet; the log says so at
+  the start of the session.
+- A full-resolution screenshot is large: a 4000 x 4000 eye is about 64 MB in memory while it
+  is written and typically 15 to 40 MB on disk.
+- The VectorXR switch on the Home tab turns screenshots off with everything else.
+
+In `settings.json` the settings are `core.screenshot`: `bindings` (a list of bindings),
+`eyes` (`both`, `left` or `right`) and an optional `folder` (an absolute path).
+
+### Stabilized mirror window
+
+For streaming, recording, and for people in the room watching on a monitor or a television:
+a VectorXR window on the desktop that shows one eye of the game with your head's shake
+smoothed out. **The picture in the headset is not changed.** Only this window is stabilized.
+
+Why a window of its own: the mirrors people usually capture (SteamVR's VR View, the Meta
+Quest Link mirror, Virtual Desktop's, Pimax's and Windows Mixed Reality's) are made by the
+headset's software from exactly the image the headset shows, and a game's own desktop
+window is drawn by the game from the same head position. Neither can be steadied without
+changing what you see in the headset, which is what a negative "prediction dampening" in
+other tools does. VectorXR instead takes the image the game hands to the headset and draws
+it a second time, re-aimed along a smoothed head direction, into its own window.
+
+Set it up on the **Stabilized Mirror** page. It is off by default
+and is turned on per game: the **Default Profile** applies to every game without a custom
+profile, and a **custom profile** sets it for the games you assign to it.
+
+- **Smoothing** (0 to 100, default 60): how strongly head shake is smoothed. 0 is a plain
+  mirror. Higher values are steadier and trail further behind a fast head turn; a deliberate
+  turn is followed more quickly than a shake of the same size.
+- **Keep the horizon level**: takes your head's roll out of the picture.
+- **Eye to show**: left or right.
+- **Margin** (0 to 40 percent, default 15): how far the picture is zoomed in. The margin is
+  the room the stabilization has before an edge of the eye's image would show; when a
+  movement needs more than the margin has, the picture follows your head instead of showing
+  a black edge. With a margin of 0 nothing can be corrected.
+- **Aspect ratio** (16:9, 16:10, 4:3, 1:1 or 21:9) and **Picture width**: the window's shape,
+  the size it first opens at, and the resolution the picture is drawn at. You can resize the
+  window by its edges; it keeps its shape, the picture stays live while you drag and is
+  scaled to the window, and the window's size and position are remembered for each game.
+  For a sharper picture in a large window, raise **Picture width**.
+- **Frame rate limit** (15 to 120, default 60): the most frames a second the window shows.
+- **Fill a monitor**: the picture fills the monitor you choose, without a border, instead of
+  sitting in a window, and takes that monitor's shape (aspect ratio and width are then not
+  used). No monitor is ever chosen for you. It covers whatever is on that monitor, the
+  game's own window included, so choose another monitor than the game's unless that is what
+  you want. If the chosen monitor is not connected, the mirror opens as a normal window.
+- Under **Running games**, use **Show mirror** or **Hide mirror** for the game you want. This changes the current window immediately and keeps the saved profile settings.
+- **Show or Hide Mirror Window** is an optional binding that hides and shows the window
+  while a game runs. Its sounds play as for other bindings.
+
+In OBS, add a **Window Capture** source and choose the window whose name starts with
+`VectorXR Mirror`, followed by the game's program name. Changes to the settings apply to a
+running game as soon as you save.
+
+Good to know:
+
+- The window never takes the keyboard or the mouse from the game: clicking it does not
+  activate it. Closing it hides it. Use **Show mirror** or the binding to get
+  it back. A window that fills a monitor has no close button: use the binding.
+- Head rotation is smoothed. Position (bobbing up and down, leaning) is not.
+- It shows the complete image for the eye when VectorXR composes Quadviews. Where the runtime or
+  Frame Generation composes quad views itself, the window shows the full-field view without
+  the focus view. The On-Screen Display is not in the picture.
+- With **Frame Generation**, the window shows frames rendered by the game.
+- Cost: one small draw at the picture's size for each frame it shows, and two buffers of
+  that size in video memory. The mirror skips a frame when its buffers are busy. Creating the
+  window's swapchain can briefly hold up the game, including after a change of **Picture width**,
+  **Aspect ratio** or monitor.
+- **Vulkan games** (Star Citizen, for example): turn the mirror on for the game **before you
+  start it**. VectorXR then asks, as the game starts, for the game's graphics device to be
+  able to share one image with VectorXR, and the status on the page says to restart the game
+  if the mirror was turned on too late. Each frame shown also costs the game one copy of the
+  eye's image, and the window shows it one frame later; the copies take video memory of
+  about two eye images. With Frame Generation on, a Vulkan game needs neither: the window is
+  drawn from the images Frame Generation already shares. Set the environment variable
+  `VECTORXR_MIRROR_VULKAN=off` to keep VectorXR from asking a Vulkan game's device for
+  anything on the mirror's behalf (the mirror is then unavailable in Vulkan games without
+  Frame Generation).
+- The window is one more window of the game's process. It is not created unless the mirror
+  is on for the game. If a game runs in exclusive full screen, or an anti-cheat objects to
+  it, leave the mirror off for that game.
+
+Graphics API support
+
+- The mirror supports Direct3D 11, Direct3D 12, and Vulkan games.
+- Multisampled eye images are not shown.
+- The VectorXR switch on the Home tab turns the mirror off with everything else.
+
+In `settings.json` the settings are `modules.mirror`: `enabled` (the Default Profile),
+`bindings`, `defaults` and `profiles`, each with `smoothing`, `levelHorizon`, `eye`,
+`margin`, `aspect`, `width`, `frameRate`, `fillMonitor` and `monitor`.
 
 ## OpenXR layer management
 

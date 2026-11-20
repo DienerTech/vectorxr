@@ -758,8 +758,8 @@ class FrameGenPresenter {
             std::vector<Extension> extensions;
             XrCompositionLayerProjection projection{};
             std::vector<XrCompositionLayerProjectionView> views;
-            std::vector<XrCompositionLayerDepthInfoKHR> depth;
-            std::vector<std::uint8_t> has_depth;
+            // Empty for projections without depth; otherwise one entry per source view.
+            std::vector<std::optional<XrCompositionLayerDepthInfoKHR>> depth;
             // The depth swapchains' SwapchainRecord::releases when copied.
             std::vector<std::uint64_t> depth_releases;
             // Per view, its color swapchain's SwapchainRecord::releases when
@@ -1152,7 +1152,7 @@ class FrameGenPresenter {
     void DestroyRetiredOutputs();
     // Destroys the output sets from `keep` on (frame thread).
     void TrimOutputs(std::size_t keep);
-    void ReleaseOutputs();
+    XrResult ReleaseOutputs(std::size_t sets);
     void RecordReal(const XrCompositionLayerProjection& projection, XrTime display_time, std::uint64_t sequence);
     void InvalidateContinuityLocked();
     // The thread that ends frames waits again: marks the begun, unclaimed
@@ -1169,7 +1169,7 @@ class FrameGenPresenter {
     void BridgeAbandonedLocked(std::uint64_t sequence);
     // Counts abandoned frames, logs the first, wakes waiters.
     void NoteAbandonedLocked(std::size_t count);
-    void NoteFailureLocked(const std::string& error);
+    void NoteFailureLocked(const std::string& error, bool jit_output = false);
     void LogMemoryBudgetLocked();
     // `distinct`: the submission shows something the one before did not;
     // `generated`: a generated frame (not a real frame or its exact copy).
@@ -1319,8 +1319,8 @@ class FrameGenPresenter {
         std::string error;
     };
     bool SynthesizeJit(std::optional<JitFrame>& frame, JitChoice& choice, const std::optional<JitFrame>& fallback,
-                       const JitChoice& fallback_choice, std::vector<XrCompositionLayerProjectionView>& views,
-                       JitWrite& write);
+                       const JitChoice& fallback_choice, XrDuration refresh_period,
+                       std::vector<XrCompositionLayerProjectionView>& views, JitWrite& write);
     // Just in time: the frame `choice` shows is its real frame unchanged.
     static bool JitCopyOnly(const JitFrame& frame, const JitChoice& choice);
     void SummaryLocked(std::chrono::steady_clock::time_point now);
@@ -1402,6 +1402,7 @@ class FrameGenPresenter {
     std::optional<std::chrono::steady_clock::time_point> last_pause_at_;
     std::uint32_t consecutive_failures_{0};
     std::uint32_t consecutive_demotions_{0};
+    bool jit_output_failed_{false}; // a successful game-side analysis cannot settle this failure streak
 
     std::unordered_map<XrSwapchain, SwapchainRecord> swapchains_;
     std::vector<std::int64_t> runtime_formats_;
@@ -1428,6 +1429,7 @@ class FrameGenPresenter {
     // Stop; mutex_ guards the parts other threads read.
     RealFrame last_real_;
     std::vector<std::vector<Output>> output_sets_; // [generated frame][view]
+    bool output_release_pending_{false}; // finish refused releases before reusing or replacing these sets
     Generated extrapolated_;
     // The submission grid: when the last submission to the runtime was due
     // (a paced one's scheduled time), or was made (a frame passed straight

@@ -37,6 +37,10 @@
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
+#include "depthxr/mirror.h"
+#include "depthxr/mirror_window.h"
+#include "depthxr/screenshot.h"
+#include "depthxr/submitted_image.h"
 #include "depthxr/osd_renderer.h"
 #include "depthxr/osd_strings.h"
 #include "depthxr/performance_monitor.h"
@@ -222,6 +226,11 @@ class OpenXrLayer {
     // and the Vulkan bridge: Frame Generation enabled for the executable,
     // VECTORXR_VULKAN_BRIDGE not "off".
     bool WantsVulkanBridge();
+    // The stabilized mirror window is on for this executable (read when the
+    // instance is made): a Vulkan game's device then gets the extension its
+    // picture is shared with Direct3D 12 through. VECTORXR_MIRROR_VULKAN=off
+    // leaves a Vulkan game's device alone (and its mirror unavailable).
+    bool WantsVulkanMirror();
 
 
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
@@ -355,6 +364,7 @@ class OpenXrLayer {
     friend class VulkanBridgeLayerTestPeer;
     friend class HeadPredictionTestPeer;
     friend class SpaceWarpProbeTestPeer;
+    friend class MirrorTestPeer;
 #endif
 
     OpenXrLayer();
@@ -412,10 +422,17 @@ class OpenXrLayer {
         std::vector<ID3D11RenderTargetView*> image_render_target_views;
         ID3D11Texture2D* render_texture{nullptr};
         ID3D11RenderTargetView* render_target_view{nullptr};
-        // An image acquired whose wait timed out: still the runtime's, waited
-        // for again before anything is drawn into it.
-        bool awaiting_wait{false};
-        uint32_t awaiting_index{0};
+        // An unsuccessful wait leaves this index at the head of the
+        // runtime's queue. Retry it before acquiring or releasing an image.
+        std::optional<uint32_t> awaiting_index;
+        bool RecordWaitResult(uint32_t index, XrResult result) {
+            if (XR_FAILED(result) || result == XR_TIMEOUT_EXPIRED) {
+                awaiting_index = index;
+                return false;
+            }
+            awaiting_index.reset();
+            return true;
+        }
     };
 
     struct QuadViewsInputCopy {
@@ -695,9 +712,7 @@ class OpenXrLayer {
                                  double frame_blocked_ms,
                                  bool timed_out,
                                  TurboMetricsMode metrics_mode,
-                                 const std::vector<InputBinding>& metrics_bindings,
-                                 bool metrics_available,
-                                 int sound_volume);
+                                 bool capturing);
     bool IsTurboMetricsCaptureArmed(const std::vector<InputBinding>& bindings, int sound_volume);
     void FlushTurboMetrics(bool final_flush, bool queue_after_pending = false);
     void ResetTurboMetricsState();
@@ -713,9 +728,13 @@ class OpenXrLayer {
     // would be measured. Caller holds mutex_.
     bool QuadViewsOverlayWithheld() const;
     // The diagnostic visualization can be shown in this session (the app's
-    // live control): an emulated quad views session with the Direct3D 11
-    // compositor, the overlay not withheld. Caller holds mutex_.
+    // live control and its binding): an emulated quad views session the
+    // application began with quad views, with the Direct3D 11 compositor, the
+    // overlay not withheld. Caller holds mutex_.
     bool QuadViewsDiagnosticVisualizationAvailable() const;
+    // The application began the session with a quad views configuration (not
+    // stereo, as DCS does without Use Quad View). Caller holds mutex_.
+    bool QuadViewsSessionBegunWithQuadViews() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
     // The space-warp probe (spacewarp_probe.h), mutex_ held: whether it owns
@@ -1104,6 +1123,9 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> turbo_limit_last_wait_;
     bool turbo_trace_last_engaged_{false};
     XrResult TraceRuntimeWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*);
+    XrResult CallRuntimeWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*, std::uint64_t& trace_id);
+    void PublishRuntimeWait(const XrFrameState& state);
+    void TraceRuntimeWaitState(const XrFrameState& state, std::uint64_t trace_id);
     // The game's xrWaitFrame: Frame Generation's, Turbo's or the runtime's pacing. `fabricated`: Turbo returned a
     // frame the runtime did not.
     XrResult PaceWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*, bool& fabricated);
@@ -1137,6 +1159,98 @@ class OpenXrLayer {
     std::map<XrSwapchain, uint64_t> framegen_noted_releases_; // each swapchain's NoteFrameGenRelease calls
 #endif
     void PollFrameGenToggle();
+    // Screenshots (screenshot.h). The binding is polled with the frame's
+    // other bindings; a press is taken at the frame's hand-over to the
+    // runtime (ForwardEndFrame), from the images as the game and Quadviews'
+    // composition left them, and its outcome is logged from there on a later
+    // frame. All under mutex_.
+    void StartScreenshotsLocked(const void* binding_chain);
+    // `device_gone`: what is left of a session that ended without its end
+    // being seen is forgotten without a call on its device, which the game
+    // may have destroyed since.
+    void StopScreenshotsLocked(bool device_gone = false);
+    // xrDestroySession and xrDestroyInstance (a game may skip the first):
+    // Screenshots and the mirror window stop while the
+    // session's device is still there. Takes the game's Direct3D 11 device
+    // lock, then mutex_, for the calls on the game's context; the window's
+    // thread is waited for after the device lock is let go. Called with
+    // neither held.
+    void StopSessionImaging();
+    // The reader of the session's images (`submitted_images_`) is made the
+    // first time a screenshot binding is set or the mirror is enabled. Until
+    // then the session holds nothing of the game's device.
+    bool SubmittedImagesWantedLocked() const;
+    void EnsureSubmittedImagesLocked();
+    void PollScreenshotBinding();
+    void UpdateScreenshotsLocked(const XrFrameEndInfo& frame);
+    bool TrackScreenshotSwapchainLocked(XrSwapchain swapchain, std::string& error);
+    // Usage the mirror window needs of a game's colour swapchain that the
+    // application did not ask for (Vulkan: transfer source, for the copy on
+    // the game's queue); 0 with the mirror off for the game.
+    XrSwapchainUsageFlags MirrorSourceUsageLocked(const XrSwapchainCreateInfo& create_info) const;
+    bool LookupSubmittedSwapchainLocked(XrSwapchain swapchain, SubmittedSwapchainState& state) const;
+    // The stabilized mirror window (mirror.h, modules.mirror): a desktop
+    // window of the layer's own that shows one eye of the frame as it is
+    // handed on (ForwardEndFrame, after the screenshot tap), re-aimed along a smoothed head orientation. It reads the frame
+    // and never changes it: the frame that goes on is the same with the
+    // mirror on and off. Off for the game, nothing runs and no window, thread
+    // or swap chain exists. All under mutex_ on the thread that ends the
+    // game's frames; the window lives on a thread of its own.
+    struct MirrorSession {
+        // On the heap: a window whose thread never ended is left behind with
+        // it (JoinMirrorWindowLocked) and another made.
+        std::unique_ptr<MirrorWindow> window{std::make_unique<MirrorWindow>()};
+        MirrorStabilizer stabilizer;
+        MirrorPacer pacer;
+        // What the window was last shaped for (the settings' picture, and
+        // the monitor it is to fill: empty for a window).
+        int width{0};
+        MirrorAspect aspect{MirrorAspect::k16x9};
+        std::wstring fill_monitor;
+        // The settings' monitor name as Windows writes it, converted when
+        // the setting changes, not every frame.
+        std::string monitor_setting;
+        std::wstring monitor_name;
+        // The frame's views, kept from frame to frame for their memory.
+        std::vector<SubmittedView> views;
+        bool fill_missing_logged{false};
+        std::uint64_t shown_frames{0};
+        std::uint64_t skipped_frames{0};
+        std::uint32_t failures{0}; // in a row
+        bool failed{false};        // off until a setting changes
+        std::string failure;
+        bool unsupported_logged{false};
+        bool hidden_logged{false};
+        bool quad_logged{false};
+        // Tests: the window is made and drawn into, never put on the desktop.
+        bool on_desktop{true};
+    };
+    MirrorSession mirror_;
+    bool mirror_toggle_requested_{false};
+    bool mirror_binding_down_cached_{false};
+    ScreenshotBindingEdge mirror_edge_;
+    std::optional<InputBinding> mirror_pressed_;
+    std::optional<std::chrono::steady_clock::time_point> mirror_last_poll_time_;
+    bool MirrorWantedLocked() const;
+    std::optional<bool> MirrorWindowVisibilityLocked() const;
+    bool SetMirrorWindowVisibilityLocked(bool visible);
+    void PollMirrorBinding();
+    void UpdateMirrorLocked(const XrFrameEndInfo& frame);
+    void UpdateMirrorSettingsLocked(const ResolvedRuntimeConfig& previous);
+    // Lets go of the window's swap chain and asks the window to go. Its
+    // thread is not waited for: the caller may hold the game's Direct3D 11
+    // device lock, which a swap chain being made on that thread may wait
+    // for. A later frame joins it once it has ended (UpdateMirrorLocked);
+    // a teardown waits for it holding only mutex_ (JoinMirrorWindowLocked).
+    void StopMirrorLocked();
+    // Teardown, with the game's Direct3D 11 device lock NOT held: waits
+    // (bounded) for the window's thread to end. One that does not end is
+    // left behind with its window object and this module pinned.
+    void JoinMirrorWindowLocked();
+    MirrorState MirrorStateLocked() const;
+    std::string MirrorReasonLocked(MirrorState state) const;
+
+    const QuadViewsCompositionTarget* FindLayerTargetLocked(XrSwapchain swapchain) const;
     // `unavailable`: Frame Generation cannot run this session (a Vulkan
     // session without the Vulkan bridge), for that reason.
     void StartFrameGen(XrSession session, const void* binding_chain, const std::string& unavailable = {});
@@ -1305,6 +1419,32 @@ class OpenXrLayer {
     bool framegen_binding_down_cached_{false};
     std::optional<InputBinding> framegen_toggle_pressed_; // its list's binding that last went down (ActingBinding)
     std::optional<std::chrono::steady_clock::time_point> framegen_binding_last_poll_time_;
+    // The session's reader of its swapchain images (null: not asked for yet,
+    // or `submitted_images_unavailable_` says why).
+    std::unique_ptr<SubmittedImageGpu> submitted_images_;
+    std::string submitted_images_unavailable_;
+    // Why a Vulkan session has no mirror window (its reader could not be made).
+    std::string mirror_unavailable_;
+    // The session's graphics binding, to make the reader from: the game's
+    // device (and Direct3D 12 queue), not referenced.
+    struct SubmittedBinding {
+        bool known{false}; // a session was created
+        bool tried{false}; // the reader was asked for
+        SubmittedImageBinding binding;
+    };
+    SubmittedBinding submitted_binding_;
+    ScreenshotCapture screenshot_;
+    ScreenshotBindingEdge screenshot_edge_;
+    bool screenshot_binding_down_cached_{false};
+    bool screenshot_requested_{false};
+    bool screenshot_quad_logged_{false};
+    bool screenshot_framegen_logged_{false};
+    std::string screenshot_folder_ignored_; // the folder setting last logged as not used (not a full path)
+    std::optional<InputBinding> screenshot_pressed_; // its list's binding that last went down (ActingBinding)
+    SoundFeedback screenshot_sound_;                 // of the binding whose press is being saved
+    std::optional<std::chrono::steady_clock::time_point> screenshot_last_poll_time_;
+    // The image each of the layer's own swapchains last released drawn (ReleaseLayerSwapchainImage).
+    std::unordered_map<XrSwapchain, uint32_t> layer_released_images_;
     XrTime TurboClockNow();
     void ConfigureTurboExperiment();
     std::string TurboTimingConfiguration() const;
@@ -1587,7 +1727,7 @@ class OpenXrLayer {
     std::uint64_t turbo_async_worker_epoch_{0};
     bool turbo_async_job_pending_{false};
     XrSession turbo_async_job_session_{XR_NULL_HANDLE};
-    std::shared_ptr<std::promise<void>> turbo_async_job_completion_;
+    std::optional<std::promise<void>> turbo_async_job_completion_;
     // Shared snapshots let WaitFrame, EndFrame, and teardown observe the same
     // in-flight wait without concurrently mutating a std::future object.
     std::shared_future<void> turbo_async_wait_;
@@ -1949,6 +2089,8 @@ class OpenXrLayer {
     // and the instance has XR_KHR_D3D12_enable, so the XR_KHR_vulkan_enable(2)
     // hooks add what the bridge needs (vulkan_enable_hooks.h).
     bool vulkan_bridge_extensions_{false};
+    // The mirror's Vulkan names were asked for when the instance was made.
+    bool vulkan_mirror_extensions_{false};
     bool eye_gaze_extension_enabled_{false};
     // True for the life of the instance when native Varjo quad-views were
     // forwarded to the runtime (Varjo compatible quadviews). Single source of truth

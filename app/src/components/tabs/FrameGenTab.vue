@@ -76,7 +76,8 @@ function sessionStatus(session: RuntimeStatusSession): { label: string; chip: st
   // The reason comes from the layer and stays as it reads there.
   const withReason = (status: string, colon = false) =>
     reason ? t(colon ? 'framegen.session.withReasonColon' : 'framegen.session.withReason', { status, reason }) : status
-  switch (session.state.framegenState) {
+  // An empty state is a layer that does not report this feature, like an absent one.
+  switch (session.state.framegenState || undefined) {
     case 'active': return { label: withReason(t('framegen.session.active')), chip: 'chip-success' }
     case 'standby': return { label: withReason(t('framegen.session.standby')), chip: 'chip-idle' }
     case 'waiting': return { label: withReason(t('framegen.session.waiting')), chip: 'chip-idle' }

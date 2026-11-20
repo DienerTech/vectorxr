@@ -3,6 +3,7 @@
   "configParse": "Nie można przeanalizować {path}: {detail}",
   "configReplace": "Nie można zastąpić {path}: {detail}",
   "directoryMissing": "Katalog nie istnieje: {path}",
+  "folderCreate": "Nie można utworzyć {path}: {detail}",
   "soundMissing": "Nie znaleziono pliku dźwiękowego: {path}",
   "sessionInactive": "Sesja OpenXR nie jest już aktywna",
   "diagnosticUnavailable": "Wizualizacja diagnostyczna jest niedostępna dla tej sesji OpenXR",

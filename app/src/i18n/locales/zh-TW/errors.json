@@ -3,6 +3,7 @@
   "configParse": "無法剖析 {path}：{detail}",
   "configReplace": "無法取代 {path}：{detail}",
   "directoryMissing": "目錄不存在：{path}",
+  "folderCreate": "無法建立 {path}：{detail}",
   "soundMissing": "找不到音效檔案：{path}",
   "sessionInactive": "OpenXR 工作階段已不再作用中",
   "diagnosticUnavailable": "此 OpenXR 工作階段無法使用診斷視覺化",

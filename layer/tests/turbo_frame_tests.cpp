@@ -166,7 +166,7 @@ class TurboFrameTestPeer {
     static bool PacingResolved() { return Layer().turbo_pacing_resolved_; }
     static void MetricsFrame(bool capturing) {
         Layer().RecordTurboMetricsFrame(false, 0.0, false,
-            capturing ? TurboMetricsMode::kAlways : TurboMetricsMode::kOff, {}, true, 0);
+            capturing ? TurboMetricsMode::kAlways : TurboMetricsMode::kOff, capturing);
     }
     static void ResetMetrics() { Layer().ResetTurboMetricsState(); }
     // An application LOCAL space that Pivot also anchors to.
@@ -637,10 +637,16 @@ class TurboFrameTestPeer {
     static void ResetFrameState() { Layer().ResetTurboFrameState(); }
     static void StopWorker() { Layer().StopTurboAsyncWorker(); }
     static bool WorkerJoinable() { return Layer().turbo_async_worker_.joinable(); }
+    static std::shared_future<void> WorkerCompletion() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        return layer.turbo_async_worker_job_;
+    }
     static bool StaleCompletionPublished() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.turbo_mutex_);
-        return layer.turbo_async_wait_completed_ || layer.turbo_async_wait_.valid();
+        return layer.turbo_async_wait_completed_ || layer.turbo_async_wait_.valid() ||
+               layer.runtime_latest_wait_prediction_.load() != 0;
     }
     static std::filesystem::path SnapshotPath(const std::filesystem::path& log) {
         return TurboTimingTrace::SnapshotPath(log, 0);
@@ -2844,9 +2850,10 @@ void TestHeldWaitStillReachesSessionEnd() {
     Expect(end_ms < 6000.0, "xrEndSession waited " + std::to_string(end_ms) + "ms on the held wait");
     Expect(runtime.StackedWaits() == 0 && runtime.EndRejections() == 0 && runtime.MaxConcurrentWaits() == 1,
            "Ending the session around a held wait violated runtime frame order");
+    const auto worker = depthxr::TurboFrameTestPeer::WorkerCompletion();
     runtime.ReleaseWait();
-    Expect(runtime.WaitForWaitExited(2), "The held wait never returned after release");
-    std::this_thread::sleep_for(50ms);
+    Expect(worker.valid() && worker.wait_for(2s) == std::future_status::ready,
+           "The held wait never finished publishing its result after release");
     Expect(!depthxr::TurboFrameTestPeer::StaleCompletionPublished(),
            "A held wait from an ended session published into the next session's state");
 }
@@ -2973,6 +2980,23 @@ void TestSampledBurstsKeepRuntimeCalls() {
     }
     std::error_code error;
     std::filesystem::remove_all(directory, error);
+}
+
+// HandOverTurboToFrameThread switches shields, wakes waiters, then takes
+// the config lock to update the pacing setting. A waiter in that window
+// already needs the frame thread's prediction for its queued frame.
+void TestPredictionDuringFrameThreadHandover() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::NeedSequencedCompensation();
+    XrFrameState first{XR_TYPE_FRAME_STATE};
+    XrFrameState queued{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&first) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()) && AppWait(&queued) == XR_SUCCESS,
+           "The frame thread's shield should keep handing out app frames during a handover");
+    const auto prediction = depthxr::TurboFrameTestPeer::Prediction(queued.predictedDisplayTime);
+    Expect(prediction && prediction->origin == depthxr::TurboPredictionHistory::Origin::kSequencedCache &&
+               queued.predictedDisplayTime == 10'000'000'000 + queued.predictedDisplayPeriod && runtime.WaitCalls() == 0,
+           "The queued frame should get the next frame thread prediction as soon as its shield takes ownership");
 }
 
 // An app poll already blocked on the async handoff when a failure hands frame
@@ -3171,9 +3195,10 @@ void TestSessionEndWithStuckWaitIsBounded() {
     Expect(depthxr::TurboFrameTestPeer::EndFaultedSession() == XR_SUCCESS, "xrEndSession failed");
     const double elapsed = ElapsedMs(start);
     Expect(elapsed < 6000.0, "Session teardown was not bounded by a stuck runtime wait");
+    const auto worker = depthxr::TurboFrameTestPeer::WorkerCompletion();
     runtime.ReleaseWait();
-    Expect(runtime.WaitForWaitExited(1), "Stuck wait never returned after release");
-    std::this_thread::sleep_for(50ms);
+    Expect(worker.valid() && worker.wait_for(2s) == std::future_status::ready,
+           "Stuck wait never finished publishing its result after release");
     Expect(!depthxr::TurboFrameTestPeer::StaleCompletionPublished(),
            "A wait from an ended session published into the next session's state");
 }
@@ -3192,14 +3217,15 @@ void TestWorkerStopAfterStuckSessionEndIsBounded() {
     depthxr::TurboFrameTestPeer::ResetFrameState();
     Expect(depthxr::TurboFrameTestPeer::DrainBounded(0ms),
            "Session teardown should have dropped the stuck wait's frame future");
+    const auto worker = depthxr::TurboFrameTestPeer::WorkerCompletion();
     const auto start = std::chrono::steady_clock::now();
     depthxr::TurboFrameTestPeer::StopWorker();
     const double elapsed = ElapsedMs(start);
     Expect(elapsed < 3000.0, "Stopping the Turbo worker joined a wait still inside the runtime");
     Expect(!depthxr::TurboFrameTestPeer::WorkerJoinable(), "The stuck Turbo worker was neither joined nor released");
     runtime.ReleaseWait();
-    Expect(runtime.WaitForWaitExited(1), "Stuck wait never returned after release");
-    std::this_thread::sleep_for(50ms);
+    Expect(worker.valid() && worker.wait_for(2s) == std::future_status::ready,
+           "Released worker never finished publishing its result after release");
     Expect(!depthxr::TurboFrameTestPeer::StaleCompletionPublished(),
            "A released worker published into a later session's state");
 }
@@ -5444,6 +5470,7 @@ void TestSuiteSwitchLeavesTheLayerInert() {
 
 int main() {
     TestHandoverKeepsBlockedPollShielded();
+    TestPredictionDuringFrameThreadHandover();
     // Runtime-profile and fault-recovery simulations: none may stop frame
     // forwarding, block the application unboundedly, or stack a runtime wait.
     TestConformantLateWaitIsWaitedFor();

@@ -664,20 +664,23 @@ int main() {
         Expect(!Peer::SharpenTarget(1000, 800) && sharpen_creates == 1 && sharpen_destroys == 1,
                "a sharpen target must not be rebuilt every frame for the same size and format");
         Expect(!Peer::SharpenTarget(1200, 800) && sharpen_creates == 2, "a new size must be tried again");
-        // A timed-out wait keeps its image: not drawn into, not released, and
-        // waited for again next frame instead of a second image acquired.
-        Peer::SharpenRuntime(); Peer::SharpenTargetBuilt();
-        sharpen_wait_result = XR_TIMEOUT_EXPIRED;
-        uint32_t timed_out_image = 99, image = 99;
-        const char* reason = "ok";
-        Expect(!Peer::SharpenImage(&timed_out_image, &reason) && sharpen_acquires == 1 && sharpen_releases == 0 &&
-                   std::string(reason) == "sharpen output wait timed out",
-               "a timed-out sharpen output wait must not be drawn into or released");
-        sharpen_wait_result = XR_SUCCESS;
-        Expect(Peer::SharpenImage(&image, &reason) && sharpen_acquires == 1 && sharpen_waits == 2 &&
-                   image == timed_out_image,
-               "the next frame must wait for the same image, not acquire another");
-        Expect(Peer::SharpenImage(&image, &reason) && sharpen_acquires == 2, "then images are acquired as usual");
+        for (const XrResult refusal : {XR_TIMEOUT_EXPIRED, XR_ERROR_RUNTIME_FAILURE}) {
+            Peer::SharpenRuntime(); Peer::SharpenTargetBuilt();
+            sharpen_wait_result = refusal;
+            uint32_t pending_image = 99, image = 99;
+            const char* reason = "ok";
+            const char* expected_reason =
+                refusal == XR_TIMEOUT_EXPIRED ? "sharpen output wait timed out" : "sharpen output wait failed";
+            Expect(!Peer::SharpenImage(&pending_image, &reason) && sharpen_acquires == 1 && sharpen_releases == 0 &&
+                       std::string(reason) == expected_reason,
+                   "a failed or timed-out sharpen output wait must not be drawn into or released");
+            sharpen_wait_result = XR_SUCCESS;
+            Expect(Peer::SharpenImage(&image, &reason) && sharpen_acquires == 1 && sharpen_waits == 2 &&
+                       image == pending_image,
+                   "the next frame must wait for the same image, not acquire another");
+            ReleaseImage(Handle<XrSwapchain>(300), nullptr);
+            Expect(Peer::SharpenImage(&image, &reason) && sharpen_acquires == 2, "then images are acquired as usual");
+        }
         Peer::SharpenReset();
 
         // Visibility masks in emulated quad views: a peripheral view gets its

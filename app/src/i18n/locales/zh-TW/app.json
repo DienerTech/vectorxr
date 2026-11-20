@@ -14,6 +14,12 @@
       "label": "螢幕顯示",
       "subtitle": "頭戴式裝置顯示、位置與繫結"
     },
+    "screenshots": {
+      "label": "螢幕擷取畫面"
+    },
+    "mirror": {
+      "label": "穩定鏡像"
+    },
     "registry": {
       "label": "應用程式登錄",
       "subtitle": "註冊應用程式以指派設定檔",
@@ -80,7 +86,13 @@
   },
   "sidebar": {
     "appSettings": "應用程式設定",
+    "applications": "應用程式",
+    "capture": "擷取與鏡像",
+    "openxrUtilities": "OpenXR 公用程式",
     "enhancements": "OpenXR 增強功能",
+    "performance": "效能",
+    "lookAndFeel": "視覺效果",
+    "control": "操控",
     "suiteOff": "VectorXR 執行階段效果已關閉",
     "moduleTitle": "{subtitle}。{status}",
     "saveHint": "按「儲存變更」以套用設定。每項增強功能都會註明哪些變更需要重新啟動 VR 應用程式。",
@@ -111,6 +123,8 @@
     "issuesFound_other": "發現 {count} 個驗證問題",
     "issuesHint": "您仍可套用：錯誤會顯示在「驗證」面板中，且在解決之前將無法儲存。",
     "valid": "設定結構與數值範圍看起來皆有效。",
+    "networkPathsTitle": "不會匯入網路路徑",
+    "networkPathsHint": "此檔案指向另一部電腦上的檔案或資料夾。VectorXR 會在每個遊戲中開啟這些路徑，因此已將其排除：螢幕擷取畫面資料夾會恢復為預設資料夾，音效和圖片會恢復為內建項目。如有需要，請在匯入後重新選擇。",
     "applyToEditor": "套用至編輯器",
     "importAndSave": "匯入並儲存"
   },

@@ -54,6 +54,8 @@
     "depthLock": "Глубина: Depth Lock A/B",
     "osdToggle": "OSD: показать/скрыть",
     "osdCycle": "OSD: сменить макет",
+    "screenshot": "Захват и зеркало: сделать снимок экрана",
+    "mirrorToggle": "Захват и зеркало: показать или скрыть окно-зеркало",
     "turboToggle": "Turbo: переключение A/B",
     "turboMetrics": "Turbo: запись метрик",
     "framegenToggle": "Frame Generation: переключение A/B",

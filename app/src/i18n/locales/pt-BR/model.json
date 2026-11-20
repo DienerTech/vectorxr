@@ -52,6 +52,8 @@
     "depthLock": "Profundidade: Depth Lock A/B",
     "osdToggle": "OSD: mostrar/ocultar",
     "osdCycle": "OSD: trocar layout",
+    "screenshot": "Captura e espelho: fazer captura de tela",
+    "mirrorToggle": "Captura e espelho: mostrar ou ocultar a janela de espelho",
     "turboToggle": "Turbo: alternância A/B",
     "turboMetrics": "Turbo: captura de métricas",
     "framegenToggle": "Frame Generation: alternância A/B",

@@ -37,7 +37,7 @@
       },
       "trackSeenApps": {
         "title": "Rastrear aplicativos XR descobertos",
-        "description": "Anota o nome do executável e o horário da primeira e da última vez em que os aplicativos OpenXR que você inicia foram vistos, para que você possa registrá-los facilmente no Registro de aplicativos. Todos os dados são mantidos localmente neste PC."
+        "description": "Anota o nome do executável e o horário da primeira e da última vez em que os aplicativos OpenXR que você inicia foram vistos, para que você possa registrá-los facilmente na página Descoberta. Todos os dados são mantidos localmente neste PC."
       }
     },
     "logging": {

@@ -14,6 +14,12 @@
       "label": "On-Screen Display",
       "subtitle": "Headset display, placement, and bindings"
     },
+    "screenshots": {
+      "label": "Screenshots"
+    },
+    "mirror": {
+      "label": "Stabilized Mirror"
+    },
     "registry": {
       "label": "Application Registry",
       "subtitle": "Register applications for profile assignment",
@@ -81,7 +87,13 @@
   },
   "sidebar": {
     "appSettings": "App Settings",
+    "applications": "Applications",
+    "capture": "Capture & Mirror",
+    "openxrUtilities": "OpenXR Utilities",
     "enhancements": "OpenXR Enhancements",
+    "performance": "Performance",
+    "lookAndFeel": "Look and Feel",
+    "control": "Control",
     "suiteOff": "VectorXR runtime effects are off",
     "moduleTitle": "{subtitle}. {status}",
     "saveHint": "Save Changes to apply settings. Each enhancement notes which changes need a VR application restart.",
@@ -115,6 +127,8 @@
     "issuesFound_other": "{count} validation issues found",
     "issuesHint": "You can still apply — errors will appear in the Validation panel and save will be blocked until resolved.",
     "valid": "Config structure and value ranges look valid.",
+    "networkPathsTitle": "Network paths are not imported",
+    "networkPathsHint": "This file names files or folders on another computer. VectorXR opens these paths inside every game, so they are left out: the screenshot folder goes back to the default, and sounds and pictures to the built-in ones. Choose them again after importing if you want them.",
     "applyToEditor": "Apply to Editor",
     "importAndSave": "Import and Save"
   },
