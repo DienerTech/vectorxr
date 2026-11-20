@@ -332,6 +332,8 @@ class MirrorTestPeer {
         color.usage_flags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
         color.last_released_image_index = 2;
         color.has_last_released_image_index = true;
+        // Its release held to the frame's end (CaptureHoldsReleasesLocked).
+        color.deferred_release_count = 1;
         layer.tracked_swapchains_[kColor] = color;
         Configure(mirror, enabled);
         return gpu;
@@ -351,17 +353,28 @@ class MirrorTestPeer {
         Configure(mirror, enabled, suite);
     }
 
-    // Follow the screenshot and mirror taps used by ForwardEndFrame.
-    static std::string HandOn(const XrFrameEndInfo& frame) {
+    // Follow the screenshot and mirror taps of a frame's end, its releases
+    // held (CaptureAndReleaseEndFrameLocked).
+    static std::string HandOn(const XrFrameEndInfo& frame, bool held = true) {
         std::scoped_lock lock(Layer().mutex_);
-        Layer().UpdateScreenshotsLocked(frame);
-        Layer().UpdateMirrorLocked(frame);
+        Layer().UpdateScreenshotsLocked(frame, held);
+        Layer().UpdateMirrorLocked(frame, held);
         return FrameBytes(frame);
     }
     // Only the mirror's part.
-    static void Show(const XrFrameEndInfo& frame) {
+    static void Show(const XrFrameEndInfo& frame, bool held = true) {
         std::scoped_lock lock(Layer().mutex_);
-        Layer().UpdateMirrorLocked(frame);
+        Layer().UpdateMirrorLocked(frame, held);
+    }
+    // Whether the next frame's releases are held, as a frame's end decides.
+    static bool HoldsNext() {
+        std::scoped_lock lock(Layer().mutex_);
+        return Layer().CaptureHoldsReleasesLocked();
+    }
+    // A release the runtime has already been given.
+    static void ReleaseToRuntime(XrSwapchain swapchain) {
+        std::scoped_lock lock(Layer().mutex_);
+        Layer().tracked_swapchains_.at(swapchain).deferred_release_count = 0;
     }
     static bool WindowStarted() { return Layer().mirror_.window->Started(); }
     static HWND Window() { return static_cast<HWND>(Layer().mirror_.window->Handle()); }
@@ -405,6 +418,7 @@ class MirrorTestPeer {
         auto& info = Layer().tracked_swapchains_.at(swapchain);
         info.last_released_image_index = index;
         info.has_last_released_image_index = true;
+        info.deferred_release_count = 1;
     }
     static void CreateSession(const void* binding_chain) {
         std::scoped_lock lock(Layer().mutex_);
@@ -555,6 +569,35 @@ void TestShowsTheEye() {
                gpu->mirror_draws.back().draw.homography == PlainCrop(game.views[1].fov, settings),
            "The right eye's rectangle and field of view are shown when it is chosen");
     Expect(Peer::Reason() == "showing the right eye at 1280x720", "The status names the eye");
+}
+
+// The runtime may read an image, or change its state, once its release has
+// reached it: the mirror reads only frames whose releases the layer still
+// holds, and asks for the next frame's to be held while it can draw.
+void TestReadsOnlyHeldImages() {
+    GameFrame game;
+    depthxr::MirrorSettings settings;
+    settings.frame_rate = 1000; // every frame
+    FakeGpu* gpu = Peer::Start(settings);
+    Expect(!Peer::HoldsNext(), "Before its window stands, no release is held");
+    Frames(game, 1);
+    Expect(Peer::HoldsNext(), "A window that can be drawn into has the next frame's releases held");
+    gpu->mirror_draws.clear();
+    Peer::Show(game.info, false);
+    game.info.displayTime += kFrame;
+    Expect(gpu->mirror_draws.empty(), "A frame whose releases went on is not read");
+    Peer::ReleaseToRuntime(kColor);
+    Peer::Show(game.info, true);
+    game.info.displayTime += kFrame;
+    Expect(gpu->mirror_draws.empty() && Peer::State() != "failed",
+           "An image already the runtime's is not read, and that is no failure");
+    Peer::Release(kColor, 1);
+    Peer::Show(game.info, true);
+    game.info.displayTime += kFrame;
+    Expect(!gpu->mirror_draws.empty() && gpu->mirror_draws.back().view.image_index == 1, "A held image is read");
+    Peer::Reconfigure(settings, false);
+    Peer::Show(game.info, true);
+    Expect(!Peer::HoldsNext(), "With the mirror off nothing is held");
 }
 
 void TestFrameIsTheSameOnAndOff() {
@@ -1158,6 +1201,7 @@ int main() {
     try {
         TestOffDoesNothing();
         TestShowsTheEye();
+        TestReadsOnlyHeldImages();
         TestFrameIsTheSameOnAndOff();
         TestSmoothingAndPacing();
         TestHideAndShow();

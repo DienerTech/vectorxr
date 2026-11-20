@@ -400,7 +400,13 @@ MirrorDrawResult D3D11Mirror::Prepare(const MirrorDraw& draw, std::string& error
     request.window = static_cast<HWND>(draw.window);
     request.width = draw.width;
     request.height = draw.height;
-    request.executor = &draw.on_window_thread;
+    // Made on the window's thread, off the game's frame, only where the
+    // game's device may be called from another thread: a device made
+    // D3D11_CREATE_DEVICE_SINGLETHREADED serializes nothing, so its swap
+    // chain is made here, on the drawing thread (a one-time hitch, and one
+    // after each resize or monitor change).
+    request.executor = (device_->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) ? nullptr
+                                                                                          : &draw.on_window_thread;
     // A swap chain that is replaced goes here, with the flush Direct3D 11
     // needs before its buffers are gone and the window can have another.
     request.release_on_caller = true;

@@ -529,7 +529,13 @@ void FirstUseOrderingTest(ID3D12Device* device, bool only_first_use) {
     Check(SUCCEEDED(synthesis->Signal(1)), "the frame's measurement is done");
     Check(h.runtime_marker.Reaches(h.runtime_queue) && h.game_marker.Reaches(h.game.Get()), "both queues run on");
     const Swapchain& source = h.runtime.chains.at(kSource);
-    Check(source.calls.rfind("awra", 0) == 0 && source.calls.find("ww") == std::string::npos &&
+    // The second acquire may come before the first release ("awaa..."): while
+    // the first release still waits for the game's work, a free image is
+    // acquired directly (AcquireDeferredRefusalBudgetTest). Which comes first
+    // depends on when the game's queue runs; the runtime stub checks that
+    // every wait is for the oldest acquired image and every release follows
+    // its wait, so the order itself is checked either way.
+    Check(source.calls.rfind("aw", 0) == 0 && source.calls.find("ww") == std::string::npos &&
               source.calls.find("rr") == std::string::npos,
           "the runtime's calls stay in order (" + source.calls + ")");
     std::cout << "Image waits ordered " << (only_first_use ? "at first use only" : "every time") << " passed\n";

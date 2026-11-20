@@ -783,6 +783,17 @@ class OpenXrLayer {
                                                  SwapchainInfo& info,
                                                  std::string_view reason);
     XrResult FlushDeferredSwapchainReleasesLocked(std::string_view reason);
+    // At a frame's end, before the runtime's xrEndFrame: screenshots and the
+    // mirror read the frame while its releases are still held, then every
+    // held and deferred release goes on (CaptureHoldsReleasesLocked).
+    XrResult CaptureAndReleaseEndFrameLocked(const XrFrameEndInfo* frame, std::unique_lock<std::mutex>& lock);
+    // Whether the next frame's releases are held for screenshots or the
+    // mirror: an image is read only before its release reaches the runtime,
+    // which may start reading it then.
+    bool CaptureHoldsReleasesLocked() const;
+    // The layer's own swapchain releases held for capture (all, or one
+    // swapchain's), on to the runtime.
+    XrResult FlushHeldLayerReleasesLocked(XrSwapchain only = XR_NULL_HANDLE);
     // A bridged swapchain's images the application released, handed over
     // oldest first (SwapchainInfo::bridge_handovers): the bridge's copy into
     // the runtime's image, Frame Generation's capture of it, then the release
@@ -1182,7 +1193,9 @@ class OpenXrLayer {
     bool SubmittedImagesWantedLocked() const;
     void EnsureSubmittedImagesLocked();
     void PollScreenshotBinding();
-    void UpdateScreenshotsLocked(const XrFrameEndInfo& frame);
+    // `held`: this frame's releases were held (CaptureHoldsReleasesLocked);
+    // if not, a press waits for the next frame.
+    void UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held);
     bool TrackScreenshotSwapchainLocked(XrSwapchain swapchain, std::string& error);
     // Usage the mirror window needs of a game's colour swapchain that the
     // application did not ask for (Vulkan: transfer source, for the copy on
@@ -1235,7 +1248,7 @@ class OpenXrLayer {
     std::optional<bool> MirrorWindowVisibilityLocked() const;
     bool SetMirrorWindowVisibilityLocked(bool visible);
     void PollMirrorBinding();
-    void UpdateMirrorLocked(const XrFrameEndInfo& frame);
+    void UpdateMirrorLocked(const XrFrameEndInfo& frame, bool held);
     void UpdateMirrorSettingsLocked(const ResolvedRuntimeConfig& previous);
     // Lets go of the window's swap chain and asks the window to go. Its
     // thread is not waited for: the caller may hold the game's Direct3D 11
@@ -1445,6 +1458,15 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> screenshot_last_poll_time_;
     // The image each of the layer's own swapchains last released drawn (ReleaseLayerSwapchainImage).
     std::unordered_map<XrSwapchain, uint32_t> layer_released_images_;
+    // This frame's releases are held until its end for screenshots or the
+    // mirror (set at each frame's end for the next one).
+    bool capture_holds_releases_{false};
+    struct HeldLayerRelease {
+        XrSwapchain swapchain{XR_NULL_HANDLE};
+        bool bridged{false};
+        bool lazy{false};
+    };
+    std::vector<HeldLayerRelease> held_layer_releases_;
     XrTime TurboClockNow();
     void ConfigureTurboExperiment();
     std::string TurboTimingConfiguration() const;

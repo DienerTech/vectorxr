@@ -174,6 +174,9 @@ bool ResolveSubmittedViews(const XrFrameEndInfo& frame, const SubmittedSwapchain
             view.problem = "it names a swapchain the layer does not know";
         } else if (!state.has_image) {
             view.problem = "its swapchain has released no image yet";
+        } else if (!state.held) {
+            view.problem = "its image has already gone to the runtime";
+            view.released = true;
         } else if (image.imageArrayIndex >= std::max<std::uint32_t>(state.array_size, 1)) {
             view.problem = "it names array slice " + std::to_string(image.imageArrayIndex) + " of " +
                            std::to_string(state.array_size);

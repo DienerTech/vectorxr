@@ -67,6 +67,10 @@ struct SubmittedSwapchainState {
     // The image the frame shows: the one last released.
     std::uint32_t image_index{0};
     bool has_image{false};
+    // That image's release has not reached the runtime yet: the runtime may
+    // read (and on Direct3D 12 and Vulkan, change the state of) an image once
+    // it has it, so only a held one is read.
+    bool held{true};
 };
 using SubmittedSwapchainLookup = std::function<bool(XrSwapchain, SubmittedSwapchainState&)>;
 
@@ -75,6 +79,9 @@ using SubmittedSwapchainLookup = std::function<bool(XrSwapchain, SubmittedSwapch
 struct SubmittedView {
     bool resolved{false};
     std::string problem;
+    // Unresolved only because its image's release has reached the runtime
+    // (SubmittedSwapchainState::held): a later frame's may be read.
+    bool released{false};
     XrSwapchain swapchain{XR_NULL_HANDLE};
     std::uint32_t view_index{0};
     std::uint32_t image_index{0};
@@ -91,7 +98,7 @@ struct SubmittedView {
 // The views of the frame's first projection layer that has any, one entry
 // per view. False with `problem` when there is none. A view is left
 // unresolved when it names a swapchain the lookup does not know, an image
-// never released, a slice outside the array or a rectangle that is empty or
+// never released or already the runtime's, a slice outside the array or a rectangle that is empty or
 // not inside the image.
 bool ResolveSubmittedViews(const XrFrameEndInfo& frame, const SubmittedSwapchainLookup& lookup,
                            std::vector<SubmittedView>& views, std::string& problem);

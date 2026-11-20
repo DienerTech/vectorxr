@@ -47,6 +47,10 @@
 #ifndef VECTORXR_VERSION
 #define VECTORXR_VERSION "unknown"
 #endif
+// Core or Forward (layer/CMakeLists.txt, VECTORXR_EDITION).
+#ifndef VECTORXR_EDITION
+#define VECTORXR_EDITION "Core"
+#endif
 
 namespace depthxr {
 namespace {
@@ -2311,6 +2315,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
 
     current_exe_name_ = GetCurrentExecutableName();
     logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
+    logger_.Info(std::string("VectorXR edition: ") + VECTORXR_EDITION);
     logger_.Info(std::string("VectorXR layer build: ") + __DATE__ + " " + __TIME__);
     logger_.Info("VectorXR attached to process: " + current_exe_name_);
     if (!retired_instance_note_.empty()) {
@@ -3396,6 +3401,8 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
                 // Frame Generation is stopped and nothing shows them.
                 HandOverBridgedReleasesLocked("session teardown", false);
                 FlushDeferredSwapchainReleasesLocked("session teardown");
+                FlushHeldLayerReleasesLocked();
+                capture_holds_releases_ = false;
                 ResetD3D11QuadViewsCompositor();
                 ResetSwapchainState();
                 // The bridge's copies into the runtime's images finish before
@@ -7540,14 +7547,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             context_hold->Release();
         }
     };
-    // Screenshots read the frame as it goes to the runtime (or to Frame
-    // Generation), while the game's context is still held.
-    if (frame_end_info) {
-        UpdateScreenshotsLocked(*frame_end_info);
-        // The stabilized mirror window shows the same frame; it reads it and
-        // never changes it.
-        UpdateMirrorLocked(*frame_end_info);
-    }
+    // Screenshots and the mirror have read the frame by now, before its
+    // releases went on (CaptureAndReleaseEndFrameLocked).
     // When the app's xrEndFrame returns (NoteUpstreamTurboFrame: a layer
     // above waits right after); this is its tail.
     struct EndReturned {
@@ -10151,7 +10152,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
         ResetPivotPoseDeltaContinuityState();
-        const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
+        const XrResult release_result = CaptureAndReleaseEndFrameLocked(frame_end_info, lock);
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
         PruneQuadViewsFrames(frame_end_info->displayTime);
@@ -10468,7 +10469,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                 --pending_end_frame_diagnostics_;
             }
         }
-        const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
+        const XrResult release_result = CaptureAndReleaseEndFrameLocked(frame_end_info, lock);
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
         PruneQuadViewsFrames(frame_end_info->displayTime);
@@ -10883,7 +10884,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             --pending_end_frame_diagnostics_;
         }
     }
-    const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
+    const XrResult release_result = CaptureAndReleaseEndFrameLocked(&adjusted_frame_end_info, lock);
     PrunePivotPoseDeltas(frame_end_info->displayTime);
     PruneDepthSubmissionGeometry(frame_end_info->displayTime);
     PruneQuadViewsFrames(frame_end_info->displayTime);
@@ -16316,11 +16317,20 @@ XrResult OpenXrLayer::ReleaseLayerSwapchainImage(XrSwapchain swapchain, uint32_t
     if (drawn) {
         layer_released_images_[swapchain] = index;
     }
+    // Held to the frame's end for screenshots or the mirror, as a game's
+    // own (ShouldDeferSwapchainRelease); one a swapchain at most.
+    const auto hold = [&](bool bridged, bool lazy) -> std::optional<XrResult> {
+        if (!capture_holds_releases_) return std::nullopt;
+        if (const XrResult flushed = FlushHeldLayerReleasesLocked(swapchain); XR_FAILED(flushed)) return flushed;
+        held_layer_releases_.push_back({swapchain, bridged, lazy});
+        return XR_SUCCESS;
+    };
     if (!d3d11_bridge_.Bridged(swapchain)) {
         if (drawn) {
             framegen_.CaptureOnRelease(swapchain, index);
         }
         NoteFrameGenRelease(swapchain, index);
+        if (const std::optional<XrResult> held = hold(false, false)) return *held;
         return next_release_swapchain_image_(swapchain, &info);
     }
     if (drawn) {
@@ -16339,7 +16349,72 @@ XrResult OpenXrLayer::ReleaseLayerSwapchainImage(XrSwapchain swapchain, uint32_t
     // Shown later by Frame Generation's thread, the frame's submission makes
     // the runtime's queue wait for it (SubmitRuntimeFrame); until then
     // nothing Frame Generation writes waits for the game's frame.
-    return framegen_queue_.Release(swapchain, FrameGenLazy(swapchain) || shown_later, FrameGenQueueCalls(), &info);
+    const bool lazy = FrameGenLazy(swapchain) || shown_later;
+    if (const std::optional<XrResult> held = hold(true, lazy)) return *held;
+    return framegen_queue_.Release(swapchain, lazy, FrameGenQueueCalls(), &info);
+}
+
+XrResult OpenXrLayer::FlushHeldLayerReleasesLocked(XrSwapchain only) {
+    XrResult first_failure = XR_SUCCESS;
+    for (auto it = held_layer_releases_.begin(); it != held_layer_releases_.end();) {
+        if (only != XR_NULL_HANDLE && it->swapchain != only) {
+            ++it;
+            continue;
+        }
+        const HeldLayerRelease held = *it;
+        it = held_layer_releases_.erase(it);
+        XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        const XrResult result = held.bridged
+                                    ? framegen_queue_.Release(held.swapchain, held.lazy, FrameGenQueueCalls(), &info)
+                                    : next_release_swapchain_image_(held.swapchain, &info);
+        if (XR_FAILED(result)) {
+            logger_.Error("Held layer swapchain release failed: handle=" + FormatHandle(held.swapchain) +
+                          ", result=" + FormatHex(static_cast<uint64_t>(result)));
+            if (XR_SUCCEEDED(first_failure)) first_failure = result;
+        }
+    }
+    return first_failure;
+}
+
+bool OpenXrLayer::CaptureHoldsReleasesLocked() const {
+    // A press is answered on the next frame, held (or refused there).
+    if (screenshot_requested_) return true;
+    if (!resolved_settings_.core.enabled || !submitted_images_) return false;
+    return MirrorWantedLocked() && !mirror_.failed && mirror_.window->Started() && !mirror_.window->Stopping() &&
+           mirror_.window->Drawable();
+}
+
+XrResult OpenXrLayer::CaptureAndReleaseEndFrameLocked(const XrFrameEndInfo* frame,
+                                                      std::unique_lock<std::mutex>& lock) {
+    // Read with this frame's releases held (set at the frame before's end).
+    const bool held = capture_holds_releases_;
+    if (frame) {
+        UpdateScreenshotsLocked(*frame, held);
+        // The stabilized mirror window shows the same frame; it reads it and
+        // never changes it.
+        UpdateMirrorLocked(*frame, held);
+    }
+    capture_holds_releases_ = CaptureHoldsReleasesLocked();
+    // A bridged swapchain's releases held for capture go on without mutex_,
+    // as the frame's hand-over forwards them (ForwardHandedOverReleases): the
+    // runtime's swapchain calls may wait out Frame Generation's xrEndFrame.
+    std::vector<XrSwapchain> bridged;
+    if (held) {
+        for (auto& [swapchain, info] : tracked_swapchains_) {
+            if (info.deferred_release_count == 0 || !BridgedSwapchain(swapchain) ||
+                (defer_quadviews_swapchain_releases_ && info.quadviews_session)) {
+                continue;
+            }
+            bridged.insert(bridged.end(), info.deferred_release_count, swapchain);
+            info.deferred_release_count = 0;
+        }
+    }
+    XrResult result = FlushDeferredSwapchainReleasesLocked("end frame");
+    const XrResult layer_result = FlushHeldLayerReleasesLocked();
+    if (XR_SUCCEEDED(result)) result = layer_result;
+    const XrResult bridged_result = ForwardHandedOverReleases(lock, bridged, "end frame (held for capture)");
+    if (XR_SUCCEEDED(result)) result = bridged_result;
+    return result;
 }
 
 void OpenXrLayer::NoteFrameGenRelease(XrSwapchain swapchain, uint32_t index) {
@@ -16355,6 +16430,8 @@ XrResult OpenXrLayer::DestroyLayerSwapchain(XrSwapchain swapchain) {
         submitted_images_->Forget(swapchain);
     }
     layer_released_images_.erase(swapchain);
+    // A release held for screenshots or the mirror goes on first.
+    FlushHeldLayerReleasesLocked(swapchain);
     if (d3d11_bridge_.Bridged(swapchain)) {
         // As an application's bridged swapchain (DestroySwapchain).
         framegen_queue_.Flush(swapchain, FrameGenQueueCalls());
@@ -16379,8 +16456,10 @@ void OpenXrLayer::StartScreenshotsLocked(const void* binding_chain) {
     JoinMirrorWindowLocked();
     // What the reader of the session's images is made from, when something
     // asks for one (EnsureSubmittedImagesLocked): the game keeps its device
-    // (and queue) for as long as the session lives, so a session that takes
-    // no screenshot and processes no image holds no reference to them.
+    // (and queue) for as long as the session lives. The reader (and its
+    // references to them) is made only while a screenshot binding is set or
+    // the mirror is on (SubmittedImagesWantedLocked); with neither, the
+    // session holds none.
     submitted_binding_.binding = CaptureSubmittedImageBinding(binding_chain);
     if (submitted_binding_.binding.type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
         // The game's own vkGetInstanceProcAddr, where XR_KHR_vulkan_enable2 gave it.
@@ -16450,6 +16529,9 @@ void OpenXrLayer::EnsureSubmittedImagesLocked() {
 
 void OpenXrLayer::StopScreenshotsLocked(bool device_gone) {
     if (device_gone && submitted_images_) {
+        // The writer stops reading a mapped image first: abandoning a
+        // Direct3D 11 or 12 reader unmaps its readbacks.
+        screenshot_.Stop(nullptr);
         // Nothing of it is used again, and no call is made on its device.
         submitted_images_->Abandon();
     }
@@ -16469,6 +16551,8 @@ void OpenXrLayer::StopScreenshotsLocked(bool device_gone) {
     submitted_binding_ = {};
     layer_released_images_.clear();
     screenshot_requested_ = false;
+    // Releases already held go on at the frame's end or the session's.
+    capture_holds_releases_ = false;
 }
 
 void OpenXrLayer::PollScreenshotBinding() {
@@ -16558,6 +16642,8 @@ bool OpenXrLayer::LookupSubmittedSwapchainLocked(XrSwapchain swapchain, Submitte
         state.usage = info.usage_flags;
         state.image_index = info.last_released_image_index;
         state.has_image = info.has_last_released_image_index;
+        // Its last release is still the layer's (deferred), not the runtime's.
+        state.held = info.deferred_release_count > 0;
         return true;
     }
     if (const QuadViewsCompositionTarget* target = FindLayerTargetLocked(swapchain)) {
@@ -16568,12 +16654,14 @@ bool OpenXrLayer::LookupSubmittedSwapchainLocked(XrSwapchain swapchain, Submitte
             state.image_index = released->second;
             state.has_image = true;
         }
+        state.held = std::any_of(held_layer_releases_.begin(), held_layer_releases_.end(),
+                                 [&](const HeldLayerRelease& held) { return held.swapchain == swapchain; });
         return true;
     }
     return false;
 }
 
-void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame) {
+void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held) {
     if (const std::optional<ScreenshotResult> result = screenshot_.Poll(submitted_images_.get())) {
         std::string files;
         for (const std::filesystem::path& file : result->files) {
@@ -16589,6 +16677,11 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame) {
                                                resolved_settings_.core.sound_volume);
     }
     if (!screenshot_requested_) {
+        return;
+    }
+    if (!held) {
+        // This frame's images are already the runtime's: the next frame's
+        // releases are held for the press (CaptureHoldsReleasesLocked).
         return;
     }
     screenshot_requested_ = false;
@@ -16619,6 +16712,13 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame) {
     }
     const std::vector<ScreenshotEye> eyes =
         SelectScreenshotEyes(static_cast<std::uint32_t>(views.size()), settings.eyes);
+    for (const ScreenshotEye& eye : eyes) {
+        if (views[eye.view_index].released) {
+            // Released twice before its frame's end: the next frame's image.
+            screenshot_requested_ = true;
+            return;
+        }
+    }
     for (const ScreenshotEye& eye : eyes) {
         const SubmittedView& view = views[eye.view_index];
         if (view.resolved && !TrackScreenshotSwapchainLocked(view.swapchain, problem)) {
@@ -16799,7 +16899,7 @@ void OpenXrLayer::StopMirrorLocked() {
     mirror_toggle_requested_ = false;
 }
 
-void OpenXrLayer::UpdateMirrorLocked(const XrFrameEndInfo& frame) {
+void OpenXrLayer::UpdateMirrorLocked(const XrFrameEndInfo& frame, bool held) {
     MirrorSession& mirror = mirror_;
     if (mirror.window->Stopping() && !mirror.window->Join(0)) {
         // Its window is going and its thread has not ended yet: looked at
@@ -16959,6 +17059,11 @@ void OpenXrLayer::UpdateMirrorLocked(const XrFrameEndInfo& frame) {
     const double aspect =
         mirror.window->Filling() ? static_cast<double>(draw.width) / static_cast<double>(draw.height) : 0.0;
     const MirrorAim aim = mirror.stabilizer.Update(eye.pose, eye.fov, frame.displayTime, settings, aspect);
+    // A frame whose releases already went to the runtime (the first after
+    // the window could be drawn into) is not read; the next one is held.
+    if (!held || views[index].released) {
+        return;
+    }
     if (!mirror.pacer.Due(frame.displayTime, settings.frame_rate)) {
         return;
     }
@@ -17184,8 +17289,16 @@ bool OpenXrLayer::ShouldDeferSwapchainRelease(const SwapchainInfo& info) const {
     // four compositor inputs. The extra swapchains are still flushed before
     // next_end_frame_, so submission ordering stays correct; keying off the session
     // avoids tracking which handles are compositor inputs versus app-owned layers.
-    return defer_quadviews_swapchain_releases_ && info.quadviews_session && info.session == active_session_ &&
-           IsQuadViewsActive();
+    if (defer_quadviews_swapchain_releases_ && info.quadviews_session && info.session == active_session_ &&
+        IsQuadViewsActive()) {
+        return true;
+    }
+    // Screenshots and the mirror read the frame's images at its end, before
+    // the releases reach the runtime (CaptureAndReleaseEndFrameLocked). One
+    // release a swapchain at most: a second before the frame's end (a frame
+    // never ended) goes on, and the runtime's release is of its oldest image
+    // either way.
+    return capture_holds_releases_ && info.session == active_session_ && info.deferred_release_count == 0;
 }
 
 XrResult OpenXrLayer::ForwardAppRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo* release_info) {

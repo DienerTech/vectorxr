@@ -163,6 +163,11 @@ double MirrorOrientationFilter::RestCutoff(double strength) {
 
 MirrorQuat MirrorOrientationFilter::Update(const MirrorQuat& actual, double seconds, double strength) {
     const double rest = RestCutoff(strength);
+    if (primed_ && seconds == 0.0 && rest > 0.0) {
+        // A frame for the same moment again (a repeated display time): the
+        // smoothed view holds, no jump to the raw head.
+        return smoothed_;
+    }
     if (!primed_ || !(seconds > 0.0) || seconds > kMaxStepSeconds || !std::isfinite(seconds) || rest <= 0.0) {
         primed_ = true;
         smoothed_ = actual;

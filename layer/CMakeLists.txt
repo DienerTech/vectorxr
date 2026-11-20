@@ -415,6 +415,11 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_vectorxr_tauri_conf}")
     endif()
     message(STATUS "VectorXR layer version: ${_vectorxr_version}")
+    # The edition this tree builds: "Core" (public, MPL-2.0) or "Forward" (the
+    # early-access edition). Named at the top of every log, so a log says
+    # which one a report comes from as well as its version.
+    set(VECTORXR_EDITION "Core" CACHE STRING "VectorXR edition named in the layer's log (Core or Forward)")
+    message(STATUS "VectorXR edition: ${VECTORXR_EDITION}")
 
     target_compile_definitions(
         XR_APILAYER_DIENERTECH_VECTORXR
@@ -423,6 +428,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         NOMINMAX
         XR_USE_GRAPHICS_API_D3D11
         VECTORXR_VERSION="${_vectorxr_version}"
+        VECTORXR_EDITION="${VECTORXR_EDITION}"
     )
 
     add_custom_command(

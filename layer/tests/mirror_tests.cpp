@@ -202,6 +202,10 @@ void TestFilter() {
         Expect(MirrorAngle(filter.Update(away, 0.75, 80.0), away) == 0.0, "After a gap the filter starts at the head");
         filter.Update(MirrorQuat{}, 0.011, 80.0);
         Expect(MirrorAngle(filter.Update(away, -0.011, 80.0), away) == 0.0, "Time going back starts it again");
+        filter.Update(MirrorQuat{}, 0.011, 80.0);
+        const MirrorQuat before = filter.Update(MirrorQuat{}, 0.011, 80.0);
+        const MirrorQuat repeated = filter.Update(away, 0.0, 80.0);
+        Expect(MirrorAngle(repeated, before) == 0.0, "A repeated display time holds the view, no jump to the head");
         filter.Reset();
         Expect(!filter.Primed() && MirrorAngle(filter.Update(away, 0.011, 80.0), away) == 0.0 && filter.Primed(),
                "A reset filter starts at the head");
@@ -1790,6 +1794,50 @@ int D3D11Tests() {
         rig.context->Flush();
         rig.ReleaseImages();
         Expect(held.Reset() == 0, api + ": no image reference is left after the teardown");
+    }
+    // A game's device made D3D11_CREATE_DEVICE_SINGLETHREADED serializes
+    // nothing: its window's swap chain is never made on another thread.
+    {
+        D3D11Rig single;
+        Expect(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_SINGLETHREADED,
+                                           &level, 1, D3D11_SDK_VERSION, &single.device, nullptr, &single.context)),
+               "A single-threaded Direct3D 11 WARP device is created");
+        std::unique_ptr<SubmittedImageGpu> gpu = CreateSubmittedImageD3D11(single.device.Get(), true);
+        Expect(gpu != nullptr, "The single-threaded device's backend is made");
+        Harness harness{single, *gpu};
+        void* image = nullptr;
+        const XrSwapchain source = harness.Source(DXGI_FORMAT_R8G8B8A8_UNORM, 64, 48, 1, 1, true, &image);
+        const SubmittedView view =
+            Harness::View(source, DXGI_FORMAT_R8G8B8A8_UNORM, 64, 48, 1, 0, XrRect2Di{{0, 0}, {64, 48}});
+        MirrorWindow window;
+        Expect(window.Start(WindowOptions(320, 180), error) && WaitFor([&] { return window.Handle() != nullptr; }),
+               "The single-threaded test's window is made: " + error);
+        int posted = 0, shown = 0;
+        const DWORD drawing_thread = GetCurrentThreadId();
+        for (int number = 0; number < 10; ++number) {
+            MirrorDraw draw;
+            draw.window = window.Handle();
+            window.OutputSize(draw.width, draw.height);
+            draw.on_window_thread = [&](std::function<void()> task) {
+                ++posted;
+                return window.Post(std::move(task));
+            };
+            draw.homography = MirrorHomographyFor(Fov(-40, 40, 30, -30), WholeCrop(Fov(-40, 40, 30, -30)), MirrorQuat{});
+            std::string why;
+            const MirrorDrawResult result = gpu->DrawMirror(view, draw, why);
+            Expect(result != MirrorDrawResult::kFailed, "Single-threaded device: a frame is drawn: " + why);
+            Expect(GetCurrentThreadId() == drawing_thread, "Single-threaded device: drawn on the drawing thread");
+            if (result == MirrorDrawResult::kShown) ++shown;
+        }
+        Expect(posted == 0 && shown > 0,
+               "Single-threaded device: the swap chain is made on the drawing thread and frames are shown (" +
+                   std::to_string(posted) + " posted, " + std::to_string(shown) + " shown)");
+        gpu->CloseMirror();
+        window.RequestStop();
+        Expect(window.Join(3000), "The single-threaded test's window ends");
+        gpu.reset();
+        single.context->ClearState();
+        single.context->Flush();
     }
     std::cout << "Direct3D 11 (WARP) mirror window: " << checks << " checks passed\n";
     return 0;
