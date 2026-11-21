@@ -858,6 +858,9 @@ struct FrameGenFlowPrior {
     float share{1.0f};
     float margin{0.002f};
     float per_pixel{0.001f};
+    // Only where shader flow measured the motion (kFrameGenFlowPriorDefault):
+    // hardware flow keeps its vectors.
+    bool shader_only{false};
 };
 // "sky" (or "1", any case) for the sky and content without depth, "far" for
 // all world content without a world motion, "sky-still" or "far-still" the
@@ -889,6 +892,22 @@ struct FrameGenFlowShortest {
 // "1" or "on" (any case) for the defaults, or "<tolerance>[,<share>[,median]]"
 // (each 0 to 1; a missing or bad share keeps its default). Anything else is off.
 FrameGenFlowShortest ParseFrameGenFlowShortest(const std::string& value);
+// What FrameGenTuning holds when neither switch is set: the prior
+// (VECTORXR_FRAMEGEN_FLOW_PRIOR=sky:0,0.002,0.0005) with the shortest search
+// toward the neighbours' median (VECTORXR_FRAMEGEN_FLOW_SHORTEST=0.012,0,median).
+// Replays of 15 DCS captures without depth (2026-11-21) had fewer bad pixels
+// with the pair on all 15 (median -0.025 points, none worse), flat-region
+// specks down on 12, MSFS with depth about unchanged; it costs about 0.04 ms
+// per real frame at 4608x3748. The pair together: the shortest search alone
+// lost 0.38 points on a quad views capture moving 200 pixels, and the prior
+// alone lost 0.02 on the fast-turn capture. The prior only where shader flow
+// measured the motion: on hardware flow's vectors it was no better (DCS stereo
+// median unchanged, the fast turn +0.006; an MSFS capture without depth +0.029
+// with more specks, one with depth -0.015).
+inline constexpr FrameGenFlowPrior kFrameGenFlowPriorDefault{
+    .enabled = true, .share = 0.0f, .margin = 0.002f, .per_pixel = 0.0005f, .shader_only = true};
+inline constexpr FrameGenFlowShortest kFrameGenFlowShortestDefault{
+    .enabled = true, .tolerance = 0.012f, .share = 0.0f, .toward_neighbours = true};
 // Research (VECTORXR_FRAMEGEN_FLOW_EVIDENCE): confidence from how distinct a
 // match is, not only how good (kFrameGenFlagFlowEvidence). A flat block
 // matches every vector with a cost near zero, which read as full confidence:
@@ -1015,14 +1034,16 @@ struct FrameGenTuning {
     // frames (kFrameGenFlagPropHold).
     FrameGenPropHold prop_hold;
     bool shift_smooth{false};
-    // Research (hypothesis E), set by backends from
-    // VECTORXR_FRAMEGEN_FLOW_PRIOR: the filter keeps content with nothing to
-    // track on the head's predicted motion (kFrameGenFlagFlowPrior).
-    FrameGenFlowPrior flow_prior;
-    // Research, set by backends from VECTORXR_FRAMEGEN_FLOW_SHORTEST: the
-    // coarsest search's shortest acceptable displacement
-    // (kFrameGenFlagFlowShortest).
-    FrameGenFlowShortest flow_shortest;
+    // Hypothesis E: the filter keeps content with nothing to track on the
+    // head's predicted motion (kFrameGenFlagFlowPrior), on shader flow by
+    // default (kFrameGenFlowPriorDefault); backends set it from
+    // VECTORXR_FRAMEGEN_FLOW_PRIOR when that is set (off: "off" or "0").
+    FrameGenFlowPrior flow_prior{kFrameGenFlowPriorDefault};
+    // The coarsest search's acceptable displacement nearest its neighbours'
+    // (kFrameGenFlagFlowShortest), on by default (kFrameGenFlowShortestDefault);
+    // backends set it from VECTORXR_FRAMEGEN_FLOW_SHORTEST when that is set
+    // (off: "off").
+    FrameGenFlowShortest flow_shortest{kFrameGenFlowShortestDefault};
     // Research, set by backends from VECTORXR_FRAMEGEN_FLOW_EVIDENCE: the
     // final refine's costs carry how ambiguous each match is
     // (kFrameGenFlagFlowEvidence).

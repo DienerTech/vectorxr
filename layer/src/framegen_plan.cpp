@@ -962,10 +962,11 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     filter.outputs = {Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
     filter.constants.options[3] = plan.final_flow_level;
     filter.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
-    // Research (hypothesis E): content with nothing to track keeps the head's
-    // predicted motion unless its match is clearly better; the cover filter
-    // below is a copy and holds it too.
-    const bool prior = tuning.flow_prior.enabled && (!tuning.flow_prior.still || FrameGenWorldStill(request));
+    // Hypothesis E: content with nothing to track keeps the head's predicted
+    // motion unless its match is clearly better; the cover filter below is a
+    // copy and holds it too. The default prior leaves hardware flow alone.
+    const bool prior = tuning.flow_prior.enabled && !(tuning.flow_prior.shader_only && hardware) &&
+                       (!tuning.flow_prior.still || FrameGenWorldStill(request));
     if (prior) {
         filter.pass = FrameGenPass::kFilterPrior;
         filter.constants.options[1] |= kFrameGenFlagFlowPrior | (tuning.flow_prior.distant ? kFrameGenFlagFlowPriorFar : 0u);

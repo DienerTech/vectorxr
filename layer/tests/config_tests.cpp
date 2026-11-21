@@ -1720,6 +1720,10 @@ void TestFrameGenPlan() {
     request.newest.angle_up = request.previous.angle_up = 0.8f;
     request.newest.angle_down = request.previous.angle_down = -0.8f;
     depthxr::FrameGenTuning tuning;
+    // These describe the plan without the flow prior and the shortest search
+    // (both switches set off); the default plan, with them, has its own test.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
 
     const auto pyramid = depthxr::FrameGenPyramid({2001, 7});
     Expect(pyramid[1].width == 1001 && pyramid[1].height == 4 && pyramid[5].height == 1,
@@ -2204,7 +2208,7 @@ void TestFrameGenPlan() {
         Expect(same_constants(plain, plain) && filters_of(plain).size() == 1 &&
                    (filters_of(plain)[0].constants.options[1] &
                     (depthxr::kFrameGenFlagFlowPrior | depthxr::kFrameGenFlagFlowPriorFar)) == 0,
-               "The filter has no flow prior by default");
+               "The filter has no flow prior with the prior off");
         prior.flow_prior = depthxr::ParseFrameGenFlowPrior("off");
         Expect(same_constants(prior, plain), "An unknown flow prior value leaves every constant as it was");
         prior.flow_prior = set;
@@ -2341,6 +2345,72 @@ void TestFrameGenPlan() {
                "Extrapolating, the flow prior takes the world's motion the filter has");
         request.world_motion = false;
         request.depth = false;
+    }
+    // The default plan: the flow prior and the shortest search toward the
+    // neighbours' median on shader flow, as the switches' measured values set
+    // them; hardware flow's filter without the prior unless a switch asks.
+    {
+        const depthxr::FrameGenTuning defaults;
+        Expect(defaults.flow_prior.enabled && !defaults.flow_prior.distant && !defaults.flow_prior.still &&
+                   defaults.flow_prior.shader_only && defaults.flow_prior.share == 0.0f &&
+                   defaults.flow_prior.margin == 0.002f && defaults.flow_prior.per_pixel == 0.0005f &&
+                   defaults.flow_shortest.enabled && defaults.flow_shortest.tolerance == 0.012f &&
+                   defaults.flow_shortest.share == 0.0f && defaults.flow_shortest.toward_neighbours,
+               "The flow prior (sky:0,0.002,0.0005) and the shortest search (0.012,0,median) are on by default");
+        const auto plan_passes_constants = [&](const depthxr::FrameGenTuning& a, const depthxr::FrameGenTuning& b) {
+            const auto one = depthxr::BuildFrameGenViewPlan(request, a);
+            const auto other = depthxr::BuildFrameGenViewPlan(request, b);
+            bool same = one.dispatches.size() == other.dispatches.size();
+            for (std::size_t i = 0; same && i < one.dispatches.size(); ++i) {
+                same = one.dispatches[i].pass == other.dispatches[i].pass &&
+                       std::memcmp(&one.dispatches[i].constants, &other.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            return same;
+        };
+        depthxr::FrameGenTuning shader = defaults;
+        shader.hardware_flow = false;
+        depthxr::FrameGenTuning switched = shader;
+        switched.flow_prior = depthxr::ParseFrameGenFlowPrior("sky:0,0.002,0.0005");
+        switched.flow_shortest = depthxr::ParseFrameGenFlowShortest("0.012,0,median");
+        depthxr::FrameGenTuning off = shader;
+        off.flow_prior = depthxr::ParseFrameGenFlowPrior("off");
+        off.flow_shortest = depthxr::ParseFrameGenFlowShortest("off");
+        const auto plan = depthxr::BuildFrameGenViewPlan(request, shader);
+        std::size_t priors = 0, shortest = 0;
+        for (const auto& dispatch : plan.dispatches) {
+            if (dispatch.pass == FrameGenPass::kFilterPrior) {
+                priors += (dispatch.constants.options[1] & depthxr::kFrameGenFlagFlowPrior) != 0 &&
+                                  dispatch.constants.tuning[1] == 0.0f && dispatch.constants.tuning[2] == 0.002f &&
+                                  dispatch.constants.tuning[3] == 0.0005f
+                              ? 1u
+                              : 0u;
+            }
+            if (dispatch.pass == FrameGenPass::kSearch) {
+                shortest += (dispatch.constants.options[1] & depthxr::kFrameGenFlagFlowShortest) != 0 &&
+                                    dispatch.constants.tuning[1] == 0.012f && dispatch.constants.tuning[2] == 0.0f &&
+                                    dispatch.constants.tuning[3] == 1.0f
+                                ? 1u
+                                : 0u;
+            }
+        }
+        Expect(priors == 1 && shortest == 1 && plan_passes_constants(shader, switched) &&
+                   !plan_passes_constants(shader, off),
+               "Shader flow's default plan is the one the two switches' measured values give, and off is not it");
+        depthxr::FrameGenTuning hardware = defaults;
+        hardware.hardware_flow = true;
+        depthxr::FrameGenTuning hardware_off = hardware;
+        hardware_off.flow_prior = {};
+        hardware_off.flow_shortest = {};
+        depthxr::FrameGenTuning hardware_asked = hardware;
+        hardware_asked.flow_prior = depthxr::ParseFrameGenFlowPrior("sky:0,0.002,0.0005");
+        bool asked = false;
+        for (const auto& dispatch : depthxr::BuildFrameGenViewPlan(request, hardware_asked).dispatches) {
+            asked = asked || (dispatch.pass == FrameGenPass::kFilterPrior &&
+                              (dispatch.constants.options[1] & depthxr::kFrameGenFlagFlowPrior) != 0);
+        }
+        Expect(plan_passes_constants(hardware, hardware_off) && asked,
+               "Hardware flow's default plan has no prior (and no search); the switch set puts the prior on it");
     }
 
     // Depth: the trust scores, their surface vote, the stereo depth-scale
@@ -3380,6 +3450,9 @@ void TestFrameGenEngineEvidencePlan() {
     request.newest.angle_down = request.previous.angle_down = -0.9f;
     request.newest.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
     depthxr::FrameGenTuning tuning;
+    // The plan before the flow prior and the shortest search were on by default.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
     tuning.analyze_only = true;
     tuning.engine_mode = depthxr::FrameGenEngineMode::kObserve;
@@ -3517,6 +3590,9 @@ void TestFrameGenEngineAssistPlan() {
     request.engine_encoding.offset = {0.1f, -0.2f, 0.0f};
     request.engine_vectors = {800, 790};
     depthxr::FrameGenTuning tuning;
+    // The plan before the flow prior and the shortest search were on by default.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
     tuning.analyze_only = true;
     tuning.engine_mode = FrameGenEngineMode::kObserve;
@@ -3749,6 +3825,9 @@ void TestFrameGenEngineLeadPlan() {
     request.engine_motion = true;
     request.engine_vectors = {800, 790};
     depthxr::FrameGenTuning tuning;
+    // The plan before the flow prior and the shortest search were on by default.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
     tuning.analyze_only = true;
     tuning.engine_mode = FrameGenEngineMode::kLead;
@@ -5031,6 +5110,9 @@ void TestFrameGenWorldDeltaPlan() {
     request.game_newest = scene.game_newest[0];
     request.game_previous = scene.game_previous[0];
     depthxr::FrameGenTuning tuning;
+    // The plan before the flow prior and the shortest search were on by default.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
     tuning.analyze_only = true;
     const depthxr::FrameGenViewPlan plain = depthxr::BuildFrameGenViewPlan(request, tuning);

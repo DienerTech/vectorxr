@@ -802,17 +802,22 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (const std::optional<std::string> prop = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_PROP")) {
             prop_hold_ = ParseFrameGenPropHold(*prop);
         }
-        // Research (hypothesis E): the filter's prior for content with nothing
-        // to track (FrameGenTuning::flow_prior; VECTORXR_FRAMEGEN_FLOW_PRIOR
-        // sky, far, sky-still or far-still, optionally :<share>,<margin>,<per
-        // pixel>), from the research file too.
+        // Hypothesis E: the filter's prior for content with nothing to track
+        // (FrameGenTuning::flow_prior, on shader flow by default:
+        // kFrameGenFlowPriorDefault). VECTORXR_FRAMEGEN_FLOW_PRIOR, when set
+        // (the research file too), decides instead and on either flow: sky,
+        // far, sky-still or far-still, optionally :<share>,<margin>,<per
+        // pixel>; "off" or "0" is off, the plan before the default.
         if (const std::optional<std::string> prior = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_PRIOR")) {
             flow_prior_ = ParseFrameGenFlowPrior(*prior);
         }
-        // Research: the coarsest shader search takes the shortest displacement
-        // within a tolerance of its best match (FrameGenTuning::flow_shortest;
-        // VECTORXR_FRAMEGEN_FLOW_SHORTEST=1 or <tolerance>[,<share>]), from the
-        // research file too.
+        // The coarsest shader search takes the acceptable displacement nearest
+        // its neighbours' within a tolerance of its best match
+        // (FrameGenTuning::flow_shortest, on by default:
+        // kFrameGenFlowShortestDefault). VECTORXR_FRAMEGEN_FLOW_SHORTEST, when
+        // set (the research file too), decides instead: 1 or
+        // <tolerance>[,<share>[,median]]; "off" is off, the plan before the
+        // default ("0" is a tolerance of 0, not off).
         if (const std::optional<std::string> shortest = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_SHORTEST")) {
             flow_shortest_ = ParseFrameGenFlowShortest(*shortest);
         }
@@ -3222,11 +3227,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (prop_hold_.enabled) {
             effective_tuning.prop_hold = prop_hold_;
         }
-        if (flow_prior_.enabled) {
-            effective_tuning.flow_prior = flow_prior_;
+        if (flow_prior_) {
+            effective_tuning.flow_prior = *flow_prior_;
         }
-        if (flow_shortest_.enabled) {
-            effective_tuning.flow_shortest = flow_shortest_;
+        if (flow_shortest_) {
+            effective_tuning.flow_shortest = *flow_shortest_;
         }
         if (flow_evidence_.enabled) {
             effective_tuning.flow_evidence = flow_evidence_;
@@ -7165,8 +7170,8 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool shift_smooth_{false};                      // FrameGenTuning::shift_smooth forced (research)
     float sharpen_{0.0f};                           // FrameGenTuning::sharpen forced (research)
     FrameGenPropHold prop_hold_;                    // FrameGenTuning::prop_hold forced (research)
-    FrameGenFlowPrior flow_prior_;                  // FrameGenTuning::flow_prior forced (research)
-    FrameGenFlowShortest flow_shortest_;            // FrameGenTuning::flow_shortest forced (research)
+    std::optional<FrameGenFlowPrior> flow_prior_;       // FrameGenTuning::flow_prior forced, on or off (switch set)
+    std::optional<FrameGenFlowShortest> flow_shortest_; // FrameGenTuning::flow_shortest forced, on or off (switch set)
     FrameGenFlowEvidence flow_evidence_;            // FrameGenTuning::flow_evidence forced (research)
     std::uint32_t flow_reach_{0};                   // FrameGenTuning::flow_reach forced (research)
     std::array<FrameSlot, kFramesInFlight> slots_;

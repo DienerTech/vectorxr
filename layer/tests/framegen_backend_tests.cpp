@@ -465,6 +465,11 @@ int RunScenarios(Harness& harness) {
           error);
 
     FrameGenTuning tuning;
+    // These scenarios describe the shader flow without the flow prior and the
+    // shortest search (both switches set off): 2' scans the plain search, 1b
+    // and 2a compare the switches against it. 2a' checks the default.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     FrameGenExecuteResult result;
     auto run = [&](std::uint32_t index, bool synthesize, float yaw_newest, float yaw_previous) {
         const std::vector<FrameGenViewSubmission> views{
@@ -833,6 +838,25 @@ int RunScenarios(Harness& harness) {
                   harness.name + " flow prior: within the head's parallax the background keeps its residual flow (" +
                       std::to_string(moved_after.first) + " of " + std::to_string(before.first) + " cells)");
         }
+    }
+    // 2a'. The default flow (kFrameGenFlowPriorDefault with
+    // kFrameGenFlowShortestDefault): the background keeps no residual flow and
+    // the square is still interpolated far better than repeating the newest
+    // frame.
+    {
+        tuning.flow_prior = kFrameGenFlowPriorDefault;
+        tuning.flow_shortest = kFrameGenFlowShortestDefault;
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        const Pixels defaulted = run(1, true, 0, 0);
+        tuning.flow_prior = {};
+        tuning.flow_shortest = {};
+        const double default_error = MeanError(defaulted, truth_mid, 96, 96, 256, 256);
+        std::cout << harness.name << " default flow: error " << default_error << " vs hold " << hold_error << " (plain "
+                  << interp_error << ")\n";
+        Check(default_error < 0.3 * hold_error,
+              harness.name + " default flow: interpolation is not better than repeating the newest frame");
+        Check(MeanError(defaulted, truth_mid, 0, 0, 64, 64) < 0.01, harness.name + " default flow: static background was disturbed");
     }
 
     // 2b. A 3x multiplier: one flow field feeds two generated frames.
