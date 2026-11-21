@@ -9415,7 +9415,15 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", gpuStartMs=" + MedianAndMax(gpu_start_ms_) + ", gpuDoneMs=" + MedianAndMax(gpu_done_ms_) +
             ", captureDoneMs=" + MedianAndMax(capture_done_ms_) + ", analysisMs=" + MedianAndMax(analysis_ms_) +
             ", measureLagMs=" + MedianAndMax(measure_lag_ms_) +
-            ", ofaMs=" + MedianAndMax(ofa_ms_) + ", gpuWaits=" + std::to_string(delta(&Totals::gpu_waits)) + "/" +
+            ", ofaMs=" + MedianAndMax(ofa_ms_) +
+            // ofaLate (when any timed): hardware analyses late for their first
+            // in-between frame / of them, of frames captured in time (Auto's
+            // fallback counts these) / timed.
+            (delta(&Totals::hardware_timed) ? ", ofaLate=" + std::to_string(delta(&Totals::hardware_late)) + "/" +
+                                                  std::to_string(delta(&Totals::hardware_late_own)) + "/" +
+                                                  std::to_string(delta(&Totals::hardware_timed))
+                                            : std::string()) +
+            ", gpuWaits=" + std::to_string(delta(&Totals::gpu_waits)) + "/" +
             (gpu_wait_ms_.empty() ? std::string("-") : Number(*Median(gpu_wait_ms_), 1)) + "/" +
             std::to_string(delta(&Totals::gpu_wait_timeouts)) +
             (gpu_gate_enabled_ && gpu_gate_armed_ ? "" : gpu_gate_enabled_ ? " (not armed)" : " (off)") +
