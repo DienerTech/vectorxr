@@ -202,6 +202,12 @@ cbuffer FrameGenFillBuffer : register(b1) {
 // from 2 pixels (sub-pixel motion shows), instead of by its share of the
 // view.
 #define FG_FLAG_FLOW_FINE 8388608u
+// Research (kFrameGenFlagFlowShortest), FG_PASS_SEARCH: the shortest
+// displacement within a tolerance of the best match (see ShortestScan).
+#define FG_FLAG_FLOW_SHORTEST 268435456u
+// Research (kFrameGenFlagFlowEvidence), the final level's FG_PASS_REFINE: a
+// cell's cost carries how ambiguous its match is (see FlowAmbiguity).
+#define FG_FLAG_FLOW_EVIDENCE 536870912u
 // Research (kFrameGenFlagPropHold, set on still-world frames with depth): the
 // plan runs synthesis as the passes built with FG_SYNTH_PROP then, so the
 // flag itself is not read; see Synthesize.
@@ -485,12 +491,25 @@ float MatchTerm(float current, float previous) {
 float MotionTerm(int2 d, int2 extent) {
     return FG_MOTION_PENALTY * length(float2(d) / float2(extent));
 }
+
+// Research (FG_FLAG_FLOW_EVIDENCE): how little a cell's match says, 0 (a
+// distinct minimum) to 1 (none), from how much the costs one texel either way
+// rise above it (`center`): under tuning.w of luma on average, the vector
+// is as good as its neighbours, and on flat content as good as any. A low
+// cost alone read as full confidence there, and synthesis carried what lay
+// tens of pixels along a stray vector into the flat region.
+float FlowAmbiguity(float center, float left, float right, float up, float down) {
+    const float sharpness = 0.25 * (left + right + up + down) - center;
+    return saturate(1.0 - sharpness / max(g.tuning.w, 1e-6));
+}
 #endif
 
 #if defined(FG_PASS_SEARCH)
 // The previous frame's luma around one thread group's cells, as far as any
 // candidate patch reaches: every candidate of every cell reads from here.
-#define FG_SEARCH_MAX_RADIUS 6
+// options.x is the radius (kFrameGenSearchRadius, 6; research,
+// FrameGenTuning::flow_reach, up to this).
+#define FG_SEARCH_MAX_RADIUS 12
 #define FG_SEARCH_APRON (FG_SEARCH_MAX_RADIUS + FG_PATCH_RADIUS)
 #define FG_SEARCH_TILE (8 + 2 * FG_SEARCH_APRON)
 #define FG_PATCH_SIDE (2 * FG_PATCH_RADIUS + 1)
@@ -535,6 +554,68 @@ float InsidePatchCost(Patch patch, int2 corner, int2 d, int2 extent, float count
         sum += MatchTerm(patch.luma[i], g_tile[t.y * FG_SEARCH_TILE + t.x]);
     }
     return sum / max(count, 1.0) + MotionTerm(d, extent);
+}
+
+// Research (FG_FLAG_FLOW_SHORTEST): of the displacements that match within
+// tuning.y of luma (plus tuning.z of the cost) of the best one, the shortest,
+// the cheaper of equal lengths. The pair has the head's rotation taken out
+// already (FG_PASS_LUMA), so most content moves little; blurred 32 times, sky,
+// haze and grass match some displacement up to the search's reach about as
+// well as their own or better (DCS replays: a scene whose content moved 12 px
+// at the hardware's p95 had the search's at 201 px, aliases 170 to 220 px long
+// costing 0.004 where the real 10 px motion cost 0.025, and the refine levels
+// keep a parent's vector unless one near it matches better). Textured content
+// that really moves matches clearly better only near its own motion, so the
+// shortest within the tolerance is still its own.
+groupshared float g_short_length[FG_SEARCH_SLICES * 64];
+
+// The shortest acceptable displacement of the cell's slice of the scan:
+// FG_FLAG_FLOW_SHORTEST's second scan, from the lowest cost the first found.
+void ShortestScan(int2 cell, int2 origin, int2 extent, int slice, int radius, float lowest, out float shortest,
+                  out float shortest_cost, out int shortest_index) {
+    Patch patch;
+    float count = 0.0;
+    [unroll]
+    for (int i = 0; i < FG_PATCH_SIDE * FG_PATCH_SIDE; ++i) {
+        const int2 q = cell + int2(i % FG_PATCH_SIDE, i / FG_PATCH_SIDE) - FG_PATCH_RADIUS;
+        patch.valid[i] = all(q >= 0) && all(q < extent);
+        patch.luma[i] = patch.valid[i] ? g_luma_current.Load(int3(q, 0)).r : 0.0;
+        count += patch.valid[i] ? 1.0 : 0.0;
+    }
+    const int2 corner = cell - origin - FG_PATCH_RADIUS;
+    const bool inside = all(cell >= FG_PATCH_RADIUS) && all(cell + FG_PATCH_RADIUS < extent);
+    const float allowed = lowest + g.tuning.y + g.tuning.z * lowest;
+    const int side = 2 * radius + 1;
+    shortest = 1e30;
+    shortest_cost = 1e30;
+    shortest_index = -2; // none in this slice
+    if (slice == 0) {
+        // No motion, ahead of the scan as the first scan has it.
+        const float zero = inside ? InsidePatchCost(patch, corner, int2(0, 0), extent, count)
+                                  : PatchCost(patch, corner, int2(0, 0), extent);
+        if (zero <= allowed) {
+            shortest = 0.0;
+            shortest_cost = zero;
+            shortest_index = -1;
+        }
+    }
+    int2 d = int2(uint(slice) % uint(side), uint(slice) / uint(side)) - radius;
+    [loop]
+    for (int j = slice; j < side * side; j += FG_SEARCH_SLICES) {
+        const float cost = inside ? InsidePatchCost(patch, corner, d, extent, count) : PatchCost(patch, corner, d, extent);
+        const float length2 = float(dot(d, d));
+        if (cost <= allowed && (length2 < shortest || (length2 == shortest && cost < shortest_cost))) {
+            shortest = length2;
+            shortest_cost = cost;
+            shortest_index = j;
+        }
+        d.x += FG_SEARCH_SLICES;
+        [loop]
+        while (d.x > radius) {
+            d.x -= side;
+            ++d.y;
+        }
+    }
 }
 
 // Exhaustive search on the coarsest level, in scan order (rows, then
@@ -611,6 +692,45 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thre
     g_best_cost[slice * 64 + slot] = best_cost;
     g_best_index[slice * 64 + slot] = best_index;
     GroupMemoryBarrierWithGroupSync();
+    [branch]
+    if ((g.options.y & FG_FLAG_FLOW_SHORTEST) != 0u) {
+        // Research: a second scan for the shortest displacement within the
+        // tolerance of the lowest cost of all four slices (ShortestScan).
+        float lowest = g_best_cost[slot];
+        [unroll]
+        for (int s = 1; s < FG_SEARCH_SLICES; ++s) {
+            lowest = min(lowest, g_best_cost[s * 64 + slot]);
+        }
+        GroupMemoryBarrierWithGroupSync();
+        float shortest = 1e30;
+        float shortest_cost = 1e30;
+        int shortest_index = -2;
+        if (active) {
+            ShortestScan(cell, origin, extent, slice, radius, lowest, shortest, shortest_cost, shortest_index);
+        }
+        g_short_length[slice * 64 + slot] = shortest;
+        g_best_cost[slice * 64 + slot] = shortest_cost;
+        g_best_index[slice * 64 + slot] = shortest_index;
+        GroupMemoryBarrierWithGroupSync();
+        if (!active || slice != 0) {
+            return;
+        }
+        [unroll]
+        for (int r = 1; r < FG_SEARCH_SLICES; ++r) {
+            const float length2 = g_short_length[r * 64 + slot];
+            const float cost = g_best_cost[r * 64 + slot];
+            if (length2 < shortest || (length2 == shortest && cost < shortest_cost)) {
+                shortest = length2;
+                shortest_cost = cost;
+                shortest_index = g_best_index[r * 64 + slot];
+            }
+        }
+        // Nothing within the tolerance (NaN costs): no motion.
+        const int2 nearest = shortest_index < 0 ? int2(0, 0)
+                                                : int2(uint(shortest_index) % uint(side), uint(shortest_index) / uint(side)) - radius;
+        g_flow[id.xy] = float4(float2(nearest) / float2(extent), shortest_index >= -1 ? shortest_cost : lowest, 1.0);
+        return;
+    }
     if (!active || slice != 0) {
         return;
     }
@@ -795,9 +915,30 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         Consider(block, int2(round(g_temporal.SampleLevel(g_linear, uv, 0.0).xy * g.tuning.x * match)), best, best_cost);
     }
     StepSearch(block, scale, best, best_cost);
-    const float2 sub = SubTexelAt(block, best, best_cost);
+    float2 sub;
+    float ambiguity = 0.0;
+    [branch]
+    if ((g.options.y & FG_FLAG_FLOW_EVIDENCE) != 0u) {
+        // Research: the costs around the minimum also say how distinct it is.
+        const float left = BlockCost(block, best - int2(1, 0));
+        const float right = BlockCost(block, best + int2(1, 0));
+        const float up = BlockCost(block, best - int2(0, 1));
+        const float down = BlockCost(block, best + int2(0, 1));
+        sub = float2(SubTexel(left, best_cost, right), SubTexel(up, best_cost, down));
+        ambiguity = FlowAmbiguity(best_cost, left, right, up, down);
+    } else {
+        sub = SubTexelAt(block, best, best_cost);
+    }
+    const float2 flow = (float2(best) + sub) / match;
+    float cost = best_cost;
+    // Research: an ambiguous cell's cost carries its ambiguity (see
+    // FlowAmbiguity), so the filter's median outvotes it and synthesis trusts
+    // its vector less. options.x: the cost a fully ambiguous cell adds.
+    if ((g.options.y & FG_FLAG_FLOW_EVIDENCE) != 0u) {
+        cost += ambiguity * asfloat(g.options.x);
+    }
     // w: the cost of no motion (FG_PASS_FILTER's rigid test).
-    g_flow[id.xy] = float4((float2(best) + sub) / match, best_cost, ZeroCost(block));
+    g_flow[id.xy] = float4(flow, cost, ZeroCost(block));
 }
 #endif
 

@@ -2052,6 +2052,106 @@ void TestFrameGenPlan() {
         Expect(same, "Bilinear resampling leaves every constant as it was");
         request.depth = false;
     }
+    // The flow research switches (shortest, evidence, reach): each changes its
+    // own pass's constants only; off, or with a value it does not know, every
+    // constant stays as it was.
+    {
+        const depthxr::FrameGenFlowShortest defaults = depthxr::ParseFrameGenFlowShortest("On");
+        const depthxr::FrameGenFlowShortest set = depthxr::ParseFrameGenFlowShortest("0.003,0.25");
+        const depthxr::FrameGenFlowShortest partial = depthxr::ParseFrameGenFlowShortest("0.004,x");
+        Expect(defaults.enabled && defaults.tolerance == 0.002f && defaults.share == 0.0f &&
+                   depthxr::ParseFrameGenFlowShortest("1").enabled && set.enabled && set.tolerance == 0.003f &&
+                   set.share == 0.25f && partial.enabled && partial.tolerance == 0.004f && partial.share == 0.0f,
+               "VECTORXR_FRAMEGEN_FLOW_SHORTEST takes 1, on or <tolerance>[,<share>]");
+        Expect(depthxr::ParseFrameGenFlowShortest("0").enabled && !depthxr::ParseFrameGenFlowShortest("").enabled &&
+                   !depthxr::ParseFrameGenFlowShortest("off").enabled && !depthxr::ParseFrameGenFlowShortest("2").enabled &&
+                   !depthxr::ParseFrameGenFlowShortest("-1").enabled,
+               "Any other value leaves the shortest search off (0 is a tolerance of 0)");
+        depthxr::FrameGenTuning plain = tuning;
+        plain.hardware_flow = false;
+        depthxr::FrameGenTuning with = plain;
+        with.flow_shortest = set;
+        const auto one = depthxr::BuildFrameGenViewPlan(request, with);
+        const auto other = depthxr::BuildFrameGenViewPlan(request, plain);
+        bool same = one.dispatches.size() == other.dispatches.size();
+        std::size_t searches = 0;
+        for (std::size_t i = 0; same && i < one.dispatches.size(); ++i) {
+            const depthxr::FrameGenDispatch& a = one.dispatches[i];
+            const depthxr::FrameGenDispatch& b = other.dispatches[i];
+            same = a.pass == b.pass;
+            if (a.pass == FrameGenPass::kSearch) {
+                ++searches;
+                depthxr::FrameGenConstants expected = b.constants;
+                expected.options[1] |= depthxr::kFrameGenFlagFlowShortest;
+                expected.tuning[1] = 0.003f;
+                expected.tuning[2] = 0.25f;
+                same = same && (b.constants.options[1] & depthxr::kFrameGenFlagFlowShortest) == 0 &&
+                       std::memcmp(&a.constants, &expected, sizeof(expected)) == 0;
+            } else {
+                same = same && std::memcmp(&a.constants, &b.constants, sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+        }
+        Expect(same && searches == 1, "The shortest search flags the search, hands it its strengths and changes nothing else");
+        with.flow_shortest = depthxr::ParseFrameGenFlowShortest("maybe");
+        const auto unknown = depthxr::BuildFrameGenViewPlan(request, with);
+        bool untouched = unknown.dispatches.size() == other.dispatches.size();
+        for (std::size_t i = 0; untouched && i < unknown.dispatches.size(); ++i) {
+            untouched = std::memcmp(&unknown.dispatches[i].constants, &other.dispatches[i].constants,
+                                    sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        Expect(untouched, "An unknown shortest search value leaves every constant as it was");
+
+        // The flow evidence: the final level's refine alone, its sharpness in
+        // tuning.w and the cost it adds as options.x's bits.
+        const depthxr::FrameGenFlowEvidence evidence_defaults = depthxr::ParseFrameGenFlowEvidence("ON");
+        const depthxr::FrameGenFlowEvidence evidence_set = depthxr::ParseFrameGenFlowEvidence("0.006,0.2");
+        Expect(evidence_defaults.enabled && evidence_defaults.sharpness == 0.004f && evidence_defaults.cost == 0.1f &&
+                   evidence_set.enabled && evidence_set.sharpness == 0.006f && evidence_set.cost == 0.2f &&
+                   depthxr::ParseFrameGenFlowEvidence("0.01,x").cost == 0.1f &&
+                   !depthxr::ParseFrameGenFlowEvidence("0").enabled && !depthxr::ParseFrameGenFlowEvidence("off").enabled &&
+                   !depthxr::ParseFrameGenFlowEvidence("").enabled,
+               "VECTORXR_FRAMEGEN_FLOW_EVIDENCE takes 1, on or <sharpness>[,<cost>]");
+        depthxr::FrameGenTuning evident = plain;
+        evident.flow_evidence = evidence_set;
+        const auto with_evidence = depthxr::BuildFrameGenViewPlan(request, evident);
+        bool evidence_ok = with_evidence.dispatches.size() == other.dispatches.size();
+        std::size_t evidence_passes = 0;
+        for (std::size_t i = 0; evidence_ok && i < with_evidence.dispatches.size(); ++i) {
+            const depthxr::FrameGenDispatch& a = with_evidence.dispatches[i];
+            const depthxr::FrameGenDispatch& b = other.dispatches[i];
+            if ((a.constants.options[1] & depthxr::kFrameGenFlagFlowEvidence) != 0) {
+                ++evidence_passes;
+                float cost = 0.0f;
+                std::memcpy(&cost, &a.constants.options[0], sizeof(cost));
+                const depthxr::FrameGenExtent final_level = with_evidence.levels[with_evidence.final_flow_level];
+                evidence_ok = a.pass == FrameGenPass::kRefine && a.width == final_level.width && cost == 0.2f &&
+                              a.constants.tuning[3] == 0.006f &&
+                              a.constants.options[1] == (b.constants.options[1] | depthxr::kFrameGenFlagFlowEvidence);
+            } else {
+                evidence_ok = std::memcmp(&a.constants, &b.constants, sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+        }
+        Expect(evidence_ok && evidence_passes == 1,
+               "The flow evidence flags the final refine only and changes nothing else");
+
+        // The flow reach: the search's radius alone.
+        Expect(depthxr::ParseFrameGenFlowReach("10") == 10 && depthxr::ParseFrameGenFlowReach("12") == 12 &&
+                   depthxr::ParseFrameGenFlowReach("13") == 0 && depthxr::ParseFrameGenFlowReach("0") == 0 &&
+                   depthxr::ParseFrameGenFlowReach("x") == 0 && depthxr::ParseFrameGenFlowReach("") == 0,
+               "VECTORXR_FRAMEGEN_FLOW_REACH takes a radius from 1 to 12");
+        depthxr::FrameGenTuning reaching = plain;
+        reaching.flow_reach = 10;
+        const auto with_reach = depthxr::BuildFrameGenViewPlan(request, reaching);
+        bool reach_ok = with_reach.dispatches.size() == other.dispatches.size();
+        for (std::size_t i = 0; reach_ok && i < with_reach.dispatches.size(); ++i) {
+            depthxr::FrameGenConstants expected = other.dispatches[i].constants;
+            if (with_reach.dispatches[i].pass == FrameGenPass::kSearch) {
+                expected.options[0] = 10;
+            }
+            reach_ok = std::memcmp(&with_reach.dispatches[i].constants, &expected, sizeof(expected)) == 0;
+        }
+        Expect(reach_ok, "The flow reach sets the search's radius and nothing else");
+    }
     // The flow prior (research, hypothesis E): the filter alone takes its
     // flag and strengths, Interpolate's cover filter too; off, or with a
     // value it does not know, every constant stays as it was.

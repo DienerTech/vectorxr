@@ -809,6 +809,24 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (const std::optional<std::string> prior = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_PRIOR")) {
             flow_prior_ = ParseFrameGenFlowPrior(*prior);
         }
+        // Research: the coarsest shader search takes the shortest displacement
+        // within a tolerance of its best match (FrameGenTuning::flow_shortest;
+        // VECTORXR_FRAMEGEN_FLOW_SHORTEST=1 or <tolerance>[,<share>]), from the
+        // research file too.
+        if (const std::optional<std::string> shortest = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_SHORTEST")) {
+            flow_shortest_ = ParseFrameGenFlowShortest(*shortest);
+        }
+        // Research: confidence from how distinct each match is
+        // (FrameGenTuning::flow_evidence; VECTORXR_FRAMEGEN_FLOW_EVIDENCE=1 or
+        // <sharpness>[,<cost>]), from the research file too.
+        if (const std::optional<std::string> evidence = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_EVIDENCE")) {
+            flow_evidence_ = ParseFrameGenFlowEvidence(*evidence);
+        }
+        // Research: the coarsest search's radius (FrameGenTuning::flow_reach;
+        // VECTORXR_FRAMEGEN_FLOW_REACH=<1 to 12>), from the research file too.
+        if (const std::optional<std::string> reach = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_REACH")) {
+            flow_reach_ = ParseFrameGenFlowReach(*reach);
+        }
         // Interpolation's occlusion handling (VECTORXR_FRAMEGEN_OCCLUSION=0:
         // off) and, for research, its cross-fade fallback
         // (VECTORXR_FRAMEGEN_CROSSFADE=1).
@@ -3206,6 +3224,15 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         if (flow_prior_.enabled) {
             effective_tuning.flow_prior = flow_prior_;
+        }
+        if (flow_shortest_.enabled) {
+            effective_tuning.flow_shortest = flow_shortest_;
+        }
+        if (flow_evidence_.enabled) {
+            effective_tuning.flow_evidence = flow_evidence_;
+        }
+        if (flow_reach_ != 0) {
+            effective_tuning.flow_reach = flow_reach_;
         }
         effective_tuning.hardware_flow = tuning.hardware_flow && HardwareFlowReady();
         // Engine motion vectors (stage 3): their evidence is taken with the
@@ -7139,6 +7166,9 @@ class D3D12FrameGen final : public FrameGenGpu {
     float sharpen_{0.0f};                           // FrameGenTuning::sharpen forced (research)
     FrameGenPropHold prop_hold_;                    // FrameGenTuning::prop_hold forced (research)
     FrameGenFlowPrior flow_prior_;                  // FrameGenTuning::flow_prior forced (research)
+    FrameGenFlowShortest flow_shortest_;            // FrameGenTuning::flow_shortest forced (research)
+    FrameGenFlowEvidence flow_evidence_;            // FrameGenTuning::flow_evidence forced (research)
+    std::uint32_t flow_reach_{0};                   // FrameGenTuning::flow_reach forced (research)
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
     std::array<CaptureSlot, kCaptureSlots> capture_slots_; // views x frames in flight, color and depth

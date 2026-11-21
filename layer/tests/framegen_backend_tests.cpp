@@ -618,6 +618,124 @@ int RunScenarios(Harness& harness) {
             }
         }
     }
+    // 1b. The flow research switches (FrameGenTuning::flow_shortest,
+    // flow_reach): with them the coarsest level's search takes, per cell, the
+    // shortest displacement within the radius whose cost lies within the
+    // tolerance of the lowest (the cheaper of equal lengths), as a scan on the
+    // CPU finds it; off again, the frame is as it was. With flow_evidence the
+    // frame differs where the square's texture is ambiguous and is as it was
+    // with the switch parsed off.
+    {
+        const auto shortest_cells = [&](float yaw, std::size_t& compared, std::size_t& moved) {
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            run(1, true, yaw, 0);
+            std::vector<float> current, previous, flow;
+            FrameGenExtent extent{}, previous_extent{}, cells{};
+            std::uint32_t channels = 0, previous_channels = 0, flow_channels = 0;
+            if (!gpu->ReadTexture(0, {FrameGenTextureKind::kLumaNewest, kFrameGenPyramidLevels}, current, extent, channels) ||
+                !gpu->ReadTexture(0, {FrameGenTextureKind::kLumaPrevious, kFrameGenPyramidLevels}, previous,
+                                  previous_extent, previous_channels) ||
+                !gpu->ReadTexture(0, {FrameGenTextureKind::kFlow, kFrameGenPyramidLevels}, flow, cells, flow_channels)) {
+                return false;
+            }
+            const int w = static_cast<int>(extent.width), h = static_cast<int>(extent.height);
+            const int radius = static_cast<int>(tuning.flow_reach);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const auto cost = [&](int dx, int dy) {
+                        float sum = 0.0f, count = 0.0f;
+                        for (int i = 0; i < 25; ++i) {
+                            const int qx = x + i % 5 - 2, qy = y + i / 5 - 2;
+                            if (qx >= 0 && qy >= 0 && qx < w && qy < h) {
+                                const int px = qx - dx, py = qy - dy;
+                                const float p = px < 0 || py < 0 || px >= w || py >= h
+                                                    ? -1.0f
+                                                    : previous[static_cast<std::size_t>(py) * w + px];
+                                sum += p < 0.0f ? 0.25f : std::abs(current[static_cast<std::size_t>(qy) * w + qx] - p);
+                                count += 1.0f;
+                            }
+                        }
+                        return sum / std::max(count, 1.0f) +
+                               0.05f * std::hypot(static_cast<float>(dx) / w, static_cast<float>(dy) / h);
+                    };
+                    float lowest = cost(0, 0);
+                    for (int dy = -radius; dy <= radius; ++dy) {
+                        for (int dx = -radius; dx <= radius; ++dx) {
+                            lowest = std::min(lowest, cost(dx, dy));
+                        }
+                    }
+                    const float allowed = lowest + tuning.flow_shortest.tolerance + tuning.flow_shortest.share * lowest;
+                    int best_x = 0, best_y = 0, best_length = std::numeric_limits<int>::max();
+                    float best_cost = 0.0f;
+                    bool tie = false;
+                    for (int dy = -radius; dy <= radius; ++dy) {
+                        for (int dx = -radius; dx <= radius; ++dx) {
+                            const float c = cost(dx, dy);
+                            // Within rounding of the tolerance either way, or of
+                            // an equal length's cost: the GPU may pick either.
+                            if (std::abs(c - allowed) <= 1e-5f) tie = true;
+                            if (c > allowed) continue;
+                            const int length = dx * dx + dy * dy;
+                            if (length < best_length || (length == best_length && c < best_cost)) {
+                                tie = tie || (length == best_length && best_cost - c <= 1e-5f);
+                                best_length = length;
+                                best_cost = c;
+                                best_x = dx;
+                                best_y = dy;
+                            } else if (length == best_length && c - best_cost <= 1e-5f) {
+                                tie = true;
+                            }
+                        }
+                    }
+                    if (tie) {
+                        continue;
+                    }
+                    const float* v = &flow[(static_cast<std::size_t>(y) * w + x) * 4];
+                    const int gx = static_cast<int>(std::lround(v[0] * w)), gy = static_cast<int>(std::lround(v[1] * h));
+                    Check(gx == best_x && gy == best_y && std::abs(v[2] - best_cost) <= 1e-3f * best_cost + 1e-6f,
+                          harness.name + " shortest search: cell " + std::to_string(x) + "," + std::to_string(y) +
+                              " found " + std::to_string(gx) + "," + std::to_string(gy) + ", the scan " +
+                              std::to_string(best_x) + "," + std::to_string(best_y));
+                    ++compared;
+                    moved += best_x != 0 || best_y != 0 ? 1 : 0;
+                }
+            }
+            return true;
+        };
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        const Pixels plain = run(1, true, 0.08f, 0);
+        for (const std::uint32_t reach : {kFrameGenSearchRadius, 9u}) {
+            tuning.flow_shortest = ParseFrameGenFlowShortest("0.004");
+            tuning.flow_reach = reach;
+            for (const float yaw : {0.0f, 0.08f}) {
+                std::size_t compared = 0, moved = 0;
+                const bool readable = shortest_cells(yaw, compared, moved);
+                Check(harness.name != "D3D12" || readable, harness.name + " shortest search: the coarsest level reads back");
+                if (readable) {
+                    std::cout << harness.name << " shortest search, radius " << reach << ", yaw " << yaw << ": " << compared
+                              << " cells as the scan, " << moved << " of them moved\n";
+                    Check(compared >= 100, harness.name + " shortest search: most cells compared");
+                }
+            }
+        }
+        tuning.flow_shortest = ParseFrameGenFlowShortest("off");
+        tuning.flow_reach = 0;
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        Check(run(1, true, 0.08f, 0) == plain, harness.name + " shortest search: off, the frame is as it was");
+        tuning.flow_evidence = ParseFrameGenFlowEvidence("0.004,0.3");
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        const Pixels evident = run(1, true, 0.08f, 0);
+        tuning.flow_evidence = ParseFrameGenFlowEvidence("off");
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        Check(run(1, true, 0.08f, 0) == plain, harness.name + " flow evidence: off, the frame is as it was");
+        std::cout << harness.name << " flow evidence: the frame differs from the plain one by "
+                  << MeanError(evident, plain, 0, 0, kSize, kSize) << '\n';
+    }
     // 2a. The flow prior (research, FrameGenTuning::flow_prior; without depth
     // it holds every cell): the background, which no motion matches as well
     // as any vector, keeps no residual flow at all, while the square, whose
@@ -8909,6 +9027,11 @@ int RunReplay(Harness& harness) {
                     {"keys", {FrameGenTextureKind::kShiftKeys, 0}},
                     {"filtered", {FrameGenTextureKind::kFilteredNewest, 0}},
                     {"search", {FrameGenTextureKind::kFlow, kFrameGenPyramidLevels}},
+                    // Every refine level's flow too (the levels a plan does not
+                    // reach are not written): where stray vectors start.
+                    {"flow4", {FrameGenTextureKind::kFlow, 4}},
+                    {"flow3", {FrameGenTextureKind::kFlow, 3}},
+                    {"flow2", {FrameGenTextureKind::kFlow, 2}},
                     {"world", {FrameGenTextureKind::kWorldParams, 0}},
                     {"scalevotes", {FrameGenTextureKind::kDepthScaleVotes, 0}},
                     {"scaleraw", {FrameGenTextureKind::kDepthScaleRaw, 0}},
