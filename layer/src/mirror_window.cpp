@@ -20,6 +20,13 @@ constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
 constexpr DWORD kFillStyle = WS_POPUP;
 // Never activated; in the taskbar and in window lists all the same.
 constexpr DWORD kExStyle = WS_EX_NOACTIVATE | WS_EX_APPWINDOW;
+// A window that fills a monitor lets the mouse through to whatever is under
+// it: it covers the whole monitor above every other window, and on the
+// game's monitor it would otherwise take every click meant for the game.
+// Windows passes the mouse through a window of another thread only where it
+// is layered as well as transparent (WM_NCHITTEST's HTTRANSPARENT reaches
+// windows of the same thread only).
+constexpr DWORD kClickThroughExStyle = WS_EX_LAYERED | WS_EX_TRANSPARENT;
 constexpr int kMinPictureWidth = 160;
 constexpr wchar_t kEnDash = 0x2013;
 
@@ -35,6 +42,18 @@ SIZE FrameAround(int width, int height) {
     RECT rect{0, 0, width, height};
     AdjustWindowRectEx(&rect, kStyle, FALSE, kExStyle);
     return SIZE{rect.right - rect.left, rect.bottom - rect.top};
+}
+
+// A plain window is left as it was: it is moved, resized and closed with the
+// mouse.
+void SetClickThrough(HWND window, bool on) {
+    const LONG_PTR ex_style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    const LONG_PTR through = static_cast<LONG_PTR>(kClickThroughExStyle);
+    const LONG_PTR wanted = on ? (ex_style | through) : (ex_style & ~through);
+    if (wanted == ex_style) return;
+    SetWindowLongPtrW(window, GWL_EXSTYLE, wanted);
+    // Opaque: a layered window shows nothing until it is told how it blends.
+    if (on) SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA);
 }
 
 std::wstring Widen(const std::string& text) {
@@ -318,12 +337,14 @@ void MirrorWindow::Apply(void* handle) {
             }
             SetWindowLongPtrW(window, GWL_STYLE, static_cast<LONG_PTR>(kFillStyle) | visible);
         }
+        SetClickThrough(window, true);
         filling_.store(true, std::memory_order_release);
         // Above the taskbar of its monitor, without being activated.
         SetWindowPos(window, HWND_TOPMOST, monitor->x, monitor->y, monitor->width, monitor->height,
                      SWP_NOACTIVATE | SWP_FRAMECHANGED);
     } else {
         const SIZE frame = FrameAround(shape_.picture_width, shape_.picture_height);
+        SetClickThrough(window, false);
         if (was_filling) {
             SetWindowLongPtrW(window, GWL_STYLE, static_cast<LONG_PTR>(kStyle) | visible);
             filling_.store(false, std::memory_order_release);

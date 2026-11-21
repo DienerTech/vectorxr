@@ -169,7 +169,7 @@
       },
       "fillMonitor": {
         "label": "Fill a monitor",
-        "help": "The picture fills the chosen monitor, borderless, instead of sitting in a resizable window, and takes the shape of that monitor. It still never takes keyboard focus or input from the game. If that monitor is not connected, the mirror opens as a normal window.",
+        "help": "The picture fills the chosen monitor, borderless, instead of sitting in a resizable window, and takes the shape of that monitor. It still never takes keyboard focus or input from the game. Mouse clicks pass through the picture to the game underneath. If that monitor is not connected, the mirror opens as a normal window.",
         "sizeUnused": "Aspect ratio and picture width are not used while the picture fills a monitor."
       },
       "monitor": {

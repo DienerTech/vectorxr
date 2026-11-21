@@ -720,6 +720,8 @@ void TestWindow() {
                !(style & WS_MAXIMIZEBOX),
            "The window is never activated, is listed like an application's and can be resized");
     Expect(SendMessageW(handle, WM_MOUSEACTIVATE, 0, 0) == MA_NOACTIVATE, "A click does not activate it");
+    Expect(!(ex_style & (WS_EX_LAYERED | WS_EX_TRANSPARENT)),
+           "A plain window takes the mouse: it is moved, resized and closed with it");
     Expect(GetForegroundWindow() == foreground, "Making the window leaves the foreground window where it was");
 
     // Closing it hides it; showing brings it back; the window is the same.
@@ -822,6 +824,13 @@ void TestWindow() {
                "It covers the monitor without a border and is still never activated");
         Expect(SendMessageW(handle, WM_MOUSEACTIVATE, 0, 0) == MA_NOACTIVATE && GetForegroundWindow() == foreground,
                "Filling a monitor takes neither a click's activation nor the foreground");
+        const LONG_PTR through = WS_EX_LAYERED | WS_EX_TRANSPARENT;
+        BYTE alpha = 0;
+        DWORD blend = 0;
+        Expect((GetWindowLongPtrW(handle, GWL_EXSTYLE) & through) == through &&
+                   GetLayeredWindowAttributes(handle, nullptr, &alpha, &blend) && alpha == 255 && blend == LWA_ALPHA,
+               "A window that fills a monitor lets the mouse through to what is under it, and is opaque");
+        Expect(GetWindowLongPtrW(handle, GWL_EXSTYLE) & WS_EX_TOPMOST, "It stays above the other windows");
         SendMessageW(handle, WM_EXITSIZEMOVE, 0, 0);
         {
             std::scoped_lock lock(saved_mutex);
@@ -841,6 +850,7 @@ void TestWindow() {
         Expect(back.left == frame.left && back.top == frame.top &&
                    (GetWindowLongPtrW(handle, GWL_STYLE) & WS_THICKFRAME),
                "The window is back where it stood, with its border");
+        Expect(!(GetWindowLongPtrW(handle, GWL_EXSTYLE) & through), "Back in a window it takes the mouse again");
         window.Reshape(800, 600, 4.0 / 3.0, 800, L"");
         Expect(WaitFor([&] { return !window.FillMissing(); }) && !window.Filling(), "No monitor asked for, none missing");
     }
@@ -884,6 +894,9 @@ void TestWindow() {
         Expect(filled.Filling() && width == static_cast<std::uint32_t>(monitors.front().width) &&
                    height == static_cast<std::uint32_t>(monitors.front().height),
                "It fills the monitor from the start");
+        const LONG_PTR through = WS_EX_LAYERED | WS_EX_TRANSPARENT;
+        Expect((GetWindowLongPtrW(static_cast<HWND>(filled.Handle()), GWL_EXSTYLE) & through) == through,
+               "...and lets the mouse through from the start");
         filled.OutputSize(width, height);
         Expect(width == static_cast<std::uint32_t>(monitors.front().width) &&
                    height == static_cast<std::uint32_t>(monitors.front().height),
@@ -2387,6 +2400,252 @@ int MeasureD3D12() {
     return 0;
 }
 
+// ---- By hand: the window on the real desktop ----
+//
+// What no test above can see, because their windows are never put on the
+// desktop: that a window which fills a monitor, layered so the mouse passes
+// through it, still shows the picture its flip-model swap chain presents, and
+// that Windows hands the mouse to what is under it. One short run by hand on
+// the real adapter, through the GPU lock: a small window, then a monitor
+// filled for a second or two, twice.
+
+bool DesktopColour(int x, int y, COLORREF& colour) {
+    const HDC screen = GetDC(nullptr);
+    const HDC memory = CreateCompatibleDC(screen);
+    const HBITMAP bitmap = CreateCompatibleBitmap(screen, 1, 1);
+    const HGDIOBJ before = SelectObject(memory, bitmap);
+    // CAPTUREBLT: layered windows are part of the copy.
+    const bool copied = BitBlt(memory, 0, 0, 1, 1, screen, x, y, SRCCOPY | CAPTUREBLT) != 0;
+    colour = GetPixel(memory, 0, 0);
+    SelectObject(memory, before);
+    DeleteObject(bitmap);
+    DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+    return copied;
+}
+
+int ProbeDesktop(Rig& rig, SubmittedImageGpu& gpu, const std::string& api) {
+    SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    const std::vector<MirrorMonitor> monitors = ListMirrorMonitors();
+    if (monitors.empty()) {
+        std::cout << api << ": no monitor\n";
+        return 1;
+    }
+    // A monitor that is not the primary one where there is one.
+    const MirrorMonitor* monitor = &monitors.front();
+    for (const MirrorMonitor& candidate : monitors) {
+        if (!candidate.primary) monitor = &candidate;
+    }
+    Harness harness{rig, gpu};
+    constexpr std::uint32_t kSide = 64;
+    std::vector<std::uint8_t> magenta(kSide * kSide * 4);
+    for (std::size_t i = 0; i < magenta.size(); i += 4) {
+        magenta[i] = 255;
+        magenta[i + 1] = 0;
+        magenta[i + 2] = 255;
+        magenta[i + 3] = 255;
+    }
+    void* image = nullptr;
+    const XrSwapchain source = harness.Source(DXGI_FORMAT_R8G8B8A8_UNORM, kSide, kSide, 1, 1, true, &image);
+    rig.Fill(image, DXGI_FORMAT_R8G8B8A8_UNORM, 0, magenta.data(), 4);
+    const SubmittedView view =
+        Harness::View(source, DXGI_FORMAT_R8G8B8A8_UNORM, kSide, kSide, 1, 0, {{0, 0}, {kSide, kSide}});
+    const XrFovf fov = Fov(-45, 45, 45, -45);
+
+    MirrorWindow window;
+    MirrorWindow::Options options = WindowOptions(480, 270);
+    options.on_desktop = true;
+    options.placement = MirrorPlacement{monitor->x + 120, monitor->y + 120, 480, 270, 480};
+    std::string error;
+    if (!window.Start(std::move(options), error) || !WaitFor([&] { return window.Handle() != nullptr; })) {
+        std::cout << api << ": the window could not be made: " << error << "\n";
+        return 1;
+    }
+    const HWND handle = static_cast<HWND>(window.Handle());
+    MirrorStabilizer stabilizer;
+    MirrorSettings settings;
+    int number = 0;
+    const auto show = [&](int frames) {
+        int shown = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        while (shown < frames && std::chrono::steady_clock::now() < deadline) {
+            MirrorDraw draw;
+            draw.window = window.Handle();
+            window.OutputSize(draw.width, draw.height);
+            draw.on_window_thread = [&window](std::function<void()> task) { return window.Post(std::move(task)); };
+            draw.homography =
+                stabilizer.Update(Pose(AxisAngle(0, 1, 0, 0)), fov, 1'000'000'000ll + number++ * 11'111'111ll, settings)
+                    .homography;
+            const MirrorDrawResult result = gpu.DrawMirror(view, draw, error);
+            if (result == MirrorDrawResult::kFailed) {
+                std::cout << api << ": a frame failed: " << error << "\n";
+                return -1;
+            }
+            if (result == MirrorDrawResult::kShown) ++shown;
+            rig.Idle();
+            Sleep(8);
+        }
+        // The desktop's compositor takes the last frame.
+        Sleep(120);
+        return shown;
+    };
+    int failures = 0;
+    const auto look = [&](const std::string& stage, bool through_expected) {
+        RECT client{};
+        GetClientRect(handle, &client);
+        POINT centre{client.right / 2, client.bottom / 2};
+        ClientToScreen(handle, &centre);
+        COLORREF colour = 0;
+        const bool copied = DesktopColour(centre.x, centre.y, colour);
+        const bool pictured = copied && GetRValue(colour) > 200 && GetGValue(colour) < 60 && GetBValue(colour) > 200;
+        const HWND under = WindowFromPoint(centre);
+        const bool through = under != handle;
+        const LONG_PTR ex_style = GetWindowLongPtrW(handle, GWL_EXSTYLE);
+        std::cout << api << ", " << stage << ": desktop pixel at " << centre.x << "," << centre.y << " is "
+                  << static_cast<int>(GetRValue(colour)) << "," << static_cast<int>(GetGValue(colour)) << ","
+                  << static_cast<int>(GetBValue(colour)) << (pictured ? " (the picture)" : " (NOT the picture)")
+                  << "; the mouse there goes to " << (through ? "another window" : "the mirror")
+                  << (through == through_expected ? "" : " (NOT as meant)") << "; layered "
+                  << ((ex_style & WS_EX_LAYERED) ? "yes" : "no") << ", transparent "
+                  << ((ex_style & WS_EX_TRANSPARENT) ? "yes" : "no") << ", topmost "
+                  << ((ex_style & WS_EX_TOPMOST) ? "yes" : "no") << std::endl;
+        wchar_t under_class[96]{};
+        wchar_t under_title[96]{};
+        if (under) {
+            GetClassNameW(under, under_class, 95);
+            GetWindowTextW(under, under_title, 95);
+        }
+        std::wcout << L"    window under that point: class \"" << under_class << L"\", title \"" << under_title
+                   << L"\"; the mirror is " << (IsWindowVisible(handle) ? L"visible" : L"not visible") << std::endl;
+        if (!pictured || through != through_expected) ++failures;
+    };
+    const auto above = [&] {
+        // A plain window is not above the others; for the look at the
+        // desktop it must not be behind one.
+        SetWindowPos(handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    };
+    const HWND foreground = GetForegroundWindow();
+    const double aspect = static_cast<double>(monitor->width) / monitor->height;
+    // A locked or disconnected desktop shows nothing of any window: the
+    // looks below would then say nothing about the mirror.
+    wchar_t desktop_name[64]{};
+    {
+        if (const HDESK input = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS)) {
+            DWORD needed = 0;
+            GetUserObjectInformationW(input, UOI_NAME, desktop_name, sizeof(desktop_name) - sizeof(wchar_t), &needed);
+            CloseDesktop(input);
+        }
+        std::wcout << L"The desktop taking input: \"" << desktop_name << L"\" (\"Default\" is the user's own)"
+                   << std::endl;
+    }
+    {
+        // The lock screen covers every window with one of its own.
+        above();
+        Sleep(200);
+        RECT frame{};
+        GetWindowRect(handle, &frame);
+        wchar_t cover[96]{};
+        if (const HWND under = WindowFromPoint(POINT{(frame.left + frame.right) / 2, (frame.top + frame.bottom) / 2})) {
+            GetClassNameW(under, cover, 95);
+        }
+        if (std::wstring(cover).find(L"LockScreen") != std::wstring::npos || std::wstring(desktop_name) != L"Default") {
+            std::cout << api << ": the PC is locked, so nothing of the desktop can be looked at. Run this again "
+                      << "unlocked." << std::endl;
+            window.Stop();
+            gpu.Forget(source);
+            return 77;
+        }
+    }
+
+    above();
+    int shown = show(30);
+    std::cout << api << ": " << shown << " frames shown in a plain window" << std::endl;
+    look("a plain window", false);
+
+    std::uint32_t made = MirrorSwapChainsMadeForTests();
+    window.Reshape(480, 270, 16.0 / 9.0, 480, monitor->name);
+    WaitFor([&] { return window.Filling(); });
+    shown = show(40);
+    std::cout << api << ": " << shown << " frames shown filling the monitor (" << monitor->width << "x"
+              << monitor->height << "), swap chains made for it: " << MirrorSwapChainsMadeForTests() - made
+              << std::endl;
+    look("filling the monitor", true);
+
+    window.Reshape(480, 270, 16.0 / 9.0, 480, L"");
+    WaitFor([&] { return !window.Filling(); });
+    above();
+    shown = show(30);
+    std::cout << api << ": " << shown << " frames shown back in a window" << std::endl;
+    look("back in a window", false);
+
+    // A picture of the monitor's own size: the swap chain is kept when the
+    // window goes to fill the monitor, and becomes a layered window's.
+    window.Reshape(monitor->width, monitor->height, aspect, monitor->width, L"");
+    show(20);
+    made = MirrorSwapChainsMadeForTests();
+    window.Reshape(monitor->width, monitor->height, aspect, monitor->width, monitor->name);
+    WaitFor([&] { return window.Filling(); });
+    shown = show(40);
+    std::cout << api << ": " << shown << " frames shown filling the monitor with the swap chain it had, made anew: "
+              << MirrorSwapChainsMadeForTests() - made << std::endl;
+    look("filling the monitor, swap chain kept", true);
+    window.Reshape(monitor->width, monitor->height, aspect, monitor->width, L"");
+    WaitFor([&] { return !window.Filling(); });
+    above();
+    shown = show(30);
+    std::cout << api << ": " << shown << " frames shown back in a window with the swap chain it had, made anew: "
+              << MirrorSwapChainsMadeForTests() - made << std::endl;
+    look("back in a window, swap chain kept", false);
+
+    if (GetForegroundWindow() != foreground) {
+        std::cout << api << ": the foreground window changed (NOT as meant)" << std::endl;
+        ++failures;
+    }
+    gpu.CloseMirror();
+    window.Stop();
+    gpu.Forget(source);
+    return failures;
+}
+
+int ProbeDesktopD3D11() {
+    D3D11Rig rig;
+    const D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &level, 1, D3D11_SDK_VERSION,
+                                 &rig.device, nullptr, &rig.context))) {
+        std::cout << "Direct3D 11: no hardware device\n";
+        return 1;
+    }
+    std::unique_ptr<SubmittedImageGpu> gpu = CreateSubmittedImageD3D11(rig.device.Get(), true);
+    return ProbeDesktop(rig, *gpu, "Direct3D 11");
+}
+
+int ProbeDesktopD3D12() {
+    D3D12Rig rig;
+    ComPtr<IDXGIFactory4> factory;
+    ComPtr<IDXGIAdapter1> adapter;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || FAILED(factory->EnumAdapters1(0, &adapter)) ||
+        FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&rig.device)))) {
+        std::cout << "Direct3D 12: no hardware device\n";
+        return 1;
+    }
+    D3D12_COMMAND_QUEUE_DESC queue{};
+    if (FAILED(rig.device->CreateCommandQueue(&queue, IID_PPV_ARGS(&rig.queue))) ||
+        FAILED(rig.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&rig.fence)))) {
+        std::cout << "Direct3D 12: no queue\n";
+        return 1;
+    }
+    XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    binding.device = rig.device.Get();
+    binding.queue = rig.queue.Get();
+    std::string error;
+    std::unique_ptr<SubmittedImageGpu> gpu = CreateSubmittedImageGpu(&binding, error);
+    if (!gpu) {
+        std::cout << "Direct3D 12: " << error << "\n";
+        return 1;
+    }
+    return ProbeDesktop(rig, *gpu, "Direct3D 12");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2397,6 +2656,13 @@ int main(int argc, char** argv) {
         // The real adapter: one short run by hand, through the GPU lock.
         MeasureD3D12();
         return MeasureD3D11();
+    }
+    if (mode == "desktop") {
+        // The window shown on the real desktop: by hand, through the GPU lock.
+        const int d3d11 = ProbeDesktopD3D11();
+        if (d3d11 == 77) return 77; // nothing to look at: not run
+        const int d3d12 = ProbeDesktopD3D12();
+        return d3d11 + d3d12 == 0 ? 0 : 1;
     }
     if (!mode.empty()) {
         std::cerr << "Unknown mode " << mode << '\n';

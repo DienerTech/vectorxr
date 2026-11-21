@@ -169,7 +169,7 @@
       },
       "fillMonitor": {
         "label": "Wypełnij monitor",
-        "help": "Obraz wypełnia wybrany monitor, bez ramki, zamiast znajdować się w oknie o zmiennym rozmiarze, i przyjmuje kształt tego monitora. Nadal nigdy nie odbiera grze fokusu klawiatury ani sterowania. Jeśli ten monitor nie jest podłączony, podgląd otwiera się jako zwykłe okno.",
+        "help": "Obraz wypełnia wybrany monitor, bez ramki, zamiast znajdować się w oknie o zmiennym rozmiarze, i przyjmuje kształt tego monitora. Nadal nigdy nie odbiera grze fokusu klawiatury ani sterowania. Kliknięcia myszy przechodzą przez obraz do gry pod spodem. Jeśli ten monitor nie jest podłączony, podgląd otwiera się jako zwykłe okno.",
         "sizeUnused": "Proporcje obrazu i szerokość obrazu nie są używane, gdy obraz wypełnia monitor."
       },
       "monitor": {

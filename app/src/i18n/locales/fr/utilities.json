@@ -169,7 +169,7 @@
       },
       "fillMonitor": {
         "label": "Remplir un écran",
-        "help": "L'image remplit l'écran choisi, sans bordure, au lieu d'être dans une fenêtre redimensionnable, et prend le format de cet écran. Elle ne prend toujours jamais le focus clavier ni les entrées du jeu. Si cet écran n'est pas connecté, le miroir s'ouvre comme une fenêtre normale.",
+        "help": "L'image remplit l'écran choisi, sans bordure, au lieu d'être dans une fenêtre redimensionnable, et prend le format de cet écran. Elle ne prend toujours jamais le focus clavier ni les entrées du jeu. Les clics de souris traversent l'image et arrivent au jeu en dessous. Si cet écran n'est pas connecté, le miroir s'ouvre comme une fenêtre normale.",
         "sizeUnused": "Le format d'image et la largeur de l'image ne sont pas utilisés tant que l'image remplit un écran."
       },
       "monitor": {

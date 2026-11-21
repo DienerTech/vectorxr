@@ -169,7 +169,7 @@
       },
       "fillMonitor": {
         "label": "Preencher um monitor",
-        "help": "A imagem preenche o monitor escolhido, sem bordas, em vez de ficar em uma janela redimensionável, e assume o formato desse monitor. Ela continua sem nunca tirar do jogo o foco do teclado ou a entrada. Se esse monitor não estiver conectado, o espelho abre como uma janela normal.",
+        "help": "A imagem preenche o monitor escolhido, sem bordas, em vez de ficar em uma janela redimensionável, e assume o formato desse monitor. Ela continua sem nunca tirar do jogo o foco do teclado ou a entrada. Os cliques do mouse atravessam a imagem e chegam ao jogo que está por baixo. Se esse monitor não estiver conectado, o espelho abre como uma janela normal.",
         "sizeUnused": "A proporção e a largura da imagem não são usadas enquanto a imagem preenche um monitor."
       },
       "monitor": {

@@ -169,7 +169,7 @@
       },
       "fillMonitor": {
         "label": "Monitor ausfüllen",
-        "help": "Das Bild füllt den gewählten Monitor randlos aus, statt in einem Fenster mit änderbarer Größe zu liegen, und übernimmt das Format dieses Monitors. Es nimmt dem Spiel weiterhin nie den Tastaturfokus oder Eingaben. Ist dieser Monitor nicht angeschlossen, öffnet sich der Spiegel als normales Fenster.",
+        "help": "Das Bild füllt den gewählten Monitor randlos aus, statt in einem Fenster mit änderbarer Größe zu liegen, und übernimmt das Format dieses Monitors. Es nimmt dem Spiel weiterhin nie den Tastaturfokus oder Eingaben. Mausklicks gehen durch das Bild hindurch an das Spiel darunter. Ist dieser Monitor nicht angeschlossen, öffnet sich der Spiegel als normales Fenster.",
         "sizeUnused": "Seitenverhältnis und Bildbreite werden nicht verwendet, solange das Bild einen Monitor ausfüllt."
       },
       "monitor": {

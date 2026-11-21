@@ -1367,7 +1367,9 @@ profile, and a **custom profile** sets it for the games you assign to it.
   sitting in a window, and takes that monitor's shape (aspect ratio and width are then not
   used). No monitor is ever chosen for you. It covers whatever is on that monitor, the
   game's own window included, so choose another monitor than the game's unless that is what
-  you want. If the chosen monitor is not connected, the mirror opens as a normal window.
+  you want. Mouse clicks pass through the picture to whatever is underneath, so a game on
+  that monitor still takes its clicks. If the chosen monitor is not connected, the mirror
+  opens as a normal window.
 - Under **Running games**, use **Show mirror** or **Hide mirror** for the game you want. This changes the current window immediately and keeps the saved profile settings.
 - **Show or Hide Mirror Window** is an optional binding that hides and shows the window
   while a game runs. Its sounds play as for other bindings.

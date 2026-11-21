@@ -169,7 +169,7 @@
       },
       "fillMonitor": {
         "label": "Llenar un monitor",
-        "help": "La imagen llena el monitor elegido, sin bordes, en lugar de estar en una ventana redimensionable, y adopta la forma de ese monitor. Sigue sin quitarle nunca al juego el foco del teclado ni la entrada. Si ese monitor no está conectado, el espejo se abre como una ventana normal.",
+        "help": "La imagen llena el monitor elegido, sin bordes, en lugar de estar en una ventana redimensionable, y adopta la forma de ese monitor. Sigue sin quitarle nunca al juego el foco del teclado ni la entrada. Los clics del ratón atraviesan la imagen y llegan al juego que está debajo. Si ese monitor no está conectado, el espejo se abre como una ventana normal.",
         "sizeUnused": "La relación de aspecto y el ancho de la imagen no se usan mientras la imagen llena un monitor."
       },
       "monitor": {

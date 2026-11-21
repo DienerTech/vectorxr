@@ -5,7 +5,10 @@
 // a thread of its own with its own message loop, so nothing of it runs on a
 // thread of the game's. It never takes the keyboard focus (WS_EX_NOACTIVATE,
 // shown without activation), keeps its picture's aspect while it is resized,
-// and closing it only hides it. The thread that ends the game's frames draws
+// and closing it only hides it. Where it fills a monitor the mouse passes
+// through it to whatever is under it (a game on that monitor still takes its
+// clicks); a plain window takes the mouse, to be moved, resized and closed.
+// The thread that ends the game's frames draws
 // into it (SubmittedImageGpu::DrawMirror) and reads atomics here: no call
 // waits for the window's thread but Join and Stop, which the caller makes
 // holding nothing the window's thread may need (the game's Direct3D 11
