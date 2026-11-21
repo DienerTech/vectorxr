@@ -568,11 +568,33 @@ float InsidePatchCost(Patch patch, int2 corner, int2 d, int2 extent, float count
 // that really moves matches clearly better only near its own motion, so the
 // shortest within the tolerance is still its own.
 groupshared float g_short_length[FG_SEARCH_SLICES * 64];
+groupshared int g_first[64]; // the first scan's choice per cell
 
-// The shortest acceptable displacement of the cell's slice of the scan:
-// FG_FLAG_FLOW_SHORTEST's second scan, from the lowest cost the first found.
-void ShortestScan(int2 cell, int2 origin, int2 extent, int slice, int radius, float lowest, out float shortest,
-                  out float shortest_cost, out int shortest_index) {
+// The median of nine integers: the one with at most four below it and at
+// least five at or below it.
+int Median9(int values[9]) {
+    int median = values[0];
+    [unroll]
+    for (int i = 0; i < 9; ++i) {
+        int below = 0;
+        int at = 0;
+        [unroll]
+        for (int j = 0; j < 9; ++j) {
+            below += values[j] < values[i] ? 1 : 0;
+            at += values[j] <= values[i] ? 1 : 0;
+        }
+        if (below <= 4 && at >= 5) {
+            median = values[i];
+        }
+    }
+    return median;
+}
+
+// The acceptable displacement nearest `target` of the cell's slice of the
+// scan: FG_FLAG_FLOW_SHORTEST's second scan, from the lowest cost the first
+// found.
+void ShortestScan(int2 cell, int2 origin, int2 extent, int slice, int radius, float lowest, float2 target,
+                  out float shortest, out float shortest_cost, out int shortest_index) {
     Patch patch;
     float count = 0.0;
     [unroll]
@@ -594,7 +616,7 @@ void ShortestScan(int2 cell, int2 origin, int2 extent, int slice, int radius, fl
         const float zero = inside ? InsidePatchCost(patch, corner, int2(0, 0), extent, count)
                                   : PatchCost(patch, corner, int2(0, 0), extent);
         if (zero <= allowed) {
-            shortest = 0.0;
+            shortest = dot(target, target);
             shortest_cost = zero;
             shortest_index = -1;
         }
@@ -603,7 +625,8 @@ void ShortestScan(int2 cell, int2 origin, int2 extent, int slice, int radius, fl
     [loop]
     for (int j = slice; j < side * side; j += FG_SEARCH_SLICES) {
         const float cost = inside ? InsidePatchCost(patch, corner, d, extent, count) : PatchCost(patch, corner, d, extent);
-        const float length2 = float(dot(d, d));
+        const float2 apart = float2(d) - target;
+        const float length2 = dot(apart, apart);
         if (cost <= allowed && (length2 < shortest || (length2 == shortest && cost < shortest_cost))) {
             shortest = length2;
             shortest_cost = cost;
@@ -697,16 +720,43 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thre
         // Research: a second scan for the shortest displacement within the
         // tolerance of the lowest cost of all four slices (ShortestScan).
         float lowest = g_best_cost[slot];
+        int first = g_best_index[slot];
         [unroll]
         for (int s = 1; s < FG_SEARCH_SLICES; ++s) {
-            lowest = min(lowest, g_best_cost[s * 64 + slot]);
+            const float cost = g_best_cost[s * 64 + slot];
+            const int candidate = g_best_index[s * 64 + slot];
+            if (cost < lowest || (cost == lowest && candidate < first)) {
+                lowest = cost;
+                first = candidate;
+            }
+        }
+        if (slice == 0) {
+            g_first[slot] = active ? first : -1;
         }
         GroupMemoryBarrierWithGroupSync();
+        // tuning.w 1: shortest from the median of the first scan's choices
+        // of the 3x3 cells around (within the thread group), not from no
+        // motion: content that really moves far moves far together.
+        float2 target = float2(0.0, 0.0);
+        [branch]
+        if (g.tuning.w > 0.5) {
+            int xs[9];
+            int ys[9];
+            [unroll]
+            for (int n = 0; n < 9; ++n) {
+                const int2 q = clamp(int2(thread.xy) + int2(n % 3, n / 3) - 1, int2(0, 0), int2(7, 7));
+                const int chosen = g_first[q.y * 8 + q.x];
+                const int2 v = chosen < 0 ? int2(0, 0) : int2(uint(chosen) % uint(side), uint(chosen) / uint(side)) - radius;
+                xs[n] = v.x;
+                ys[n] = v.y;
+            }
+            target = float2(Median9(xs), Median9(ys));
+        }
         float shortest = 1e30;
         float shortest_cost = 1e30;
         int shortest_index = -2;
         if (active) {
-            ShortestScan(cell, origin, extent, slice, radius, lowest, shortest, shortest_cost, shortest_index);
+            ShortestScan(cell, origin, extent, slice, radius, lowest, target, shortest, shortest_cost, shortest_index);
         }
         g_short_length[slice * 64 + slot] = shortest;
         g_best_cost[slice * 64 + slot] = shortest_cost;

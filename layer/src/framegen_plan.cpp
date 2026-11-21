@@ -920,6 +920,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
             search.constants.options[1] |= kFrameGenFlagFlowShortest;
             search.constants.tuning[1] = tuning.flow_shortest.tolerance;
             search.constants.tuning[2] = tuning.flow_shortest.share;
+            search.constants.tuning[3] = tuning.flow_shortest.toward_neighbours ? 1.0f : 0.0f;
         }
         plan.dispatches.push_back(search);
     }
@@ -2044,7 +2045,10 @@ FrameGenFlowShortest ParseFrameGenFlowShortest(const std::string& value) {
     }
     shortest.enabled = true;
     if (comma != std::string::npos) {
-        number(text.substr(comma + 1), shortest.share);
+        const std::size_t second = text.find(',', comma + 1);
+        number(text.substr(comma + 1, second == std::string::npos ? std::string::npos : second - comma - 1),
+               shortest.share);
+        shortest.toward_neighbours = second != std::string::npos && text.substr(second + 1) == "median";
     }
     return shortest;
 }

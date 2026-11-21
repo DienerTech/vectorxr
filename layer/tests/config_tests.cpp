@@ -2063,6 +2063,9 @@ void TestFrameGenPlan() {
                    depthxr::ParseFrameGenFlowShortest("1").enabled && set.enabled && set.tolerance == 0.003f &&
                    set.share == 0.25f && partial.enabled && partial.tolerance == 0.004f && partial.share == 0.0f,
                "VECTORXR_FRAMEGEN_FLOW_SHORTEST takes 1, on or <tolerance>[,<share>]");
+        Expect(depthxr::ParseFrameGenFlowShortest("0.006,0,median").toward_neighbours && !set.toward_neighbours &&
+                   depthxr::ParseFrameGenFlowShortest("0.006,0,median").tolerance == 0.006f,
+               "VECTORXR_FRAMEGEN_FLOW_SHORTEST=<tolerance>,<share>,median goes toward the neighbours' median");
         Expect(depthxr::ParseFrameGenFlowShortest("0").enabled && !depthxr::ParseFrameGenFlowShortest("").enabled &&
                    !depthxr::ParseFrameGenFlowShortest("off").enabled && !depthxr::ParseFrameGenFlowShortest("2").enabled &&
                    !depthxr::ParseFrameGenFlowShortest("-1").enabled,
@@ -2085,6 +2088,7 @@ void TestFrameGenPlan() {
                 expected.options[1] |= depthxr::kFrameGenFlagFlowShortest;
                 expected.tuning[1] = 0.003f;
                 expected.tuning[2] = 0.25f;
+                expected.tuning[3] = 0.0f;
                 same = same && (b.constants.options[1] & depthxr::kFrameGenFlagFlowShortest) == 0 &&
                        std::memcmp(&a.constants, &expected, sizeof(expected)) == 0;
             } else {

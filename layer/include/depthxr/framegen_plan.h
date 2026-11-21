@@ -880,9 +880,14 @@ struct FrameGenFlowShortest {
     bool enabled{false};
     float tolerance{0.002f};
     float share{0.0f};
+    // Nearest the median of the 3x3 cells' best displacements around instead
+    // of shortest: content that really moves far moves far together (a quad
+    // views capture moving 200 px lost 0.38 points of bad pixels to the
+    // shortest at a tolerance of 0.012).
+    bool toward_neighbours{false};
 };
-// "1" or "on" (any case) for the defaults, or "<tolerance>[,<share>]" (each 0
-// to 1; a missing or bad share keeps its default). Anything else is off.
+// "1" or "on" (any case) for the defaults, or "<tolerance>[,<share>[,median]]"
+// (each 0 to 1; a missing or bad share keeps its default). Anything else is off.
 FrameGenFlowShortest ParseFrameGenFlowShortest(const std::string& value);
 // Research (VECTORXR_FRAMEGEN_FLOW_EVIDENCE): confidence from how distinct a
 // match is, not only how good (kFrameGenFlagFlowEvidence). A flat block
