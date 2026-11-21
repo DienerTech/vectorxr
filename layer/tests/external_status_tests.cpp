@@ -92,6 +92,18 @@ void TestDocument() {
         Expect(Contains(text, field), std::string("field ") + field + ": " + text);
     }
     Expect(!Contains(text, "autoStep"), "no Auto fields under a fixed rate: " + text);
+    Expect(Contains(text, "\"runtimeHalved\": false,\n    \"reason\": \"\",\n    \"holding\": true"),
+           "runtime halving and the app's line, before holding: " + text);
+    framegen.runtime_halved = true;
+    framegen.reason = "Dynamic \xC2\xB7 game at 45 fps \xC2\xB7 the runtime holds frames to half rate: turn off "
+                      "Smart Smoothing in Pimax Play";
+    document.framegen = framegen;
+    text = depthxr::FormatExternalStatus(document);
+    Expect(Contains(text, "\"runtimeHalved\": true,\n    \"reason\": \"Dynamic \xC2\xB7 game at 45 fps \xC2\xB7 the "
+                          "runtime holds frames to half rate: turn off Smart Smoothing in Pimax Play\",\n"),
+           "runtime halving says what to turn off: " + text);
+    framegen.runtime_halved = false;
+    framegen.reason.clear();
 
     framegen.frame_rate = "auto";
     framegen.automatic = depthxr::ExternalAutoStep{2, 36.0, 76.5, 81.2};

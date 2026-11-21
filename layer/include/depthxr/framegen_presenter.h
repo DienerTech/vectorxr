@@ -153,6 +153,12 @@ struct FrameGenStatus {
     // presenter thread's waits, and kept until those or, passing frames
     // through, the game's own show every refresh again.
     bool runtime_halving{false};
+    // The OpenXR runtime's name (SetRuntimeName; empty until told): the OSD
+    // names the setting that holds frames to half rate on it.
+    std::string runtime_name;
+    // Dynamic standing down for the runtime's halving: seconds until it
+    // tries again (0 otherwise).
+    double halving_retry_s{0.0};
     // The runtime's display times do not advance with the time that passes
     // (Varjo's after a game paused its frame loop): nothing engages and
     // frames pass straight through until they do.
@@ -259,6 +265,9 @@ struct FrameGenOsdText {
 };
 // `started`: the session started with Frame Generation on.
 FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started);
+// What to turn off on the named runtime when it holds frames to half rate
+// ("turn off Smart Smoothing in Pimax Play"); empty for a runtime not known.
+std::string FrameGenHalvingRemedy(std::string_view runtime);
 
 // Emulated quad views (the layer composes XR_VARJO_quad_views into stereo):
 // what happens to one frame from the layer's quad views compose site.
@@ -493,6 +502,11 @@ class FrameGenPresenter {
     // stands down for it; while it is reported, the presenter thread's waits
     // decide again a quarter of it after they start (tests shorten it).
     void SetHalvingWindow(std::chrono::milliseconds window);
+    // VECTORXR_FRAMEGEN_HALVING_PUSH as Start reads it (tests set it after).
+    void SetHalvingPush(std::chrono::milliseconds push);
+    // The OpenXR runtime's name, for what the OSD tells the user to change
+    // when the runtime holds frames to half rate (FrameGenStatus::runtime_name).
+    void SetRuntimeName(std::string name);
     // Quad views: how long the layer composes them after frames kept failing
     // to be written, doubling up to `longest` (tests shorten it).
     void SetQuadDecline(std::chrono::milliseconds first, std::chrono::milliseconds longest);
@@ -1485,6 +1499,16 @@ class FrameGenPresenter {
     // while it is engaged).
     std::optional<std::chrono::steady_clock::time_point> halving_confirmed_at_;
     bool logged_runtime_halving_{false};
+    // VECTORXR_FRAMEGEN_HALVING_PUSH=<seconds> (read at Start, 0 = off): an
+    // engagement that finds the runtime holding frames to half rate keeps
+    // presenting at full rate this long before Dynamic stands down for it,
+    // so a runtime that dropped to half rate while Frame Generation was off
+    // (Pimax Play's Smart Smoothing) can see full-rate frames and return.
+    std::chrono::milliseconds halving_push_{0};
+    std::string runtime_name_; // SetRuntimeName
+    bool halving_push_logged_{false}; // this engagement's push is logged
+    std::uint64_t halving_pushes_{0}; // engagements that pushed through a halving report
+    std::uint64_t halving_push_recoveries_{0}; // ...and saw it clear within the push
     // Auto back at full rate for one shown while it is engaged (where the
     // runtime reports the refresh period, UpdateAutoLocked): it stays
     // there until this while the runtime still halves, the hold doubling

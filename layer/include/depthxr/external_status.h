@@ -37,6 +37,11 @@ struct ExternalFrameGenStatus {
     // Headset refreshes per real frame, measured frame by frame (0 until
     // measured), and whether the game keeps up with target_app_fps.
     double refreshes_per_real_frame{0.0};
+    // The runtime holds frames to every second refresh or less (its or the
+    // headset's smoothing, a frame rate limit), and the app's status line
+    // (what the OSD's Frame Generation row says, with what to turn off).
+    bool runtime_halved{false};
+    std::string reason;
     bool holding{false};
     std::optional<ExternalAutoStep> automatic; // under Auto only
 };

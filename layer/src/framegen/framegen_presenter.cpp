@@ -619,6 +619,17 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // hardware at the same frame rate; six fallbacks in 13 minutes).
     // VECTORXR_FRAMEGEN_FLOW_FALLBACK=legacy restores the earlier rule.
     interpolate_flow_legacy_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_FALLBACK") == "legacy";
+    // VECTORXR_FRAMEGEN_HALVING_PUSH=<seconds>, 0 to 120: Dynamic keeps
+    // presenting that long into an engagement that finds the runtime holding
+    // frames to half rate, before standing down for it (UpdateDynamicLocked).
+    // Off (0) by default until flown.
+    halving_push_ = std::chrono::seconds(std::clamp<long long>(
+        std::strtoll(ReadResearchSwitch("VECTORXR_FRAMEGEN_HALVING_PUSH").value_or("0").c_str(), nullptr, 10), 0, 120));
+    if (logger_ && halving_push_.count()) {
+        logger_->Info("Frame Generation research: Dynamic keeps presenting " +
+                      std::to_string(halving_push_.count() / 1000) +
+                      " s into an engagement that finds the runtime at half rate (VECTORXR_FRAMEGEN_HALVING_PUSH).");
+    }
     if (logger_ && interpolate_flow_legacy_) {
         logger_->Info("Frame Generation Interpolate flow research: Auto falls back from hardware flow on uncaptured "
                       "real frames too (VECTORXR_FRAMEGEN_FLOW_FALLBACK=legacy).");
@@ -1706,6 +1717,16 @@ void FrameGenPresenter::SetSummaryInterval(std::chrono::milliseconds interval) {
 void FrameGenPresenter::SetHalvingWindow(std::chrono::milliseconds window) {
     std::scoped_lock lock(mutex_);
     halving_window_ = window;
+}
+
+void FrameGenPresenter::SetHalvingPush(std::chrono::milliseconds push) {
+    std::scoped_lock lock(mutex_);
+    halving_push_ = push;
+}
+
+void FrameGenPresenter::SetRuntimeName(std::string name) {
+    std::scoped_lock lock(mutex_);
+    runtime_name_ = std::move(name);
 }
 
 void FrameGenPresenter::SetQuadDecline(std::chrono::milliseconds first, std::chrono::milliseconds longest) {
@@ -3926,8 +3947,42 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
     // halving is still reported; re-engaged while it is, they decide within a
     // quarter of the window, so trying again costs little.
     if (runtime_halving_ && halving_confirmed_at_ && *halving_confirmed_at_ > dynamic_engaged_at_) {
+        // Pushing through (VECTORXR_FRAMEGEN_HALVING_PUSH): the runtime may
+        // have dropped to half rate while frames passed through slower than
+        // its refresh (Frame Generation turned off, DCS at 44 fps: Pimax
+        // Play's Smart Smoothing 74 s later, 2026-11-20). Standing down a
+        // second after each engagement, it never saw full-rate frames again
+        // and the retries met the same hold until the session ended. At
+        // session start, presenting from the first frames, it never dropped.
+        // The benefit guard waits meanwhile: halved, every window fails it.
+        if (halving_push_.count() > 0 && now - dynamic_engaged_at_ < halving_push_) {
+            if (!halving_push_logged_) {
+                halving_push_logged_ = true;
+                ++halving_pushes_;
+                if (logger_) {
+                    logger_->Info("Frame Generation (dynamic): the runtime holds frames to half rate; it keeps "
+                                  "presenting at full rate for up to " +
+                                  Number(std::chrono::duration<double>(halving_push_).count(), 0) +
+                                  " s of the engagement so the runtime can return to full rate.");
+                }
+            }
+            guard_.valid = false;
+            return;
+        }
         DynamicStandDownLocked(now, kHalvingStandDown, false);
         return;
+    }
+    if (halving_push_logged_) {
+        // The report cleared while pushing through: the runtime is back at
+        // full rate, and the guard judges the engagement from here.
+        halving_push_logged_ = false;
+        ++halving_push_recoveries_;
+        guard_.valid = false;
+        if (logger_) {
+            logger_->Info("Frame Generation (dynamic): the runtime returned to full rate " +
+                          Number(std::chrono::duration<double>(now - dynamic_engaged_at_).count(), 1) +
+                          " s into the engagement.");
+        }
     }
     // Engaged: the benefit guard. Windows with a pause, a frame without a
     // projection (loading), a refresh the runtime did not render (the
@@ -4068,6 +4123,7 @@ void FrameGenPresenter::DynamicEngageLocked(Clock::time_point now, double rate, 
     guard_.valid = false;
     guard_failing_ = {};
     dynamic_rate_check_fps_.reset();
+    halving_push_logged_ = false;
     ++dynamic_engagements_;
     if (probe_failed) {
         dynamic_probing_ = false;
@@ -10944,6 +11000,10 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.dynamic_stand_downs = dynamic_stand_downs_;
     status.dynamic_probes = dynamic_probes_;
     status.runtime_halving = runtime_halving_;
+    status.runtime_name = runtime_name_;
+    if (status.standby && runtime_halving_ && dynamic_reason_ == kHalvingStandDown && now < dynamic_hold_until_) {
+        status.halving_retry_s = std::chrono::duration<double>(dynamic_hold_until_ - now).count();
+    }
     status.runtime_clock_displaced = clock_displaced_;
     status.runtime_clock_displacements = totals_.clock_displacements;
     status.threaded = compositor_running_;
@@ -11017,6 +11077,17 @@ FrameGenStatus FrameGenPresenter::Status() const {
 
 }
 
+std::string FrameGenHalvingRemedy(std::string_view runtime) {
+    // The setting on each runtime that holds an application's frames to
+    // half rate when it misses frames (the log names them all).
+    const auto has = [&](std::string_view part) { return runtime.find(part) != std::string_view::npos; };
+    if (has("Pimax")) return "turn off Smart Smoothing in Pimax Play";
+    if (has("SteamVR")) return "turn off Motion Smoothing in SteamVR";
+    if (has("Virtual Desktop") || has("VirtualDesktop")) return "turn off SSW in Virtual Desktop";
+    if (has("Oculus") || has("Meta")) return "turn off ASW";
+    return {};
+}
+
 FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started) {
     // The expanded OSD row says the state and how it runs; the line under it
     // what it does right now, or why not. The OSD separates parts as its other
@@ -11032,11 +11103,23 @@ FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started) {
     FrameGenOsdText text;
     text.state = ToString(status.state);
     // The runtime holds the frames presented to half its refresh rate or
-    // less: the line under the row says so, and the app's line ends with it.
+    // less: the line under the row says so, and the app's line ends with it,
+    // naming the setting to turn off where the runtime is known. Standing by
+    // for it, the compact line says so too rather than the game's frame rate
+    // (which then reads as though nothing were wrong: the owner saw only that,
+    // 2026-11-20), and the row when Dynamic tries again.
     const auto halving = [&](FrameGenOsdText& said) {
         if (status.runtime_halving) {
-            said.detail = kHalvingDetail;
-            said.reason += kApp + std::string(kHalvingReason);
+            const std::string remedy = FrameGenHalvingRemedy(status.runtime_name);
+            said.detail = remedy.empty() ? std::string(kHalvingDetail) : "Runtime at half rate: " + remedy;
+            said.reason += kApp + (remedy.empty() ? std::string(kHalvingReason)
+                                                  : std::string(kHalvingStandDown) + ": " + remedy);
+            if (status.state == FrameGenState::kActive && (status.standby || status.full_rate)) {
+                said.compact = std::string("Standby") + kOsd + "runtime at half rate";
+                if (status.halving_retry_s > 0.0) {
+                    said.row += kOsd + std::string("retrying in ") + Number(std::ceil(status.halving_retry_s), 0) + " s";
+                }
+            }
         }
         return said;
     };

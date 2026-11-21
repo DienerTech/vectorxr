@@ -12147,6 +12147,81 @@ void TestRuntimeHalvingRecovers() {
     }
 }
 
+// A runtime already at half rate when Dynamic engages (Frame Generation was
+// off while the game ran below the refresh rate: Pimax Play's Smart Smoothing,
+// 2026-11-20), and slow to return: full rate only after 120 frames in a row
+// on time, about 2.7 s at half rate, longer than the halving window. The game
+// (2.6 refreshes a frame) is late at half rate too, so standing by never gets
+// it back. Without a push Dynamic stands down a second after engaging and
+// the runtime stays at half rate; pushing through for 4 s
+// (VECTORXR_FRAMEGEN_HALVING_PUSH), it returns, the report clears, and Dynamic
+// stays engaged at every refresh.
+void TestRuntimeHalvingPush() {
+    for (const bool push : {false, true}) {
+        const std::string name = push ? "halving push" : "halving, no push";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.throttle = Runtime::Throttle::kPeriod;
+        SessionLog log(push ? "halving-push" : "halving-no-push");
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kDynamic, app, owned, log.logger.get());
+        presenter.SetHalvingPush(push ? 4000ms : 0ms);
+        // At full rate first, the game holding it: standing by.
+        RunWork(*app, 600ms, kLightWork);
+        Check(presenter.Status().standby, name + ": a game holding the refresh rate stands by");
+        // Turned off; the game slows, and the runtime drops to half rate and
+        // stays there for it.
+        Check(!presenter.Toggle(), name + ": turned off");
+        const auto work = PeriodsOfWork(kPeriod, 2.6);
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            runtime.throttle_on_after = 5;
+            runtime.throttle_off_after = 120;
+            runtime.throttled = true;
+        }
+        RunWork(*app, 1500ms, work);
+        Check(presenter.Toggle(), name + ": turned on again");
+        RunWork(*app, 4000ms, work, [&](const XrFrameState&) { return Engaged(presenter); });
+        Check(Engaged(presenter), name + ": Dynamic engages for the game at a third of the refresh rate");
+        RunWork(*app, 6000ms, work, [&](const XrFrameState&) {
+            return push ? !runtime.throttled && !presenter.Status().runtime_halving : presenter.Status().standby;
+        });
+        if (!push) {
+            RunWork(*app, 1500ms, work);
+            const FrameGenStatus status = presenter.Status();
+            if (std::getenv("FG_TEST_STATS")) {
+                std::cerr << name << ": throttled " << runtime.throttled << ", switches " << runtime.ThrottleSwitches()
+                          << ", stand-downs " << status.dynamic_stand_downs << "\n";
+            }
+            Check(status.standby && status.dynamic_stand_downs >= 1 && runtime.throttled &&
+                      status.dynamic_reason == kHalvingStandDown,
+                  name + ": Dynamic stands down and the runtime stays at half rate (" + status.dynamic_reason + ")");
+            Check(log.Lines("keeps presenting at full rate").empty(), name + ": no push logged");
+        } else {
+            RunWork(*app, 1500ms, work);
+            const double output = SubmissionRate(*app, 800ms, work);
+            const FrameGenStatus status = presenter.Status();
+            const double refresh = 1e9 / static_cast<double>(kPeriod);
+            if (std::getenv("FG_TEST_STATS")) {
+                std::cerr << name << ": throttled " << runtime.throttled << ", switches " << runtime.ThrottleSwitches()
+                          << ", stand-downs " << status.dynamic_stand_downs << ", output " << output << "\n";
+            }
+            Check(!runtime.throttled && Engaged(presenter) && status.dynamic_stand_downs == 0 &&
+                      !status.runtime_halving,
+                  name + ": the runtime returns to full rate and Dynamic stays engaged (" + status.dynamic_reason +
+                      ", " + std::to_string(status.dynamic_stand_downs) + " stand-downs)");
+            Check(output > 0.85 * refresh, name + ": every refresh gets a frame (" + std::to_string(output) + " fps)");
+            Check(log.Lines("keeps presenting at full rate for up to 4 s").size() == 1 &&
+                      log.Lines("the runtime returned to full rate").size() == 1,
+                  name + ": the push and the return are logged once each");
+        }
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // Nothing is reported against a runtime giving every refresh: engaged at 72,
 // 90 and 120 Hz with a game at its own rate below the refresh rate, or at a
 // third of it; with a third of the presenter's waits missing a refresh; with
@@ -14289,12 +14364,36 @@ void TestOsdRuntimeHalving() {
     status.standby = status.full_rate = true;
     said.push_back(DescribeFrameGen(status, true));
     text = said.back();
+    // Standing by for it, the compact line says why, not the game's rate.
     Check(text.row == "Standby  /  Dynamic" && text.detail == kHalvingDetail &&
-              text.compact == "Standby  /  game at 45 fps" && text.badge == "STBY" && text.state == "standby" &&
+              text.compact == "Standby  /  runtime at half rate" && text.badge == "STBY" && text.state == "standby" &&
               text.reason == "Dynamic" + dot + "game at 45 fps" + dot + kHalvingReason,
-          "halving standing by: " + text.row + " | " + text.detail + " | " + text.reason);
+          "halving standing by: " + text.row + " | " + text.detail + " | " + text.compact + " | " + text.reason);
+    // Its runtime known, the setting to turn off; Dynamic's retry counted down.
+    status.runtime_name = "Pimax OpenXR";
+    status.halving_retry_s = 39.2;
+    said.push_back(DescribeFrameGen(status, true));
+    text = said.back();
+    Check(text.row == "Standby  /  Dynamic  /  retrying in 40 s" &&
+              text.detail == "Runtime at half rate: turn off Smart Smoothing in Pimax Play" &&
+              text.compact == "Standby  /  runtime at half rate" &&
+              text.reason == "Dynamic" + dot + "game at 45 fps" + dot +
+                                 "the runtime holds frames to half rate: turn off Smart Smoothing in Pimax Play",
+          "halving standing by, Pimax: " + text.row + " | " + text.detail + " | " + text.reason);
+    for (const auto& [runtime, remedy] : std::vector<std::pair<std::string, std::string>>{
+             {"PimaxXR (Unofficial)", "turn off Smart Smoothing in Pimax Play"},
+             {"SteamVR/OpenXR", "turn off Motion Smoothing in SteamVR"},
+             {"VirtualDesktop", "turn off SSW in Virtual Desktop"},
+             {"Oculus", "turn off ASW"},
+             {"Varjo OpenXR Runtime", ""}}) {
+        Check(FrameGenHalvingRemedy(runtime) == remedy, "halving remedy for " + runtime);
+    }
+    status.runtime_name.clear();
+    status.halving_retry_s = 0.0;
     status.runtime_halving = false;
-    Check(DescribeFrameGen(status, true).detail == "The game runs at 45 fps", "not halving: standing by as before");
+    Check(DescribeFrameGen(status, true).detail == "The game runs at 45 fps" &&
+              DescribeFrameGen(status, true).compact == "Standby  /  game at 45 fps",
+          "not halving: standing by as before");
     status.runtime_halving = true;
     status.state = FrameGenState::kPaused;
     status.reason = "runtime rejected a generated frame (-2)";
@@ -16702,6 +16801,7 @@ int main(int argc, char** argv) {
     // A runtime halving the frame rate (its motion smoothing).
     RUN(TestRuntimeHalvingStandsDown);
     RUN(TestRuntimeHalvingRecovers);
+    RUN(TestRuntimeHalvingPush);
     RUN(TestRuntimeHalvingNotReported);
     RUN(TestRuntimeHalvingClears);
     RUN(TestRuntimeHalvingClearedDoesNotStandDown);

@@ -120,6 +120,8 @@ std::string FormatExternalStatus(const ExternalStatusDocument& document) {
                << "    \"outputFps\": " << framegen->output_fps << ",\n"
                << "    \"distinctFps\": " << framegen->distinct_fps << ",\n"
                << "    \"refreshesPerRealFrame\": " << framegen->refreshes_per_real_frame << ",\n"
+               << "    \"runtimeHalved\": " << (framegen->runtime_halved ? "true" : "false") << ",\n"
+               << "    \"reason\": \"" << EscapeJson(framegen->reason) << "\",\n"
                << "    \"holding\": " << (framegen->holding ? "true" : "false");
         if (const auto& automatic = framegen->automatic) {
             stream << ",\n    \"autoStep\": " << automatic->step << ",\n"

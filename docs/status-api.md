@@ -81,6 +81,8 @@ file as stale when no process with its `processId` is running.
     "outputFps": 90.00,
     "distinctFps": 89.50,
     "refreshesPerRealFrame": 2.00,
+    "runtimeHalved": false,
+    "reason": "Interpolate · Auto 2x · 45 → 90 fps · GPU 1.8 ms",
     "holding": true,
     "autoStep": 2,
     "autoStepUpBelowFps": 36.00,
@@ -119,6 +121,8 @@ for the game, and when it was turned on after the game started (the game must re
 | `outputFps` | Frames per second VectorXR submits to the runtime. |
 | `distinctFps` | Of those, frames showing something new (repeats left out). |
 | `refreshesPerRealFrame` | Headset refreshes each real frame is shown for, measured frame by frame and smoothed over about ten frames. 0 until measured. At a fixed or Auto rate, a game slower than `targetAppFps` gets more refreshes per frame than its multiplier, and every refresh is still filled. |
+| `runtimeHalved` | True while the runtime holds VectorXR's frames to every second refresh or less (Pimax Play's Smart Smoothing, SteamVR's Motion Smoothing, Virtual Desktop's SSW, Meta's ASW, or a frame rate limit). Frame Generation gains nothing then: under Dynamic it stands by and tries again later. |
+| `reason` | What the desktop app shows beside `state`, in English: the mode, rate and frame rates while generating, or why not, with what to change where VectorXR knows it (for example "the runtime holds frames to half rate: turn off Smart Smoothing in Pimax Play"). For display only: its wording may change. |
 | `holding` | True while the game keeps up with `targetAppFps`: its real frames take at most 10% more frame periods than aimed for (`multiplier` while generating, 1 otherwise). False until measured. |
 
 Only while `frameRate` is `auto`:

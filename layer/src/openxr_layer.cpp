@@ -2621,6 +2621,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         const XrResult props_result = next_get_instance_properties_(instance_, &instance_properties);
         if (XR_SUCCEEDED(props_result)) {
             runtime_name_ = instance_properties.runtimeName;
+            framegen_.SetRuntimeName(runtime_name_);
             defer_quadviews_swapchain_releases_ = runtime_name_.find("Varjo") != std::string::npos;
             const XrVersion rt = instance_properties.runtimeVersion;
             runtime_version_ = std::to_string(XR_VERSION_MAJOR(rt)) + "." +
@@ -19809,7 +19810,10 @@ RuntimeFrameGenRates OpenXrLayer::FrameGenRates(const FrameGenStatus& framegen) 
 ExternalFrameGenStatus OpenXrLayer::ExternalFrameGen(const FrameGenStatus& framegen) {
     const RuntimeFrameGenRates rates = FrameGenRates(framegen);
     ExternalFrameGenStatus external;
-    external.state = DescribeFrameGen(framegen, true).state;
+    const FrameGenOsdText described = DescribeFrameGen(framegen, true);
+    external.state = described.state;
+    external.reason = described.reason;
+    external.runtime_halved = framegen.runtime_halving;
     external.mode = rates.mode;
     external.frame_rate = rates.frame_rate;
     external.generating = rates.generating;
