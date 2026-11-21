@@ -611,6 +611,18 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
         const long long parsed = std::strtoll(value->c_str(), &end, 10);
         return std::chrono::milliseconds(end && !*end && parsed >= 0 ? std::min(parsed, most) : fallback);
     };
+    // Auto's fallback from hardware flow judges the flow's own lateness: a
+    // refresh whose real frame was not captured yet, or a hardware analysis
+    // of a frame captured too late for any flow, is the game's frame time
+    // and not hardware flow's fault (DCS, 2026-11-20: 949 such refreshes and
+    // 3 of motion not measured over 119 windows, as many on shader flow as on
+    // hardware at the same frame rate; six fallbacks in 13 minutes).
+    // VECTORXR_FRAMEGEN_FLOW_FALLBACK=legacy restores the earlier rule.
+    interpolate_flow_legacy_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_FALLBACK") == "legacy";
+    if (logger_ && interpolate_flow_legacy_) {
+        logger_->Info("Frame Generation Interpolate flow research: Auto falls back from hardware flow on uncaptured "
+                      "real frames too (VECTORXR_FRAMEGEN_FLOW_FALLBACK=legacy).");
+    }
     interpolate_flow_delay_ = delay_ms(ReadResearchSwitch("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_MS"), 0, 1000);
     interpolate_flow_delay_for_ =
         delay_ms(ReadResearchSwitch("VECTORXR_FRAMEGEN_INTERPOLATE_DELAY_FOR_MS"), 25000, 600000);
@@ -1854,12 +1866,20 @@ bool FrameGenPresenter::UpdateInterpolateFlowLocked(Clock::time_point now, Frame
     const auto generated = delta(&Totals::generated_distinct);
     const auto stale = delta(&Totals::stale_motion);
     const auto motion_outputs = delta(&Totals::motion_outputs);
-    // Both parts of the summary's unready=a/b matter: a real frame not
-    // captured yet, and a moved frame shown as a copy without ready motion.
-    const auto unready = delta(&Totals::unready) + delta(&Totals::unmeasured);
+    // The summary's unready=a/b: a real frame not captured yet, and a moved
+    // frame shown as a copy without ready motion. Only the second is the
+    // flow's: the first is the game's frame still on the GPU, as often on
+    // shader flow as on hardware at the same frame rate, and rising below
+    // about 44 fps with either (DCS, 2026-11-20). Judged on both (legacy), a
+    // GPU-bound game left hardware flow over and over for shader flow's
+    // specks. Hardware analyses late likewise: only those of frames captured
+    // in time (hardware_late_own).
+    const bool legacy = interpolate_flow_legacy_;
+    const auto unready = legacy ? delta(&Totals::unready) + delta(&Totals::unmeasured) : delta(&Totals::unmeasured);
     const auto timed = delta(&Totals::hardware_timed);
-    const auto late = delta(&Totals::hardware_late);
-    const double lag_ms = static_cast<double>(delta(&Totals::hardware_lag_ns)) / 1e6;
+    const auto late = legacy ? delta(&Totals::hardware_late) : delta(&Totals::hardware_late_own);
+    const double lag_ms =
+        static_cast<double>(legacy ? delta(&Totals::hardware_lag_ns) : delta(&Totals::hardware_lag_own_ns)) / 1e6;
     const bool stale_bad = motion_outputs >= policy.min_generated &&
                            static_cast<double>(stale) > policy.stale_share * motion_outputs;
     const bool unready_bad = seconds > 0.0 && static_cast<double>(unready) * 30.0 > policy.unready_per_30s * seconds;
@@ -1871,7 +1891,8 @@ bool FrameGenPresenter::UpdateInterpolateFlowLocked(Clock::time_point now, Frame
                                            Number(100.0 * stale / std::max<std::uint64_t>(1, motion_outputs), 1) +
                                            "% of motion outputs (" + std::to_string(stale) + "/" +
                                            std::to_string(motion_outputs) + ")"
-                            : unready_bad ? "unready " + Number(30.0 * unready / seconds, 1) + " per 30 s"
+                            : unready_bad ? (legacy ? "unready " : "motion not measured in time ") +
+                                                Number(30.0 * unready / seconds, 1) + " per 30 s"
                             : "hardware late " + Number(100.0 * late / std::max<std::uint64_t>(1, timed), 1) +
                                   "% (" + Number(late ? lag_ms / late : 0.0, 1) + " ms past first in-between deadline)";
     if (!evidence) {
@@ -6176,9 +6197,19 @@ void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const Pend
                 // Attribute lateness to the optical-flow work itself. A
                 // shader pass after timely hardware is not hardware lag.
                 if (timing.hardware_end > due->generated_due + interpolate_flow_policy_.hardware_grace) {
-                    ++totals_.hardware_late;
-                    totals_.hardware_lag_ns += static_cast<std::uint64_t>(
+                    const auto lag = static_cast<std::uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(timing.hardware_end - due->generated_due).count());
+                    ++totals_.hardware_late;
+                    totals_.hardware_lag_ns += lag;
+                    // Its real frame captured in time, shader flow would have
+                    // made it: the lateness is the optical flow's. Captured
+                    // later (a GPU-bound game's frame), either flow is late.
+                    // A capture not timed is counted as the flow's.
+                    if (timing.capture_end == Clock::time_point{} ||
+                        timing.capture_end + interpolate_flow_policy_.capture_allowance <= due->generated_due) {
+                        ++totals_.hardware_late_own;
+                        totals_.hardware_lag_own_ns += lag;
+                    }
                 }
             }
         }

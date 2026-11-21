@@ -316,6 +316,12 @@ struct FrameGenInterpolateFlowPolicy {
     double unready_per_30s{10.0};
     double hardware_late_share{0.25};
     std::chrono::milliseconds hardware_grace{1};
+    // A late hardware analysis counts against the flow only when its real
+    // frame was captured at least this long before the generated frame was
+    // due: shader flow's Quality analysis takes about 0.8 ms at 4608x3748
+    // (dcs-flow replays, 2026-11-20), so a frame captured later than that
+    // would have been late on either flow.
+    std::chrono::milliseconds capture_allowance{1};
     std::uint64_t min_generated{30};
     std::uint64_t min_hardware_samples{8};
     std::uint32_t bad_windows{2};
@@ -1635,6 +1641,11 @@ class FrameGenPresenter {
         std::uint64_t hardware_timed{0};
         std::uint64_t hardware_late{0};
         std::uint64_t hardware_lag_ns{0};
+        // Of hardware_late, the analyses whose real frame was captured in
+        // time (FrameGenInterpolateFlowPolicy::capture_allowance): late
+        // because of the optical flow, not the game's own frame.
+        std::uint64_t hardware_late_own{0};
+        std::uint64_t hardware_lag_own_ns{0};
         std::uint64_t copies_skipped{0};
         std::uint64_t ring_exhausted{0}; // refreshes whose real frame's images newer captures had replaced
         std::uint64_t stale_skipped{0};  // refreshes not submitted: nothing current to show
@@ -2065,6 +2076,11 @@ class FrameGenPresenter {
     // uses settings_.interpolate_flow (the old env switch maps to hardware).
     bool interpolate_on_shaders_{false};
     FrameGenInterpolateFlowPolicy interpolate_flow_policy_;
+    // VECTORXR_FRAMEGEN_FLOW_FALLBACK=legacy (read at Start): Auto leaves
+    // hardware flow on every refresh whose real frame was not captured yet
+    // and on any late hardware analysis, as before 0.22. Off, only the
+    // flow's own lateness counts (UpdateInterpolateFlowLocked).
+    bool interpolate_flow_legacy_{false};
     std::optional<FrameGenInterpolateFlow> interpolate_flow_env_;
     std::optional<FrameGenInterpolateFlow> interpolate_flow_selected_;
     bool interpolate_flow_hardware_selected_{false};

@@ -15987,15 +15987,20 @@ class FrameGenFlowTestPeer {
     static bool Feed(FrameGenPresenter& p, Clock::time_point now, std::uint64_t generated = 1000,
                      std::uint64_t stale = 0, std::uint64_t unready = 0, std::uint64_t timed = 100,
                      std::uint64_t late = 0, bool auto_probe = false, bool dynamic_probe = false,
-                     std::optional<std::uint64_t> motion_outputs = std::nullopt) {
+                     std::optional<std::uint64_t> motion_outputs = std::nullopt, std::uint64_t unmeasured = 0,
+                     std::optional<std::uint64_t> late_own = std::nullopt) {
         std::scoped_lock lock(p.mutex_);
         p.totals_.generated_distinct += generated;
         p.totals_.stale_motion += stale;
         p.totals_.motion_outputs += motion_outputs.value_or(std::max(generated, stale));
         p.totals_.unready += unready;
+        p.totals_.unmeasured += unmeasured;
         p.totals_.hardware_timed += timed;
         p.totals_.hardware_late += late;
         p.totals_.hardware_lag_ns += late * 2'000'000;
+        // Late hardware analyses are the flow's own unless told otherwise.
+        p.totals_.hardware_late_own += late_own.value_or(late);
+        p.totals_.hardware_lag_own_ns += late_own.value_or(late) * 2'000'000;
         p.probing_ = auto_probe;
         p.dynamic_probing_ = dynamic_probe;
         return p.UpdateInterpolateFlowLocked(now, FrameGenSynthesisMode::kInterpolate, true);
@@ -16003,6 +16008,36 @@ class FrameGenFlowTestPeer {
     static void Select(FrameGenPresenter& p, FrameGenInterpolateFlow mode) {
         std::scoped_lock lock(p.mutex_);
         p.settings_.interpolate_flow = mode;
+    }
+    // VECTORXR_FRAMEGEN_FLOW_FALLBACK=legacy, as Start reads it.
+    static void Legacy(FrameGenPresenter& p, bool legacy) {
+        std::scoped_lock lock(p.mutex_);
+        p.interpolate_flow_legacy_ = legacy;
+    }
+    static void Policy(FrameGenPresenter& p, const FrameGenInterpolateFlowPolicy& policy) {
+        std::scoped_lock lock(p.mutex_);
+        p.interpolate_flow_policy_ = policy;
+    }
+    static std::pair<std::uint64_t, std::uint64_t> HardwareOwnTimings(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        return {p.totals_.hardware_late, p.totals_.hardware_late_own};
+    }
+    // One analysis of a frame captured `captured` before its generated frame
+    // was due, hardware flow ending `hardware_lag` after it.
+    static void CaptureTiming(FrameGenPresenter& p, Clock::time_point now, std::chrono::milliseconds captured,
+                              std::chrono::milliseconds hardware_lag) {
+        std::scoped_lock lock(p.mutex_);
+        FrameGenPresenter::PendingFrame frame;
+        frame.real_due = now - 10ms;
+        frame.generated_due = now;
+        FrameGenAnalysisTiming timing;
+        timing.submission = 100 + p.totals_.analyses_timed;
+        timing.capture_end = now - captured;
+        timing.start = timing.capture_end;
+        timing.hardware_start = timing.capture_end;
+        timing.hardware_end = now + hardware_lag;
+        timing.end = timing.hardware_end;
+        p.NoteGpuTimingLocked(timing.submission, frame, std::nullopt, {timing}, {}, true);
     }
     static void Pause(FrameGenPresenter& p) {
         std::scoped_lock lock(p.mutex_);
@@ -16104,11 +16139,35 @@ void TestInterpolateFlowCounterWindows() {
     Check(Peer::Get(stale).reason.find("stale motion") != std::string::npos,
           "flow: fallback explains stale motion");
 
+    // Motion not measured in time is the flow's own lateness.
     FrameGenPresenter unready;
     Peer::Prepare(unready, zero);
-    Check(Peer::Feed(unready, zero + 10s, 1000, 0, 4), "flow: first unready window stays");
-    Check(!Peer::Feed(unready, zero + 20s, 1000, 0, 4), "flow: 12 unready per30s twice falls back");
-    Check(Peer::Get(unready).reason.find("unready") != std::string::npos, "flow: unready reason");
+    Check(Peer::Feed(unready, zero + 10s, 1000, 0, 0, 100, 0, false, false, std::nullopt, 4),
+          "flow: first unmeasured window stays");
+    Check(!Peer::Feed(unready, zero + 20s, 1000, 0, 0, 100, 0, false, false, std::nullopt, 4),
+          "flow: 12 unmeasured per30s twice falls back");
+    Check(Peer::Get(unready).reason.find("motion not measured in time") != std::string::npos,
+          "flow: unmeasured reason (" + Peer::Get(unready).reason + ")");
+
+    // A real frame not captured yet is the game's frame still on the GPU:
+    // a GPU-bound game below about 44 fps has 20 to 50 such refreshes per
+    // 30 s on either flow (DCS, 2026-11-20). They keep hardware flow.
+    FrameGenPresenter uncaptured;
+    Peer::Prepare(uncaptured, zero);
+    for (int i = 1; i <= 6; ++i) {
+        Check(Peer::Feed(uncaptured, zero + i * 10s, 1000, 0, 15), "flow: uncaptured window keeps hardware");
+    }
+    Check(Peer::Get(uncaptured).fallbacks == 0 && Peer::Get(uncaptured).bad == 0,
+          "flow: 45 uncaptured per 30 s never falls back");
+    // VECTORXR_FRAMEGEN_FLOW_FALLBACK=legacy: as before.
+    FrameGenPresenter legacy;
+    Peer::Prepare(legacy, zero);
+    Peer::Legacy(legacy, true);
+    Check(Peer::Feed(legacy, zero + 10s, 1000, 0, 4), "flow legacy: first unready window stays");
+    Check(!Peer::Feed(legacy, zero + 20s, 1000, 0, 4), "flow legacy: 12 unready per30s twice falls back");
+    Check(Peer::Get(legacy).reason.find("unready ") == 0 ||
+              Peer::Get(legacy).reason.find("auto fallback: unready") != std::string::npos,
+          "flow legacy: unready reason (" + Peer::Get(legacy).reason + ")");
 
     FrameGenPresenter lag;
     Peer::Prepare(lag, zero);
@@ -16125,6 +16184,28 @@ void TestInterpolateFlowCounterWindows() {
     Peer::Timing(timing, zero + 2s, 20ms, 0ms, false);
     Check(Peer::HardwareTimings(timing) == std::pair<std::uint64_t, std::uint64_t>{2, 1},
           "flow: lag is attributed to hardware completion only");
+
+    // Late hardware of a frame captured with time to spare is the flow's; of
+    // one captured too late for any flow (past capture_allowance), not.
+    FrameGenPresenter own;
+    Peer::CaptureTiming(own, zero, 5ms, 3ms);     // captured 5 ms ahead, hardware 3 ms late: its own
+    Peer::CaptureTiming(own, zero + 1s, 0ms, 3ms); // captured at the deadline: the game's
+    Peer::CaptureTiming(own, zero + 2s, -4ms, 3ms); // captured after it: the game's
+    Peer::CaptureTiming(own, zero + 3s, 5ms, -1ms); // in time
+    Check(Peer::HardwareOwnTimings(own) == std::pair<std::uint64_t, std::uint64_t>{3, 1},
+          "flow: late hardware of late captures is not the flow's own (" +
+              std::to_string(Peer::HardwareOwnTimings(own).first) + " late, " +
+              std::to_string(Peer::HardwareOwnTimings(own).second) + " own)");
+    // Only own lateness falls back; legacy counts all of it.
+    for (const bool legacy_rule : {false, true}) {
+        FrameGenPresenter late_capture;
+        Peer::Prepare(late_capture, zero);
+        Peer::Legacy(late_capture, legacy_rule);
+        Peer::Feed(late_capture, zero + 10s, 1000, 0, 0, 100, 40, false, false, std::nullopt, 0, 5);
+        Peer::Feed(late_capture, zero + 20s, 1000, 0, 0, 100, 40, false, false, std::nullopt, 0, 5);
+        Check(Peer::Get(late_capture).hardware == !legacy_rule,
+              std::string("flow: 40% late of which 5% own ") + (legacy_rule ? "falls back (legacy)" : "stays"));
+    }
 }
 
 void TestInterpolateFlowRecoveryBackoff() {
