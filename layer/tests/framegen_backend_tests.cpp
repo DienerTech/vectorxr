@@ -12372,6 +12372,12 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
     encoding.near_z = 0.1f;
     encoding.far_z = options.infinite_far ? std::numeric_limits<float>::infinity() : 1000.0f;
     FrameGenTuning tuning;
+    // The engine scenarios weigh the game's vectors against the measured flow
+    // they were tuned with: the shader flow without the flow prior and the
+    // shortest search (both switches set off). The prior would also filter
+    // the merged vectors, an engine-vector question of its own.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     tuning.mode = options.synthesis;
     tuning.fractions[0] = options.fraction;
     tuning.generated = 1;
