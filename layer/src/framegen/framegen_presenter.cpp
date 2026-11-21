@@ -624,6 +624,10 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     //   VECTORXR_FRAMEGEN_AUTO_CADENCE_FILTER=0  every frame feeds Auto's
     //     cadence again: those without a projection layer, those late around
     //     a swapchain being made or destroyed, the first after a pause.
+    //   VECTORXR_FRAMEGEN_AUTO_ENGAGE_BELOW=0  at full rate Auto engages only
+    //     once over 30% of frames take more than 1.25 refreshes, not below
+    //     90% of the refresh rate as Dynamic does, and a probe at full rate
+    //     holds on the same terms.
     {
         const auto rule = [&](const char* name, bool& value, const char* off) {
             value = ReadResearchSwitch(name) != "0";
@@ -633,6 +637,8 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
         };
         rule("VECTORXR_FRAMEGEN_AUTO_CADENCE_FILTER", auto_rules_.cadence_filter,
              "counts every frame in its cadence, as before 0.22");
+        rule("VECTORXR_FRAMEGEN_AUTO_ENGAGE_BELOW", auto_rules_.engage_below,
+             "engages from full rate only once frames take over 1.25 refreshes, as before 0.22");
     }
     // VECTORXR_FRAMEGEN_HALVING_PUSH=<seconds>, 0 to 120: Dynamic keeps
     // presenting that long into an engagement that finds the runtime holding
@@ -1171,6 +1177,7 @@ void FrameGenPresenter::Stop() {
     probing_ = false;
     late_at_ceiling_since_.reset();
     auto_no_projection_ = false;
+    auto_below_since_.reset();
     swapchain_changed_at_ = {};
     runtime_formats_.clear();
     frames_.clear();
@@ -3611,6 +3618,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         last_app_end_ = now;
         cadence_.clear();
         dynamic_below_since_.reset(); // standing by, the game's rate is measured afresh
+        auto_below_since_.reset();
         if (clock_displaced_ && dynamic && dynamic_standby_) {
             dynamic_reason_ = RuntimeClockTextLocked();
         }
@@ -3741,6 +3749,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         last_app_end_ = now;
         cadence_.clear();
         late_at_ceiling_since_.reset();
+        auto_below_since_.reset();
         return;
     }
     if (auto_no_projection_) {
@@ -3748,6 +3757,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         multiplier_changed_at_ = now;
         last_app_end_ = now;
         cadence_.clear();
+        auto_below_since_.reset();
         return;
     }
     // Frames right after a change (a new multiplier, engaging, new output
@@ -3760,28 +3770,28 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     // runtime's clock recovering, new output images) settles in full.
     const bool probe_switch = probing_ && multiplier_changed_at_ == probe_started_at_;
     const auto settle = probe_switch ? std::min(auto_settle_, kAutoProbeSettle) : auto_settle_;
+    // An engaged frame should take N refreshes; a passed-through one, one.
+    // One refresh, not the period reported, where that only echoed the
+    // game's own frame interval (SteamVR with Pimax's headset driver; the
+    // frame's wait showed it, NoteRuntimeHalvingLocked): judged against
+    // its own interval a slow game would never read as late, and Auto
+    // would never engage for it. A period the runtime holds frames to
+    // stays what a passed-through frame is judged by.
+    const XrDuration cadence_period =
+        frame && !frame->engaged && frame->period_echoed && refresh_period_ > 0 ? std::min(period, refresh_period_)
+                                                                                : period;
+    // A gap that is not the game's pace (as the lead and Dynamic take it).
+    const bool after_pause = last_app_end_ && now - *last_app_end_ > std::chrono::nanoseconds(PauseLimitLocked());
     if (last_app_end_ && now - multiplier_changed_at_ >= settle) {
-        // An engaged frame should take N refreshes; a passed-through one, one.
-        // One refresh, not the period reported, where that only echoed the
-        // game's own frame interval (SteamVR with Pimax's headset driver; the
-        // frame's wait showed it, NoteRuntimeHalvingLocked): judged against
-        // its own interval a slow game would never read as late, and Auto
-        // would never engage for it. A period the runtime holds frames to
-        // stays what a passed-through frame is judged by.
         const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
-        const XrDuration cadence_period =
-            frame && !frame->engaged && frame->period_echoed && refresh_period_ > 0 ? std::min(period, refresh_period_)
-                                                                                    : period;
         const auto expected =
             std::chrono::nanoseconds(static_cast<std::int64_t>(cadence_period * multiplier * kAutoLateFactor));
         const auto took = now - *last_app_end_;
         const bool late = took > expected;
-        // Nor does the first frame after a pause (a gap that is not the
-        // game's pace, as the lead and Dynamic take it: PauseLimitLocked), or
-        // one late while the game made or destroyed a swapchain: a hitch's
-        // one long frame among the few a second holds after it reads as a
-        // large late share, and a mode switch's stall is not load.
-        const bool after_pause = took > std::chrono::nanoseconds(PauseLimitLocked());
+        // Nor does the first frame after a pause (PauseLimitLocked), or one
+        // late while the game made or destroyed a swapchain: a hitch's one
+        // long frame among the few a second holds after it reads as a large
+        // late share, and a mode switch's stall is not load.
         const bool swapchain = swapchain_changed_at_ != Clock::time_point{} && swapchain_changed_at_ <= now &&
                                swapchain_changed_at_ + auto_rules_.swapchain_settle >= *last_app_end_;
         if (auto_rules_.cadence_filter && late && (after_pause || swapchain)) {
@@ -3830,9 +3840,42 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     bool gave_up_inline = false;
     bool late_at_ceiling = false;
     std::chrono::duration<double> left_ceiling_after{}; // for the log: a probe down from there
+    // At full rate a frame is late only past 1.25 refreshes: a game running
+    // at 80 to 99% of the refresh rate never is, and Auto stood by while it
+    // dropped a refresh several times a second (Star Citizen on a 72 Hz
+    // headset, 2026-11-21: 53 to 67 fps for six minutes with 30 s of
+    // generated frames, "the application holds full refresh"). As Dynamic
+    // engages: the game's rate below its share of the refresh rate for its
+    // time without a break, on the period a passed-through frame is judged
+    // by. A probe at full rate holds only above Dynamic's higher share, so a
+    // game hovering at the threshold stays engaged once it was: its probes
+    // fail and back off, instead of holding for a while and engaging again.
+    // A pause is not the game's rate.
+    bool below = false;
+    std::string below_text; // for the log
+    if (auto_rules_.engage_below && auto_multiplier_ == 1 && cadence_period > 0 && !after_pause) {
+        const double refresh = 1e9 / static_cast<double>(cadence_period);
+        const double limit = (probing_ ? dynamic_policy_.stay_above : dynamic_policy_.engage_below) * refresh;
+        const double rate = RateSince(app_frames_, now, multiplier_changed_at_ + settle);
+        if (!(rate > 0.0 && rate < limit)) {
+            auto_below_since_.reset();
+        } else if (!auto_below_since_) {
+            auto_below_since_ = now;
+        } else if (judged && now - *auto_below_since_ >= dynamic_policy_.engage_after) {
+            below = true;
+            below_text = "the game ran at " + Number(rate, 1) + " fps, below " + Number(limit, 1) + " of " +
+                         Number(refresh, 1) + ", for " +
+                         Number(std::chrono::duration<double>(now - *auto_below_since_).count(), 1) + " s";
+        }
+    } else {
+        auto_below_since_.reset();
+    }
     // More than 30% of the last second's frames missed the cadence: step up.
-    if (judged && recent >= 8 && recent_late * 10 > recent * 3) {
-        auto_late_percent_ = recent_late * 100 / recent;
+    const bool late_share = judged && recent >= 8 && recent_late * 10 > recent * 3;
+    if (late_share || below) {
+        if (late_share) {
+            auto_late_percent_ = recent_late * 100 / recent;
+        }
         if (!compositor_running_ && auto_multiplier_ > 1 && recent_started_late * 2 >= recent_late) {
             // Inline cycles that start late hold the game's frame thread for
             // the generated slots, so a higher multiplier only slows it more.
@@ -3879,6 +3922,14 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         probing_ = false;
         probe_backoff_ = auto_initial_backoff_;
         probe_not_before_ = now + probe_backoff_;
+        if (logger_) {
+            const double rate = RatePerSecond(app_frames_, now);
+            logger_->Info("Frame Generation automatic multiplier stays at " +
+                          (auto_multiplier_ == 1 ? std::string("full rate") : MultiplierText(auto_multiplier_)) +
+                          ": the probe held for " +
+                          Number(std::chrono::duration<double>(now - multiplier_changed_at_).count(), 0) + " s" +
+                          (rate > 0.0 ? ", the game at " + Number(rate, 1) + " fps." : "."));
+        }
     } else if (!probing_ && auto_multiplier_ > 1 && now >= probe_not_before_ && !cadence_.empty() &&
                now - cadence_.front().time >= auto_steady_ && steady >= 8 && steady_late * 50 <= steady &&
                AutoProbeInReachLocked(auto_multiplier_ - 1, GameGridLocked())) {
@@ -3901,6 +3952,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             probe_started_at_ = now;
         }
         cadence_.clear();
+        auto_below_since_.reset();
         if (logger_ && gave_up_inline) {
             logger_->Info("Frame Generation automatic multiplier " + MultiplierText(before) +
                           " -> full rate: generated cycles kept starting late (" + std::to_string(auto_late_percent_) +
@@ -3913,7 +3965,8 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             logger_->Info("Frame Generation automatic multiplier " +
                           (before == 1 ? std::string("full rate") : MultiplierText(before)) + " -> " +
                           (auto_multiplier_ == 1 ? std::string("full rate") : MultiplierText(auto_multiplier_)) +
-                          (up ? " (" + std::to_string(auto_late_percent_) + "% of frames late" +
+                          (up ? " (" +
+                                    (late_share ? std::to_string(auto_late_percent_) + "% of frames late" : below_text) +
                                     (probe_backoff_ > auto_initial_backoff_
                                          ? ", next probe in " + std::to_string(probe_backoff_.count() / 1000) + " s"
                                          : std::string()) +
@@ -4308,6 +4361,7 @@ void FrameGenPresenter::AutoReenableLocked() {
     auto_halving_hold_until_.reset();
     auto_halving_hold_ = dynamic_policy_.hold;
     auto_no_projection_ = false;
+    auto_below_since_.reset();
 }
 
 void FrameGenPresenter::MaybeRetryLocked() {
@@ -4364,7 +4418,29 @@ void FrameGenPresenter::SetStateLocked(FrameGenState state, const std::string& r
                       (rate > 0.0 ? "the game runs at " + Number(rate, 1) + " fps" : std::string("frames pass straight through")) +
                       " (engages below " + Number(dynamic_policy_.engage_below * refresh, 1) + ").");
     } else if (state == FrameGenState::kActive && full_rate_) {
-        logger_->Info("Frame Generation standing by: the application holds full refresh.");
+        // Said only where it is so: Auto also stands by for a game below the
+        // refresh rate that it has not engaged for yet (or, without
+        // FrameGenAutoRules::engage_below, never does). The game's rate right
+        // after a switch is the engaged one's, not its own, and a few frames'
+        // is none: a probe that holds says the rate it held (UpdateAutoLocked).
+        const auto now = Clock::now();
+        const XrDuration period = refresh_period_ > 0 ? refresh_period_ : last_period_;
+        const double refresh = period > 0 ? 1e9 / static_cast<double>(period) : 0.0;
+        double rate = now - multiplier_changed_at_ >= std::chrono::seconds(1) ? RatePerSecond(app_frames_, now) : 0.0;
+        if (app_frames_.size() < 2 || app_frames_.back() - app_frames_.front() < std::chrono::milliseconds(500)) {
+            rate = 0.0;
+        }
+        if (rate <= 0.0 || refresh <= 0.0) {
+            logger_->Info("Frame Generation standing by: frames pass straight through.");
+        } else if (rate >= dynamic_policy_.stay_above * refresh) {
+            logger_->Info("Frame Generation standing by: the application holds full refresh.");
+        } else {
+            logger_->Info("Frame Generation standing by: the application runs at " + Number(rate, 1) + " fps of " +
+                          Number(refresh, 1) +
+                          (auto_rules_.engage_below
+                               ? " (engages below " + Number(dynamic_policy_.engage_below * refresh, 1) + ")."
+                               : " (engages once its frames take over " + Number(kAutoLateFactor, 2) + " refreshes)."));
+        }
     } else if (state == FrameGenState::kActive && DynamicLocked()) {
         logger_->Info(std::string("Frame Generation engaged: ") + ToString(settings_.synthesis_mode) +
                       " dynamic, the application runs at its own rate and generated frames fill the refreshes "
@@ -11062,7 +11138,9 @@ FrameGenStatus FrameGenPresenter::Status() const {
     const XrDuration grid = refresh_period_ > 0 ? GameGridLocked() : 0;
     if (status.automatic && grid > 0) {
         // UpdateAutoLocked's thresholds as frame rates: a step up once more
-        // than 30% of frames take kAutoLateFactor times their refreshes; a
+        // than 30% of frames take kAutoLateFactor times their refreshes (at
+        // full rate, below Dynamic's share of the refresh rate: that comes
+        // first); a
         // probe one step down after five steady seconds, from its own thread
         // only for a game whose own time per frame is within reach of it
         // (AutoProbeInReachLocked), inline for any game holding its step.
@@ -11083,7 +11161,10 @@ FrameGenStatus FrameGenPresenter::Status() const {
         const double judged_hz = last_period_ > 0 ? 1e9 / static_cast<double>(last_period_) : grid_hz;
         if (auto_multiplier_ < std::min(auto_memory_ceiling_, kMaxMultiplier) && !held && !memory_pressure &&
             !clock_displaced_) {
-            status.auto_step_up_below_fps = judged_hz / (kAutoLateFactor * auto_multiplier_);
+            status.auto_step_up_below_fps =
+                auto_multiplier_ == 1 && auto_rules_.engage_below
+                    ? dynamic_policy_.engage_below * judged_hz
+                    : judged_hz / (kAutoLateFactor * auto_multiplier_);
         }
         if (auto_multiplier_ > 1) {
             status.auto_step_down_above_fps =

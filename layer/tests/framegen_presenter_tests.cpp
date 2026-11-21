@@ -2157,11 +2157,12 @@ void TestAutomaticMultiplier() {
         }
     };
     // Its thresholds as frame rates (the public status file's): at full rate
-    // a step up below 80% of the refresh rate, no step down.
+    // a step up below 90% of the refresh rate (as Dynamic engages), no step
+    // down.
     FrameGenStatus status = presenter.Status();
     Check(status.grid_period_ns > 0, "auto: the grid is known");
     double grid_hz = 1e9 / static_cast<double>(status.grid_period_ns);
-    Check(std::abs(status.auto_step_up_below_fps - grid_hz / 1.25) < 0.01 && status.auto_step_down_above_fps == 0.0,
+    Check(std::abs(status.auto_step_up_below_fps - grid_hz * 0.9) < 0.01 && status.auto_step_down_above_fps == 0.0,
           "auto at full rate: steps up below " + std::to_string(status.auto_step_up_below_fps) + " fps");
     run(1500ms, 30ms);
     Check(presenter.Status().multiplier >= 3, "auto: a slow app steps up to 3x or more");
@@ -14136,6 +14137,7 @@ int RunGame(App& app, std::chrono::milliseconds duration, const std::vector<std:
 FrameGenAutoRules AutoRulesOff() {
     FrameGenAutoRules rules;
     rules.cadence_filter = false;
+    rules.engage_below = false;
     return rules;
 }
 
@@ -14237,6 +14239,170 @@ void TestAutoCadenceLeavesOutUnrelatedFrames() {
             Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
         }
     }
+}
+
+// Auto's judgements about the game's rate, quick: below the refresh rate
+// 0.6 s engages, after a 0.25 s settle.
+FrameGenDynamicPolicy QuickAutoRate() {
+    FrameGenDynamicPolicy policy;
+    policy.engage_after = 600ms;
+    policy.settle = 250ms;
+    return policy;
+}
+
+// Auto stood by while the game ran below the refresh rate without any frame
+// taking over 1.25 refreshes (Star Citizen at 53 to 67 fps on a 72 Hz
+// headset, 2026-11-21: six minutes with 30 s of generated frames, the log
+// saying "the application holds full refresh"). It engages below 90% of the
+// refresh rate as Dynamic does: a game at 86% (one frame in six takes two
+// refreshes, 17% late) gets 2x. With the rule off it stands by as before,
+// and the log no longer says it holds full refresh.
+void TestAutoEngagesBelowRefresh() {
+    struct Scenario {
+        const char* name;
+        std::vector<int> ticks;
+        bool engage_below;
+    };
+    const std::vector<Scenario> scenarios = {
+        {"86% of the refresh rate", {1, 1, 1, 1, 1, 2}, true},
+        {"86% of the refresh rate, rule off", {1, 1, 1, 1, 1, 2}, false},
+        {"the refresh rate", {1}, true},
+    };
+    for (const Scenario& scenario : scenarios) {
+        const std::string name = std::string("auto below refresh, ") + scenario.name;
+        FrameGenAutoRules rules = AutoRulesOff();
+        rules.engage_below = scenario.engage_below;
+        AutoGame game("auto-below", rules);
+        game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 30s);
+        game.presenter.SetDynamicPolicy(QuickAutoRate());
+        // Standing by begins once the game's rate is known.
+        game.presenter.SetEngagementPolicy(3, 1200ms);
+        std::uint32_t highest = 0;
+        std::optional<TimePoint> engaged;
+        const auto started = std::chrono::steady_clock::now();
+        RunTicks(*game.app, 5000ms, scenario.ticks, [&](const XrFrameState&) {
+            const std::uint32_t multiplier = game.Multiplier();
+            highest = std::max(highest, multiplier);
+            if (!engaged && multiplier >= 2) engaged = std::chrono::steady_clock::now();
+            return false;
+        });
+        const FrameGenStatus status = game.presenter.Status();
+        game.presenter.Stop();
+        const std::string said = AutoLines(game.log);
+        const bool slow = scenario.ticks.size() > 1;
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": highest " << highest << "x"
+                      << (engaged ? " after " + std::to_string(Seconds(*engaged - started)) + " s" : std::string()) << said
+                      << "\n";
+            for (const std::string& line : game.log.Lines("standing by")) std::cerr << "  " << line << "\n";
+        }
+        if (slow && scenario.engage_below) {
+            Check(highest == 2 && status.multiplier == 2 && status.threaded,
+                  name + ": Auto engages at 2x and stays (" + std::to_string(highest) + "x" + said + ")");
+            Check(game.log.Lines("the game ran at").size() == 1 && game.log.Lines("% of frames late").empty(),
+                  name + ": the log says the game's rate was why" + said);
+        } else {
+            Check(highest == 1, name + ": Auto stands by (" + std::to_string(highest) + "x" + said + ")");
+        }
+        // "holds full refresh" only for a game that does.
+        const std::size_t holds = game.log.Lines("the application holds full refresh").size();
+        const std::size_t runs = game.log.Lines("standing by: the application runs at").size();
+        Check(slow ? holds == 0 : holds >= 1 && runs == 0,
+              name + ": the stand-by line says what the game does (" + std::to_string(holds) + " hold, " +
+                  std::to_string(runs) + " run at)");
+        if (slow && !scenario.engage_below) {
+            Check(runs >= 1, name + ": standing by below the refresh rate, the log gives the game's rate");
+        }
+        Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// As RunTicks while Auto is at full rate (each frame takes ticks[i % size]
+// refreshes against the paced runtime); held at a multiplier the game has
+// room to spare and its frames take `held` each, evenly.
+int RunTicksAtFullRate(AutoGame& game, std::chrono::milliseconds duration, const std::vector<int>& ticks,
+                       std::chrono::microseconds held, const std::function<bool(const XrFrameState&)>& each = {}) {
+    const auto start = std::chrono::steady_clock::now();
+    int frames = 0;
+    while (std::chrono::steady_clock::now() - start < duration) {
+        const XrFrameState state = game.app->Wait();
+        game.app->Begin();
+        const int tick = ticks[static_cast<std::size_t>(frames) % ticks.size()];
+        const auto work = game.Multiplier() >= 2
+                              ? held
+                              : std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::nanoseconds(tick * game.runtime.period)) -
+                                    3ms;
+        SleepPrecise(std::chrono::steady_clock::now() + work);
+        game.app->Release();
+        Check(XR_SUCCEEDED(game.app->End(state.predictedDisplayTime)), "ticks at full rate: end");
+        ++frames;
+        if (each && each(state)) break;
+    }
+    return frames;
+}
+
+// A game hovering at the threshold (89% and 92% of the refresh rate by
+// turns at full rate; held at 2x it has room to spare and runs evenly)
+// engages once and stays engaged: a probe at full rate holds only
+// above 95%, so each fails and the next waits longer. Without that margin a
+// probe would hold through a 92% turn, the back-off would start over, and
+// the next 89% turn would engage again (Star Citizen, 2026-11-21, 07:57 to
+// 08:03: 2x for 10 to 80 s at a time with 6 to 21 s standing by between).
+void TestAutoHoversWithoutFlapping() {
+    const std::string name = "auto hovering at the threshold";
+    FrameGenAutoRules rules;
+    AutoGame game("auto-hover", rules);
+    game.presenter.SetAutoPolicy(300ms, 500ms, 1500ms, 1500ms);
+    game.presenter.SetDynamicPolicy(QuickAutoRate());
+    std::optional<TimePoint> engaged;
+    std::uint32_t last = 1;
+    int probes = 0;
+    TimePoint at_full_rate_since{};
+    double full_rate_s = 0.0;
+    const auto each = [&](const XrFrameState&) {
+        const auto now = std::chrono::steady_clock::now();
+        const std::uint32_t multiplier = game.Multiplier();
+        if (!engaged && multiplier >= 2) engaged = now;
+        if (engaged && multiplier == 1 && last >= 2) {
+            ++probes;
+            at_full_rate_since = now;
+        }
+        if (engaged && multiplier >= 2 && last == 1 && at_full_rate_since != TimePoint{}) {
+            full_rate_s += Seconds(now - at_full_rate_since);
+        }
+        last = multiplier;
+        return false;
+    };
+    const auto started = std::chrono::steady_clock::now();
+    for (int turn = 0; turn < 6; ++turn) {
+        RunTicksAtFullRate(game, 1500ms, {1, 1, 1, 1, 1, 1, 1, 2}, 4ms, each);             // 89%
+        RunTicksAtFullRate(game, 1500ms, {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2}, 4ms, each); // 92%
+    }
+    const double ran = Seconds(std::chrono::steady_clock::now() - started);
+    const std::uint32_t ended = game.Multiplier();
+    game.presenter.Stop();
+    const std::string said = AutoLines(game.log);
+    if (std::getenv("FG_TEST_STATS")) {
+        std::cerr << name << ": " << probes << " probes, " << full_rate_s << " s of " << ran
+                  << " s at full rate after engaging" << said << "\n";
+    }
+    Check(engaged && Seconds(*engaged - started) < 6.0 && ended == 2,
+          name + ": it engages at 2x (" + std::to_string(ended) + "x" + said + ")");
+    // Every return to 2x after the first is a failed probe's (its line names
+    // the longer wait): none held, so the back-off never started over.
+    const std::vector<std::string> ups = game.log.Lines("automatic multiplier full rate -> 2x");
+    const auto failed = std::count_if(ups.begin(), ups.end(), [](const std::string& line) {
+        return line.find("next probe in") != std::string::npos;
+    });
+    Check(!ups.empty() && failed == static_cast<std::ptrdiff_t>(ups.size()) - 1 &&
+              game.log.Lines("stays at full rate").empty(),
+          name + ": no probe at full rate holds (" + std::to_string(ups.size()) + " engagements, " +
+              std::to_string(failed) + " of them failed probes" + said + ")");
+    Check(probes >= 1 && probes <= 4 && full_rate_s < 0.3 * ran,
+          name + ": it stays engaged (" + std::to_string(probes) + " probes, " + std::to_string(full_rate_s) +
+              " s at full rate" + said + ")");
+    Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
 // A probe's settle is 250 ms since b2ef6a8, tested with one late frame. A
@@ -17089,6 +17255,8 @@ int main(int argc, char** argv) {
     GROUP("auto");
     RUN(TestAutoToggleStartsFresh);
     RUN(TestAutoCadenceLeavesOutUnrelatedFrames);
+    RUN(TestAutoEngagesBelowRefresh);
+    RUN(TestAutoHoversWithoutFlapping);
     g_jit = false;
     // The lead against hitches and late frames.
     GROUP("lead");

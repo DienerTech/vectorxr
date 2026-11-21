@@ -124,7 +124,9 @@ struct FrameGenStatus {
     bool full_rate{false};       // automatic and the app holds full refresh
     // Automatic: the game's rate below which it steps up (0 while it would
     // not: no higher step, held at full rate, video memory near its
-    // budget), and the game's own rate (its time per frame, the hold left
+    // budget; at full rate Dynamic's share of the refresh rate, engaged the
+    // rate at which frames take over 1.25 times their refreshes), and the
+    // game's own rate (its time per frame, the hold left
     // out) from which it tries one step down (0 at full rate). Frames per
     // second, on the grid the game's frames are timed by (grid_period_ns).
     double auto_step_up_below_fps{0.0};
@@ -333,6 +335,12 @@ struct FrameGenAutoRules {
     // A late frame this soon after the game made or destroyed a swapchain
     // carries that cost.
     std::chrono::milliseconds swapchain_settle{500};
+    // VECTORXR_FRAMEGEN_AUTO_ENGAGE_BELOW: at full rate Auto also engages
+    // once the game runs below Dynamic's share of the refresh rate for
+    // Dynamic's time (FrameGenDynamicPolicy::engage_below, engage_after), not
+    // only once its frames take over 1.25 refreshes; a probe at full rate
+    // holds only above Dynamic's stay_above.
+    bool engage_below{true};
 };
 
 // Interpolate's hardware-flow fallback. Tests shorten these times; the
@@ -1637,6 +1645,9 @@ class FrameGenPresenter {
     std::uint64_t auto_end_held_frame_{0}; // the frame whose end was held then
     std::size_t auto_late_percent_{0}; // for the log
     FrameGenAutoRules auto_rules_;
+    // Auto at full rate (engage_below): since when the game has run below
+    // the share of the refresh rate it engages under, without a break.
+    std::optional<std::chrono::steady_clock::time_point> auto_below_since_;
     // The last frame Auto saw had no projection layer (cadence_filter): the
     // next one with one starts its cadence afresh.
     bool auto_no_projection_{false};
