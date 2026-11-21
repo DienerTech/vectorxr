@@ -718,18 +718,19 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # side under ctest -j: 45-160 s each on a desktop, about 18 minutes in all. -R depthxr_framegen_presenter_tests_
         # selects them. They create no graphics device.
         set(_presenter_tests "")
-        foreach(_group IN ITEMS pacing lifecycle quad clocks probe_burst lead ceiling policy policy_late)
+        foreach(_group IN ITEMS pacing lifecycle quad clocks probe_burst auto lead ceiling policy policy_late)
             add_test(NAME depthxr_framegen_presenter_tests_${_group}
                      COMMAND depthxr_framegen_presenter_tests --group ${_group})
             list(APPEND _presenter_tests depthxr_framegen_presenter_tests_${_group})
         endforeach()
         # COST: CTest starts the longest tests first, before it has timings of its own.
         set_tests_properties(${_presenter_tests} PROPERTIES TIMEOUT 600 COST 200)
-        # These three assert on frame rates and timelines with a few milliseconds to spare each frame: beside
+        # These four assert on frame rates and timelines with a few milliseconds to spare each frame: beside
         # other tests they came in late now and then, and alone they pass. They run with nothing else.
         set_tests_properties(depthxr_framegen_presenter_tests_pacing
                              depthxr_framegen_presenter_tests_lifecycle
-                             depthxr_framegen_presenter_tests_clocks PROPERTIES RUN_SERIAL TRUE)
+                             depthxr_framegen_presenter_tests_clocks
+                             depthxr_framegen_presenter_tests_auto PROPERTIES RUN_SERIAL TRUE)
         # The submitted-image module and screenshots: the CPU half with no
         # argument, readback on the software adapter (WARP) with d3d11 or d3d12.
         add_executable(depthxr_imaging_tests tests/imaging_tests.cpp)

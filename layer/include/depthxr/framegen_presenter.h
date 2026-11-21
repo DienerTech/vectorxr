@@ -964,6 +964,10 @@ class FrameGenPresenter {
     // Turned back on (toggled, configured, retried after a pause): Dynamic
     // stands by again and judges the game's rate afresh.
     void DynamicReenableLocked(std::chrono::steady_clock::time_point now);
+    // Auto starts as a session does when Frame Generation is turned on
+    // again (its binding, or the app): full rate, the first back-off, no
+    // probe pending. The video memory ceiling stays.
+    void AutoReenableLocked();
     // Seconds standing by this session (Dynamic).
     double StandbySecondsLocked(std::chrono::steady_clock::time_point now) const;
     // ", dynamic=standby (reason)" or engaged for summaries; empty unless Dynamic.

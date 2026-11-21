@@ -14017,6 +14017,83 @@ void TestAutoProbeAllowsLatencyAndShortHitch() {
     }
 }
 
+// The "automatic multiplier" lines a session logged, for a failing check.
+std::string AutoLines(SessionLog& log) {
+    std::string said;
+    for (const std::string& line : log.Lines("Frame Generation")) {
+        if (line.find("automatic multiplier") != std::string::npos || line.find("Frame Generation engaged") != std::string::npos) {
+            said += " | " + line.substr(line.find("Frame Generation"));
+        }
+    }
+    return said;
+}
+
+// Turning Frame Generation off and on is how a user asks Auto for a fresh
+// look (Star Citizen, 2026-11-21: three presses 14 s after a step to 4x each
+// engaged again at 4x, the 80 s back-off still running). Auto starts over as
+// at session start: full rate, then the multiplier the game needs now, with
+// the first back-off before its first probe.
+void TestAutoToggleStartsFresh() {
+    const std::string name = "auto toggle";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("auto-toggle");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kAuto, app, runtime, owned,
+             log.logger.get());
+    presenter.SetAutoPolicy(300ms, 500ms, 600ms, 300ms);
+    // 1.1 refreshes of work a frame: 2x, within reach of full rate (0.94),
+    // where a paced runtime holds it to two refreshes a frame. Every probe
+    // fails, and the back-off doubles to its longest (2.4 s).
+    const auto fails_probes = PeriodsOfWork(kPeriod, 1.1);
+    RunWork(*app, 6000ms, fails_probes);
+    const std::uint32_t engaged = presenter.Status().multiplier;
+    // A heavy scene: up to 4x.
+    RunWork(*app, 8000ms, PeriodsOfWork(kPeriod, 4.0), [&](const XrFrameState&) {
+        return presenter.Status().multiplier == 4 && presenter.Status().threaded;
+    });
+    const std::uint32_t climbed = presenter.Status().multiplier;
+    Check(!presenter.Toggle(), name + ": turned off");
+    RunWork(*app, 300ms, kLightWork);
+    Check(!presenter.Status().threaded, name + ": turned off, frames pass straight through");
+    Check(presenter.Toggle(), name + ": turned on");
+    const std::uint32_t fresh = presenter.Status().multiplier;
+    // The game as it was before the heavy scene: 2x again, never above it,
+    // and probed as soon as a fresh back-off allows (settle, steady and 0.3 s,
+    // not the 2.4 s the failed probes had left).
+    std::uint32_t highest = 0;
+    std::optional<TimePoint> at_2x;
+    double probed_after = -1.0;
+    RunWork(*app, 5000ms, fails_probes, [&](const XrFrameState&) {
+        const std::uint32_t multiplier = presenter.Status().multiplier;
+        const auto now = std::chrono::steady_clock::now();
+        highest = std::max(highest, multiplier);
+        if (!at_2x && multiplier == 2) at_2x = now;
+        if (at_2x && multiplier == 1) {
+            probed_after = Seconds(now - *at_2x);
+            return true;
+        }
+        return false;
+    });
+    presenter.Stop();
+    const std::string said = AutoLines(log);
+    if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": probed after " << probed_after << " s" << said << "\n";
+    Check(engaged == 2 && climbed == 4,
+          name + ": the game engaged at 2x and a heavy scene took it to 4x (" + std::to_string(engaged) + "x, " +
+              std::to_string(climbed) + "x" + said + ")");
+    Check(fresh == 1, name + ": turned on again, Auto is back at full rate (" + std::to_string(fresh) + "x)");
+    Check(at_2x && highest == 2,
+          name + ": it engages at the multiplier the game needs now, not the one from before (" +
+              std::to_string(highest) + "x at the highest" + said + ")");
+    Check(probed_after > 0.0 && probed_after < 1.9,
+          name + ": and probes after the first back-off, not the one failed probes had left (" +
+              std::to_string(probed_after) + " s" + said + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // A probe's settle is 250 ms since b2ef6a8, tested with one late frame. A
 // switch to a lower multiplier that costs a few late frames in a row (a
 // game's frame time catching up with its new period, the runtime's
@@ -16862,6 +16939,10 @@ int main(int argc, char** argv) {
     RUN(TestAutoProbeAllowsLatencyAndShortHitch);
     GROUP("probe_burst");
     RUN(TestAutoProbeSurvivesTransitionBurst);
+    // Auto's rules against a user's sessions (Star Citizen and Starfield,
+    // 2026-11-21): scenarios of several seconds each.
+    GROUP("auto");
+    RUN(TestAutoToggleStartsFresh);
     g_jit = false;
     // The lead against hitches and late frames.
     GROUP("lead");

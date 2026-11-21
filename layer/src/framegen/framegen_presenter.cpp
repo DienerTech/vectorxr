@@ -1432,6 +1432,7 @@ void FrameGenPresenter::SetConfigured(bool enabled) {
     healthy_streak_ = 0;
     if (enabled) {
         DynamicReenableLocked(Clock::now());
+        AutoReenableLocked();
     }
     if (started_ && state_ != FrameGenState::kUnavailable && state_ != FrameGenState::kPaused) {
         SetStateLocked(enabled && user_enabled_ ? FrameGenState::kWaiting : FrameGenState::kOff, "");
@@ -1984,16 +1985,16 @@ bool FrameGenPresenter::Toggle() {
         paused_at_.reset();
         last_pause_at_ = Clock::now();
         DynamicReenableLocked(Clock::now());
+        AutoReenableLocked();
         SetStateLocked(configured_enabled_ ? FrameGenState::kWaiting : FrameGenState::kOff, "");
     } else {
         user_enabled_ = !user_enabled_;
         if (user_enabled_) {
-            // Turned back on: Auto gets a fresh look, not the rest of a
-            // full-rate hold from before, and Dynamic judges the game's rate
-            // again before engaging.
-            inline_hold_until_.reset();
-            auto_halving_hold_until_.reset();
+            // Turned back on: Auto gets a fresh look, not the multiplier,
+            // back-off or full-rate hold from before, and Dynamic judges the
+            // game's rate again before engaging.
             DynamicReenableLocked(Clock::now());
+            AutoReenableLocked();
         }
         if (state_ != FrameGenState::kUnavailable) {
             SetStateLocked(user_enabled_ && configured_enabled_ ? FrameGenState::kWaiting : FrameGenState::kOff, "");
@@ -4204,6 +4205,28 @@ void FrameGenPresenter::DynamicReenableLocked(Clock::time_point now) {
     cadence_.clear();
     guard_.valid = false;
     guard_failing_ = {};
+}
+
+void FrameGenPresenter::AutoReenableLocked() {
+    // What Auto stepped up for (a hitch, a mode switch, a scene since left)
+    // says nothing about the game now, and turning Frame Generation off and
+    // on is how a user asks for a fresh look (Star Citizen, 2026-11-21: three
+    // presses each engaged again at 4x, with the 80 s back-off still
+    // running). As a session starts: full rate, the first back-off, no probe
+    // pending, no full-rate hold. DynamicReenableLocked, called beside this,
+    // clears the cadence and lets the change settle. The video memory ceiling
+    // and its recoveries stay: they follow the process's budget, not the
+    // game's pace. An automatic retry after a pause does not come here.
+    auto_multiplier_ = 1;
+    probing_ = false;
+    probe_from_ = 0;
+    probe_started_at_ = {};
+    probe_backoff_ = auto_initial_backoff_;
+    probe_not_before_ = {};
+    late_at_ceiling_since_.reset();
+    inline_hold_until_.reset();
+    auto_halving_hold_until_.reset();
+    auto_halving_hold_ = dynamic_policy_.hold;
 }
 
 void FrameGenPresenter::MaybeRetryLocked() {
