@@ -17056,7 +17056,16 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held
         return ScreenshotFolder(custom, exe, PicturesFolder(), local);
     };
     std::uint64_t press = 0;
-    if (!screenshot_.Begin(*submitted_images_, views, eyes, std::move(folder), current_exe_name_, problem, &press)) {
+    if (with_focus && !screenshot_.Begin(*submitted_images_, views, eyes, folder, current_exe_name_, problem, &press)) {
+        // The views as they are, as before the focus view was drawn: a
+        // focus view that cannot be drawn must not cost the screenshot.
+        logger_.Info("Screenshots: the eyes' focus views cannot be drawn over them (" + problem +
+                     "), so the two stereo views are saved, without the focus views.");
+        with_focus = false;
+        for (ScreenshotEye& eye : eyes) eye = ScreenshotEye{eye.view_index, eye.letter};
+    }
+    if (press == 0 &&
+        !screenshot_.Begin(*submitted_images_, views, eyes, std::move(folder), current_exe_name_, problem, &press)) {
         return refuse(problem);
     }
     screenshot_sounds_[press] = binding.sound;
@@ -17292,6 +17301,7 @@ void OpenXrLayer::StopMirrorLocked() {
     mirror_.failures = 0;
     mirror_.hidden_logged = false;
     mirror_.quad_logged = false;
+    mirror_.focus_refused = false;
     mirror_toggle_requested_ = false;
 }
 
@@ -17480,14 +17490,24 @@ void OpenXrLayer::UpdateMirrorLocked(const XrFrameEndInfo& frame, bool held) {
     // Quad views the runtime or Frame Generation composes: the eye's focus
     // view is drawn over it, so the window shows the eye as the headset does
     // and not its low-resolution peripheral view alone.
-    if (views.size() > 2 && submitted_images_->SupportsFocus()) {
+    if (views.size() > 2 && submitted_images_->SupportsFocus() && !mirror.focus_refused) {
         SubmittedFocus focus;
         if (UncomposedFocusLocked(frame, views, static_cast<std::uint32_t>(index), focus, nullptr) &&
             TrackScreenshotSwapchainLocked(focus.view.swapchain, problem)) {
             draw.focus = focus;
         }
     }
-    switch (submitted_images_->DrawMirror(view, draw, problem)) {
+    MirrorDrawResult drawn = submitted_images_->DrawMirror(view, draw, problem);
+    if (drawn == MirrorDrawResult::kFailed && draw.focus.present) {
+        // The eye's own view alone, as before the focus view was drawn: a
+        // focus view that cannot be drawn must not cost the window.
+        mirror.focus_refused = true;
+        logger_.Info("Mirror window: the eye's focus view cannot be drawn over it (" + problem +
+                     "), so the window shows the stereo view without the focus view.");
+        draw.focus = {};
+        drawn = submitted_images_->DrawMirror(view, draw, problem);
+    }
+    switch (drawn) {
     case MirrorDrawResult::kShown:
         mirror.failures = 0;
         if (mirror.shown_frames++ == 0) {

@@ -1262,6 +1262,9 @@ class OpenXrLayer {
         bool unsupported_logged{false};
         bool hidden_logged{false};
         bool quad_logged{false};
+        // A focus view could not be drawn over its eye: the eye's own view
+        // alone from then on, until the mirror is closed.
+        bool focus_refused{false};
         // Tests: the window is made and drawn into, never put on the desktop.
         bool on_desktop{true};
     };

@@ -142,6 +142,9 @@ class FakeGpu final : public depthxr::SubmittedImageGpu {
     };
     std::vector<Composed> composed_readbacks;
     bool supports_focus{false};
+    // Draws and readbacks that carry a focus view fail.
+    bool fail_focus{false};
+    int failed_focus_draws{0};
     std::uint64_t Readback(const depthxr::SubmittedView& view, std::string&) override {
         if (!reads) return 0;
         readbacks.push_back(view);
@@ -150,7 +153,7 @@ class FakeGpu final : public depthxr::SubmittedImageGpu {
     bool SupportsFocus() const override { return supports_focus; }
     std::uint64_t ReadbackComposed(const depthxr::SubmittedView& view, const depthxr::SubmittedFocus& focus,
                                    std::uint32_t width, std::uint32_t height, std::string&) override {
-        if (!reads) return 0;
+        if (!reads || fail_focus) return 0;
         composed_readbacks.push_back({view, focus, width, height});
         return ++tickets;
     }
@@ -174,6 +177,11 @@ class FakeGpu final : public depthxr::SubmittedImageGpu {
         if (result == depthxr::MirrorDrawResult::kFailed) {
             error = "the stand-in draw failed";
             return result;
+        }
+        if (fail_focus && draw.focus.present) {
+            ++failed_focus_draws;
+            error = "the stand-in cannot draw a focus view";
+            return depthxr::MirrorDrawResult::kFailed;
         }
         last_window = draw.window;
         if (result == depthxr::MirrorDrawResult::kShown) mirror_draws.push_back({view, draw});
@@ -828,6 +836,23 @@ void TestQuadViewsFocus() {
     Expect(!gpu->mirror_draws.empty() && !gpu->mirror_draws.back().draw.focus.present,
            "A composition of other views than the eye's is not drawn");
     Peer::ClaimQuad(nullptr);
+
+    // A focus view that cannot be drawn costs neither the window nor the
+    // screenshot: the eye's own view, as before, and it is not tried again.
+    gpu = Peer::Start(settings);
+    gpu->supports_focus = true;
+    gpu->fail_focus = true;
+    Peer::AddSwapchain(kFocus, 3200, 1080, 1);
+    Frames(game, 5);
+    Expect(gpu->failed_focus_draws == 1 && gpu->mirror_draws.size() >= 4 && !gpu->mirror_draws.front().draw.focus.present &&
+               !gpu->mirror_draws.back().draw.focus.present && Peer::State() == "active",
+           "A focus view that cannot be drawn is tried once; the window shows the eye's own view from that frame on");
+    Expect(Peer::Log().find("focus view cannot be drawn over it (the stand-in cannot draw a focus view)") != std::string::npos,
+           "...and the log says why");
+    gpu->reads = true;
+    Peer::PressScreenshot(game.info);
+    Expect(gpu->readbacks.size() == 2 && gpu->composed_readbacks.empty() && gpu->readbacks[1].view_index == 1,
+           "A screenshot whose focus views cannot be drawn saves the two stereo views");
 
     // A stereo frame has no focus view, whatever the backend can draw.
     GameFrame stereo;
