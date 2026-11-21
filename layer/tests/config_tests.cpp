@@ -1419,7 +1419,7 @@ void TestFrameGenModuleOptional() {
            "Frame Generation should default to balanced flow");
     Expect(resolved.framegen.motion_estimation == depthxr::FrameGenMotionEstimation::kShader,
            "Frame Generation should default to shader motion estimation");
-    Expect(resolved.framegen.artifact_suppression == 50 && resolved.framegen.motion_limit_percent == 10,
+    Expect(resolved.framegen.artifact_suppression == 10 && resolved.framegen.motion_limit_percent == 10,
            "Frame Generation numeric defaults changed");
     Expect(resolved.framegen.diagnostic_view == depthxr::FrameGenDiagnosticView::kOff,
            "Frame Generation diagnostics should default off");

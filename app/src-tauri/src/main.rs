@@ -936,7 +936,7 @@ fn default_framegen_frame_multiplier() -> String {
 }
 
 fn default_framegen_artifact_suppression() -> i64 {
-    50
+    10
 }
 
 fn default_framegen_motion_limit_percent() -> i64 {
@@ -3873,7 +3873,7 @@ mod tests {
         assert_eq!(defaults.defaults.flow_quality, "balanced");
         assert_eq!(defaults.defaults.motion_estimation, "shader");
         assert_eq!(defaults.defaults.frame_multiplier, "dynamic");
-        assert_eq!(defaults.defaults.artifact_suppression, 50);
+        assert_eq!(defaults.defaults.artifact_suppression, 10);
         assert_eq!(defaults.defaults.motion_limit_percent, 10);
         assert!(!defaults.defaults.extend_head_prediction);
         assert!(!defaults.defaults.edge_fill);

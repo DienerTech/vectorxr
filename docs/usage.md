@@ -946,7 +946,7 @@ needs a game restart; turning it off applies at once.
   - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
     image), **Balanced** (1/8, default), or **Quality** (1/4). Higher quality tracks small and
     thin objects better and costs more GPU time.
-  - **Artifact suppression** (0–100, default 50): higher values fall back to the real image
+  - **Artifact suppression** (0–100, default 10): higher values fall back to the real image
     sooner where motion is uncertain. You get fewer warping artifacts and more local judder.
   - **Motion limit** (2–25% of view width, default 10%) is the farthest a generated frame may
     move image content. Motion beyond it falls back to the real image.

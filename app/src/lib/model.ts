@@ -764,7 +764,7 @@ export function defaultFrameGenSettings(): FrameGenSettings {
     motionEstimation: 'shader',
     interpolateFlow: 'auto',
     frameMultiplier: 'dynamic',
-    artifactSuppression: 50,
+    artifactSuppression: 10,
     motionLimitPercent: 10,
   }
 }

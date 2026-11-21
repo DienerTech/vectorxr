@@ -590,7 +590,11 @@ struct FrameGenSettings {
     FrameGenInterpolateFlow interpolate_flow{FrameGenInterpolateFlow::kAuto};
     FrameGenMultiplier multiplier{FrameGenMultiplier::kDynamic};
     // 0-100: higher falls back to the real image sooner where motion is uncertain.
-    int artifact_suppression{50};
+    // 10 by default: replays of DCS and MSFS captures had fewer bad pixels and
+    // specks the lower it was, on every set, flow and mode (2026-11-21; 230
+    // replays, 0 to 75); 10 keeps a guard against wildly wrong vectors, whose
+    // cost a replay cannot fully see. A settings file that stores 50 keeps it.
+    int artifact_suppression{10};
     // 2-25: largest content shift, in percent of view width, a generated frame may apply.
     int motion_limit_percent{10};
     // Carry the head's rotation over the part of the display time Frame

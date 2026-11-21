@@ -1739,7 +1739,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "default": 50,
+          "default": 10,
           "description": "Higher values fall back to the real image sooner where motion is uncertain."
         },
         "motionLimitPercent": {
