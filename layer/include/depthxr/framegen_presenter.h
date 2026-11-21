@@ -365,6 +365,14 @@ struct FrameGenAutoRules {
     // sustained otherwise.
     std::chrono::milliseconds transient_window{1000};
     double long_frame{4.0};
+    // VECTORXR_FRAMEGEN_AUTO_CAUSE_BACKOFF: a step up put down to a hitch
+    // or a mode switch is checked again after transient_recheck instead of
+    // the back-off (which a failed probe does not double then); another such
+    // step within transient_spacing of the last backs off as sustained
+    // lateness does.
+    bool cause_backoff{true};
+    std::chrono::milliseconds transient_recheck{3000};
+    std::chrono::milliseconds transient_spacing{30000};
 };
 
 // Interpolate's hardware-flow fallback. Tests shorten these times; the
@@ -1693,6 +1701,8 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point auto_disturbed_at_{};
     AutoCause auto_disturbance_{AutoCause::kSustained};
     std::string auto_disturbance_text_;
+    // When Auto last stepped up for a hitch or a mode switch (cause_backoff).
+    std::chrono::steady_clock::time_point auto_transient_step_at_{};
     // The loads full rate failed at (a few, the newest last), how many
     // failures since a probe at full rate last held, and a failure whose
     // load is still to be measured (a step up from full rate: measured once

@@ -14148,6 +14148,7 @@ FrameGenAutoRules AutoRulesOff() {
     rules.cadence_filter = false;
     rules.engage_below = false;
     rules.reach = false;
+    rules.cause_backoff = false;
     return rules;
 }
 
@@ -14572,6 +14573,116 @@ void TestAutoProbesDownEarly() {
         } else {
             Check(lowest == 3 && ended == 3,
                   name + ": it stays at 3x for the back-off (" + std::to_string(lowest) + "x" + said + ")");
+        }
+        Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// One hitch at 2x: a frame of 0.7 s, then four frames of 36 ms as the game
+// catches up (late at 2x), then its steady 6 ms again.
+void RunHitch(AutoGame& game) {
+    const std::vector<std::chrono::microseconds> work = {700ms, 36ms, 36ms, 36ms, 36ms};
+    for (const std::chrono::microseconds frame : work) {
+        const XrFrameState state = game.app->Wait();
+        game.app->Begin();
+        SleepPrecise(std::chrono::steady_clock::now() + frame);
+        game.app->Release();
+        Check(XR_SUCCEEDED(game.app->End(state.predictedDisplayTime)), "hitch: end");
+    }
+}
+
+// A hitch steps Auto up (the few frames a second holds after it are mostly
+// late), and Auto then held the game at the higher multiplier for the whole
+// back-off, which failed probes at full rate had doubled to its longest
+// (Star Citizen, 2026-11-21, 07:53:41: 80 s at 24 fps after 0.5 s hitches,
+// with 12 ms of own time a frame). A step up put down to a hitch is checked
+// again after a few seconds: the game is back at 2x within seconds. A second
+// hitch soon after backs off as sustained lateness does. With the rule off
+// the step waits out the back-off.
+void TestAutoHitchStepsBackSoon() {
+    struct Scenario {
+        const char* name;
+        bool reach;
+        bool cause_backoff;
+    };
+    const std::vector<Scenario> scenarios = {
+        {"all rules", true, true},
+        {"by its cause alone", false, true},
+        {"rule off", false, false},
+    };
+    for (const Scenario& scenario : scenarios) {
+        const std::string name = std::string("auto hitch, ") + scenario.name;
+        FrameGenAutoRules rules;
+        rules.reach = scenario.reach;
+        rules.cause_backoff = scenario.cause_backoff;
+        rules.transient_recheck = 500ms;
+        rules.transient_spacing = 20s;
+        AutoGame game("auto-hitch", rules);
+        // A back-off far longer than the test, as failed probes leave it.
+        game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 60s);
+        game.presenter.SetDynamicPolicy(QuickAutoRate());
+        RunWork(*game.app, 5000ms, PeriodsOfWork(kPeriod, 1.6),
+                [&](const XrFrameState&) { return game.Multiplier() == 2 && game.presenter.Status().threaded; });
+        RunWork(*game.app, 1500ms, {6ms});
+        const std::uint32_t steady = game.Multiplier();
+        RunHitch(game);
+        const auto hitched = std::chrono::steady_clock::now();
+        std::uint32_t highest = game.Multiplier();
+        double back_after = -1.0;
+        RunWork(*game.app, 5000ms, {6ms}, [&](const XrFrameState&) {
+            const std::uint32_t multiplier = game.Multiplier();
+            highest = std::max(highest, multiplier);
+            if (back_after < 0.0 && highest >= 3 && multiplier == 2) {
+                back_after = Seconds(std::chrono::steady_clock::now() - hitched);
+            }
+            return false;
+        });
+        const std::uint32_t settled = game.Multiplier();
+        // A second hitch within the spacing.
+        std::uint32_t second_lowest = 0;
+        double second_back_after = -1.0;
+        if (scenario.cause_backoff && !scenario.reach) {
+            RunHitch(game);
+            const auto again = std::chrono::steady_clock::now();
+            std::uint32_t second_highest = game.Multiplier();
+            RunWork(*game.app, 4000ms, {6ms}, [&](const XrFrameState&) {
+                const std::uint32_t multiplier = game.Multiplier();
+                second_highest = std::max(second_highest, multiplier);
+                if (second_highest >= 3) {
+                    second_lowest = second_lowest ? std::min(second_lowest, multiplier) : multiplier;
+                    if (second_back_after < 0.0 && multiplier == 2) {
+                        second_back_after = Seconds(std::chrono::steady_clock::now() - again);
+                    }
+                }
+                return false;
+            });
+        }
+        game.presenter.Stop();
+        const std::string said = AutoLines(game.log);
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": up to " << highest << "x, back after " << back_after << " s; second hitch lowest "
+                      << second_lowest << "x" << said << "\n";
+        }
+        Check(steady == 2, name + ": the game holds 2x (" + std::to_string(steady) + "x" + said + ")");
+        Check(highest == 3, name + ": the hitch steps Auto up to 3x (" + std::to_string(highest) + "x" + said + ")");
+        Check(game.log.Lines("cause: transient, a frame of 0.7").size() >= 1,
+              name + ": the log puts the step down to the hitch" + said);
+        if (scenario.cause_backoff || scenario.reach) {
+            Check(back_after > 0.0 && back_after < 3.5 && settled == 2,
+                  name + ": it is back at 2x within seconds and stays (" + std::to_string(back_after) + " s, " +
+                      std::to_string(settled) + "x" + said + ")");
+        } else {
+            Check(back_after < 0.0 && settled == 3,
+                  name + ": it stays at 3x for the back-off (" + std::to_string(settled) + "x" + said + ")");
+        }
+        if (scenario.cause_backoff) {
+            Check(game.log.Lines("checked again in").size() == 1,
+                  name + ": the log names the short check, once" + said);
+        }
+        if (scenario.cause_backoff && !scenario.reach) {
+            Check(second_lowest == 3 && second_back_after < 0.0 && game.log.Lines("the second within").size() == 1,
+                  name + ": a second hitch soon after backs off as sustained lateness does (" +
+                      std::to_string(second_lowest) + "x at the lowest" + said + ")");
         }
         Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
     }
@@ -17432,6 +17543,7 @@ int main(int argc, char** argv) {
     RUN(TestAutoHoversWithoutFlapping);
     RUN(TestAutoGpuBoundNotProbedToFullRate);
     RUN(TestAutoProbesDownEarly);
+    RUN(TestAutoHitchStepsBackSoon);
     g_jit = false;
     // The lead against hitches and late frames.
     GROUP("lead");

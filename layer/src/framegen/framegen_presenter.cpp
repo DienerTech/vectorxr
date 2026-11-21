@@ -644,6 +644,9 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     //   VECTORXR_FRAMEGEN_AUTO_REACH=0  the game's measured work per frame
     //     neither holds back a probe to full rate after one failed nor brings
     //     a probe down from 3x or 4x early: probes follow the back-off alone.
+    //   VECTORXR_FRAMEGEN_AUTO_CAUSE_BACKOFF=0  a step up for a hitch or a
+    //     mode switch waits the back-off before its probe, and a probe that
+    //     fails for one doubles it, as a step up for sustained lateness does.
     {
         const auto rule = [&](const char* name, bool& value, const char* off) {
             value = ReadResearchSwitch(name) != "0";
@@ -657,6 +660,8 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
              "engages from full rate only once frames take over 1.25 refreshes, as before 0.22");
         rule("VECTORXR_FRAMEGEN_AUTO_REACH", auto_rules_.reach,
              "probes by its back-off alone, without the game's measured work, as before 0.22");
+        rule("VECTORXR_FRAMEGEN_AUTO_CAUSE_BACKOFF", auto_rules_.cause_backoff,
+             "backs off the same after a hitch or a mode switch as after sustained lateness, as before 0.22");
     }
     // VECTORXR_FRAMEGEN_HALVING_PUSH=<seconds>, 0 to 120: Dynamic keeps
     // presenting that long into an engagement that finds the runtime holding
@@ -1199,6 +1204,7 @@ void FrameGenPresenter::Stop() {
     auto_disturbed_at_ = {};
     auto_disturbance_ = AutoCause::kSustained;
     auto_disturbance_text_.clear();
+    auto_transient_step_at_ = {};
     auto_full_rate_failures_.clear();
     auto_full_rate_failed_ = 0;
     auto_full_rate_unmeasured_.reset();
@@ -3901,6 +3907,8 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     bool late_at_ceiling = false;
     bool probe_failed = false;
     bool probe_early = false;
+    bool recheck = false;
+    const std::chrono::milliseconds backoff_before = probe_backoff_;
     std::chrono::duration<double> left_ceiling_after{}; // for the log: a probe down from there
     const double reach_share = dynamic_policy_.stay_above - kProbeReach;
     // At full rate a frame is late only past 1.25 refreshes: a game running
@@ -4075,6 +4083,27 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         if (stepped_up && probe_failed && probe_early_ && cause == AutoCause::kSustained) {
             auto_early_blocked_ = true;
         }
+        // A step up for a hitch or a mode switch is most likely not needed
+        // once it is over: checked again after a few seconds (the probe
+        // still wants its steady stretch first), not after a back-off that
+        // failed probes had doubled, and a probe that failed for one does not
+        // double it (Star Citizen, 2026-11-21: 80 s at 24 fps after 0.5 s
+        // hitches at 07:53:41, with 12 ms of own time a frame). A game that
+        // hitches again and again gets this once per transient_spacing: the
+        // next such step backs off as sustained lateness does, so it does
+        // not go up and down every few seconds.
+        if (stepped_up && auto_rules_.cause_backoff && cause != AutoCause::kSustained) {
+            if (auto_transient_step_at_ == Clock::time_point{} ||
+                now - auto_transient_step_at_ >= auto_rules_.transient_spacing) {
+                recheck = true;
+                probe_backoff_ = backoff_before;
+                probe_not_before_ = now + auto_rules_.transient_recheck;
+            } else {
+                cause_text += " (the second within " +
+                              Number(std::chrono::duration<double>(auto_rules_.transient_spacing).count(), 0) + " s)";
+            }
+            auto_transient_step_at_ = now;
+        }
         if (stepped_up && before == 1 && cause == AutoCause::kSustained && auto_rules_.reach) {
             // Full rate did not hold, engaged for or probed: at the load the
             // probe started from, or the one measured once the game is held.
@@ -4099,7 +4128,12 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
                           (up ? " (" + std::string(probe_failed ? "the probe failed: " : "") +
                                     (late_share ? std::to_string(auto_late_percent_) + "% of frames late" : below_text) +
                                     "; cause: " + cause_text +
-                                    (probe_backoff_ > auto_initial_backoff_
+                                    (recheck ? ", checked again in " +
+                                                   Number(std::chrono::duration<double>(auto_rules_.transient_recheck)
+                                                              .count(),
+                                                          auto_rules_.transient_recheck.count() % 1000 ? 1 : 0) +
+                                                   " s"
+                                     : probe_backoff_ > auto_initial_backoff_
                                          ? ", next probe in " + std::to_string(probe_backoff_.count() / 1000) + " s"
                                          : std::string()) +
                                     ")."
@@ -4619,6 +4653,7 @@ void FrameGenPresenter::AutoReenableLocked() {
     auto_disturbed_at_ = {};
     auto_disturbance_ = AutoCause::kSustained;
     auto_disturbance_text_.clear();
+    auto_transient_step_at_ = {};
     auto_full_rate_failures_.clear();
     auto_full_rate_failed_ = 0;
     auto_full_rate_unmeasured_.reset();
