@@ -28,6 +28,7 @@
 #include <map>
 #include <mutex>
 #include <stdexcept>
+#include <set>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -519,7 +520,7 @@ void TestSettings() {
 
 // A stand-in for the GPU half: images are colors, readbacks become ready
 // after a number of polls.
-class FakeGpu final : public SubmittedImageGpu {
+class FakeGpu : public SubmittedImageGpu {
   public:
     struct Ticket {
         std::vector<std::uint8_t> pixels;
@@ -634,13 +635,12 @@ void TestCapture() {
     Expect(capture.Begin(gpu, views, SelectScreenshotEyes(2, ScreenshotEyes::Both), folder, "Game.exe", error),
            "A press starts: " + error);
     Expect(capture.Busy() && gpu.tickets.size() == 2, "Both eyes are read back");
-    Expect(!capture.Begin(gpu, views, SelectScreenshotEyes(2, ScreenshotEyes::Both), folder, "Game.exe", error) &&
-               gpu.tickets.size() == 2,
-           "A second press while one is saved is refused, reading nothing");
     Expect(!capture.Poll(&gpu) && !capture.Poll(&gpu) && capture.Busy(), "Pending readbacks are only polled");
     const std::optional<ScreenshotResult> result = PollUntilDone(capture, &gpu);
     Expect(result && result->saved && result->error.empty() && result->files.size() == 2, "The press ends with two files");
     Expect(result->width == 64 && result->height == 48, "The result names the left image's size");
+    Expect(result->files.size() == 2 && result->files[0].filename().wstring().find(L"_L.png") != std::wstring::npos,
+           "The left eye's file is named first, whichever was written first");
     Expect(!capture.Busy() && gpu.Open() == 0, "Every ticket is ended once its pixels were converted");
     Expect(!capture.Poll(&gpu), "The outcome is reported once");
     bool left = false, right = false;
@@ -740,6 +740,94 @@ void TestCapture() {
     capture.Stop(nullptr);
 }
 
+// Presses in quick succession each save a picture: a few are taken while the
+// ones before are still being saved, and one more than that is refused
+// without anything being read back for it.
+void TestCaptureQueuesPresses() {
+    const std::filesystem::path folder = ScratchFolder(L"capture-queue") / L"Game";
+    FakeGpu gpu;
+    gpu.pending_polls = 3;
+    ScreenshotCapture capture;
+    std::string error;
+    const std::vector<SubmittedView> views = FakeViews();
+    const std::vector<ScreenshotEye> both = SelectScreenshotEyes(2, ScreenshotEyes::Both);
+    Expect(kMaxScreenshotPresses >= 2 && kScreenshotWorkers >= 1, "More than one press is taken at a time");
+    Expect(ScreenshotCapture::PixelBytes(SubmittedImageApi::kD3D11, views, both) == (64u * 48u + 72u * 48u) * 4u,
+           "A press's size is its views' rectangles in the image's format");
+    std::vector<SubmittedView> half = views;
+    half[0].format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    Expect(ScreenshotCapture::PixelBytes(SubmittedImageApi::kD3D11, half, SelectScreenshotEyes(2, ScreenshotEyes::Left)) ==
+               64u * 48u * 8u,
+           "Half-float texels are eight bytes each");
+    // A stereo press of the size the fix was asked for at, four times over.
+    std::vector<SubmittedView> large = views;
+    for (SubmittedView& view : large) view.rect.extent = {4880, 4124};
+    const std::uint64_t large_bytes = ScreenshotCapture::PixelBytes(SubmittedImageApi::kD3D11, large, both);
+    Expect(large_bytes * kMaxScreenshotPresses <= kMaxScreenshotPendingBytes &&
+               large_bytes * (kMaxScreenshotPresses + 2) > kMaxScreenshotPendingBytes,
+           "Four stereo presses of 4880x4124 fit the memory a queue may hold, and not many more");
+    Expect(capture.Room(kMaxScreenshotPendingBytes * 4), "A first press is taken whatever its size");
+
+    std::vector<std::uint64_t> numbers;
+    for (std::size_t i = 0; i < kMaxScreenshotPresses; ++i) {
+        std::uint64_t number = 0;
+        Expect(capture.Begin(gpu, views, both, folder, "Game.exe", error, &number), "A press in quick succession starts: " + error);
+        numbers.push_back(number);
+        // A frame goes by: file names carry the time to the millisecond.
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    Expect(gpu.tickets.size() == 2 * kMaxScreenshotPresses && std::set<std::uint64_t>(numbers.begin(), numbers.end()).size() == numbers.size() &&
+               numbers.front() != 0,
+           "Each press is read back and has a number of its own");
+    Expect(!capture.Room(1) && !capture.Begin(gpu, views, both, folder, "Game.exe", error) &&
+               error.find("still being saved") != std::string::npos && gpu.tickets.size() == 2 * kMaxScreenshotPresses,
+           "One press more than may be saved at a time is refused, reading nothing: " + error);
+    std::set<std::uint64_t> ended;
+    std::set<std::filesystem::path> files;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    bool room_back = false;
+    while (ended.size() < numbers.size() && std::chrono::steady_clock::now() < deadline) {
+        if (const auto result = capture.Poll(&gpu)) {
+            Expect(result->saved && result->files.size() == 2 && result->width == 64, "A queued press is saved whole: " + result->error);
+            Expect(ended.insert(result->press).second, "A press's outcome is reported once");
+            files.insert(result->files.begin(), result->files.end());
+            room_back = room_back || capture.Room(1);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Expect(ended == std::set<std::uint64_t>(numbers.begin(), numbers.end()), "Every queued press ends with its own number");
+    Expect(files.size() == 2 * kMaxScreenshotPresses, "Each press has files of its own");
+    for (const std::filesystem::path& file : files) {
+        std::vector<std::uint8_t> rgba;
+        std::uint32_t width = 0, height = 0;
+        Expect(ReadPng(file, rgba, width, height, error) && height == 48, "A queued press's file reads back: " + error);
+    }
+    Expect(room_back && !capture.Busy() && gpu.Open() == 0 && capture.Room(1) && !capture.Poll(&gpu),
+           "With the presses saved there is room again and nothing is left open");
+
+    // Memory: a press that would take the pixels read back past the limit
+    // is refused while another is in flight.
+    gpu.pending_polls = 1000000;
+    Expect(capture.Begin(gpu, views, both, folder, "Game.exe", error), "A press starts: " + error);
+    std::vector<SubmittedView> huge = views;
+    for (SubmittedView& view : huge) view.rect.extent = {16000, 16000};
+    const std::size_t tickets = gpu.tickets.size();
+    Expect(!capture.Room(ScreenshotCapture::PixelBytes(SubmittedImageApi::kD3D11, huge, both)) &&
+               !capture.Begin(gpu, huge, both, folder, "Game.exe", error) && gpu.tickets.size() == tickets,
+           "A press too large for the memory left is refused, reading nothing");
+    Expect(capture.Begin(gpu, views, both, folder, "Game.exe", error), "...while one that fits is taken");
+    // Teardown with several in flight: every ticket ends, nothing is reported.
+    capture.Poll(&gpu);
+    capture.Stop(&gpu);
+    Expect(!capture.Busy() && gpu.Open() == 0 && !capture.Poll(&gpu) && capture.Room(kMaxScreenshotPendingBytes),
+           "Stopping ends every press in flight and its tickets");
+    gpu.pending_polls = 0;
+    Expect(capture.Begin(gpu, views, both, folder, "Game.exe", error), "A press after the stop starts");
+    const auto after = PollUntilDone(capture, &gpu);
+    Expect(after && after->saved && after->files.size() == 2, "...and is saved");
+    capture.Stop(nullptr);
+}
+
 // The folder is named on the worker thread (asking Windows for the Pictures
 // folder can take a while): a press never waits for it on the frame thread.
 void TestCaptureNamesItsFolderOnTheWorker() {
@@ -818,9 +906,13 @@ void TestCaptureWithoutAWorkerThread() {
     struct NoThread final : ScreenshotCapture {
         bool fail{true};
         int starts{0};
+        int allowed{1000}; // threads Windows will start
         void StartWorker() override {
             ++starts;
-            if (fail) throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+            if (fail || allowed <= 0) {
+                throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+            }
+            --allowed;
             ScreenshotCapture::StartWorker();
         }
     };
@@ -845,12 +937,32 @@ void TestCaptureWithoutAWorkerThread() {
     Expect(capture.Begin(gpu, views, SelectScreenshotEyes(2, ScreenshotEyes::Both), folder, "Game.exe", error),
            "The next press starts: " + error);
     const auto result = PollUntilDone(capture, &gpu);
-    Expect(result && result->saved && result->files.size() == 2 && capture.starts == 2, "...and is saved");
+    const int workers = static_cast<int>(kScreenshotWorkers);
+    Expect(result && result->saved && result->files.size() == 2 && capture.starts == 1 + workers, "...and is saved");
     Expect(capture.Begin(gpu, views, SelectScreenshotEyes(2, ScreenshotEyes::Left), folder, "Game.exe", error) &&
-               capture.starts == 2,
-           "The worker thread is started once");
+               capture.starts == 1 + workers,
+           "The worker threads are started once");
     Expect(PollUntilDone(capture, &gpu).has_value(), "That press ends");
     capture.Stop(nullptr);
+
+    // Only one thread to be had: presses are saved by it, and the second is
+    // asked for again with each press.
+    NoThread single;
+    single.fail = false;
+    single.allowed = 1;
+    Expect(single.Begin(gpu, views, SelectScreenshotEyes(2, ScreenshotEyes::Both), folder, "Game.exe", error),
+           "A press starts with one worker thread: " + error);
+    const auto alone = PollUntilDone(single, &gpu);
+    Expect(alone && alone->saved && alone->files.size() == 2 && single.starts == (workers > 1 ? 2 : 1),
+           "One worker thread saves both eyes");
+    single.allowed = 1;
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    Expect(single.Begin(gpu, views, SelectScreenshotEyes(2, ScreenshotEyes::Both), folder, "Game.exe", error) &&
+               single.starts == (workers > 1 ? 3 : 1),
+           "The thread that could not be started is asked for with the next press");
+    const auto together = PollUntilDone(single, &gpu);
+    Expect(together && together->saved && together->files.size() == 2, "...and that press is saved");
+    single.Stop(nullptr);
 }
 
 // Nothing thrown while a file is written leaves the worker thread (which
@@ -1488,6 +1600,87 @@ int D3D12Tests() {
     return 0;
 }
 
+// By hand: how long presses of a real picture take to save, with one worker
+// thread (as before presses were queued) and with kScreenshotWorkers.
+// `source`: a PNG (a saved screenshot), used for both eyes; the files go to
+// the scratch folder, which is removed afterwards.
+struct PictureGpu final : FakeGpu {
+    const std::vector<std::uint8_t>* picture{nullptr};
+    std::uint32_t width{0}, height{0};
+    std::uint64_t Readback(const SubmittedView& view, std::string&) override {
+        Ticket ticket;
+        ticket.view = view;
+        tickets[next] = std::move(ticket);
+        return next++;
+    }
+    ReadbackState Poll(std::uint64_t id, SubmittedPixels& pixels, std::string&) override {
+        const auto found = tickets.find(id);
+        if (found == tickets.end() || found->second.finished) return ReadbackState::kNone;
+        pixels.data = picture->data();
+        pixels.width = width;
+        pixels.height = height;
+        pixels.row_pitch = width * 4;
+        pixels.format = ClassifyFormat(SubmittedImageApi::kD3D11, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        return ReadbackState::kReady;
+    }
+};
+
+int CaptureBench(const std::filesystem::path& source) {
+    struct Limited final : ScreenshotCapture {
+        explicit Limited(std::size_t workers) { worker_limit_ = workers; }
+    };
+    std::vector<std::uint8_t> rgba;
+    PictureGpu gpu;
+    std::string error;
+    if (!ReadPng(source, rgba, gpu.width, gpu.height, error)) {
+        std::cerr << "Reading the picture failed: " << error << '\n';
+        return 1;
+    }
+    gpu.picture = &rgba;
+    std::cout << "Both eyes " << gpu.width << "x" << gpu.height << ", files written to the temporary folder\n";
+    std::vector<SubmittedView> views = FakeViews();
+    for (SubmittedView& view : views) {
+        view.rect = {{0, 0}, {static_cast<int>(gpu.width), static_cast<int>(gpu.height)}};
+        view.format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    }
+    const std::vector<ScreenshotEye> both = SelectScreenshotEyes(2, ScreenshotEyes::Both);
+    for (const std::size_t workers : {std::size_t{1}, kScreenshotWorkers}) {
+        for (const std::size_t presses : {std::size_t{1}, kMaxScreenshotPresses}) {
+            const std::filesystem::path folder =
+                ScratchFolder(L"capture-bench") / (std::to_wstring(workers) + L"-" + std::to_wstring(presses));
+            Limited capture(workers);
+            const auto begun = std::chrono::steady_clock::now();
+            const auto elapsed = [&] {
+                return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begun).count();
+            };
+            for (std::size_t press = 0; press < presses; ++press) {
+                if (!capture.Begin(gpu, views, both, folder, "Game.exe", error)) {
+                    std::cerr << "A press was refused: " << error << '\n';
+                    return 1;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(3));
+            }
+            std::size_t ended = 0;
+            double first = 0.0;
+            while (ended < presses) {
+                if (const auto result = capture.Poll(&gpu)) {
+                    if (!result->saved) {
+                        std::cerr << "A press failed: " << result->error << '\n';
+                        return 1;
+                    }
+                    if (ended++ == 0) first = elapsed();
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            std::cout << workers << " worker thread" << (workers == 1 ? "" : "s") << ", " << presses << " stereo press"
+                      << (presses == 1 ? "" : "es") << ": first saved after " << first << " ms, all after " << elapsed()
+                      << " ms" << std::endl;
+            capture.Stop(nullptr);
+        }
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1499,6 +1692,9 @@ int main(int argc, char** argv) {
         result = D3D11Tests();
     } else if (mode == "d3d12") {
         result = D3D12Tests();
+    } else if (mode == "capture-bench" && argc > 2) {
+        // By hand: CPU only.
+        result = CaptureBench(std::filesystem::path(argv[2]));
     } else if (mode.empty()) {
         TestFormats();
         TestPixelConversion();
@@ -1510,6 +1706,7 @@ int main(int argc, char** argv) {
         TestViewResolution();
         TestSettings();
         TestCapture();
+        TestCaptureQueuesPresses();
         TestCaptureNamesItsFolderOnTheWorker();
         TestCaptureWithoutAWorkerThread();
         TestCaptureWorkerCatchesEverything();

@@ -284,46 +284,92 @@ ScreenshotCapture::~ScreenshotCapture() {
         jobs_.clear();
     }
     wake_.notify_all();
-    if (worker_.joinable()) worker_.join();
+    for (std::thread& worker : workers_) {
+        if (worker.joinable()) worker.join();
+    }
 }
 
 bool ScreenshotCapture::Busy() const {
-    return busy_.load(std::memory_order_acquire);
+    return in_flight_.load(std::memory_order_acquire) != 0;
+}
+
+std::uint64_t ScreenshotCapture::PixelBytes(SubmittedImageApi api, const std::vector<SubmittedView>& views,
+                                            const std::vector<ScreenshotEye>& eyes) {
+    std::uint64_t bytes = 0;
+    for (const ScreenshotEye& eye : eyes) {
+        if (eye.view_index >= views.size()) continue;
+        const SubmittedView& view = views[eye.view_index];
+        const std::uint32_t texel = ClassifyFormat(api, view.format).bytes_per_pixel;
+        bytes += static_cast<std::uint64_t>(std::max(view.rect.extent.width, 0)) *
+                 static_cast<std::uint64_t>(std::max(view.rect.extent.height, 0)) * (texel ? texel : 4);
+    }
+    return bytes;
+}
+
+bool ScreenshotCapture::Room(std::uint64_t pixel_bytes) const {
+    const std::size_t in_flight = in_flight_.load(std::memory_order_acquire);
+    // A first press is taken whatever its size.
+    if (in_flight == 0) return true;
+    return in_flight < kMaxScreenshotPresses &&
+           pending_bytes_.load(std::memory_order_acquire) + pixel_bytes <= kMaxScreenshotPendingBytes;
 }
 
 void ScreenshotCapture::StartWorker() {
-    worker_ = std::thread([this] { WorkerLoop(); });
+    workers_.emplace_back([this] { WorkerLoop(); });
 }
 
-bool ScreenshotCapture::EnsureWorker(std::string& error) {
-    if (worker_.joinable()) return true;
+bool ScreenshotCapture::EnsureWorkers(std::string& error) {
     // On the thread that ends the game's frames, inside its xrEndFrame: a
     // thread Windows will not start is a refused press, not an exception in
-    // the game.
-    try {
-        StartWorker();
-    } catch (const std::exception& failure) {
-        error = std::string("the thread that saves screenshots could not be started (") + failure.what() + ")";
-        return false;
-    } catch (...) {
-        error = "the thread that saves screenshots could not be started";
-        return false;
+    // the game. One worker is enough to save a press; a second that cannot
+    // be started is tried for again with the next press.
+    while (workers_.size() < std::min(worker_limit_, kScreenshotWorkers)) {
+        std::string problem;
+        try {
+            StartWorker();
+            continue;
+        } catch (const std::exception& failure) {
+            problem = std::string("the thread that saves screenshots could not be started (") + failure.what() + ")";
+        } catch (...) {
+            problem = "the thread that saves screenshots could not be started";
+        }
+        if (workers_.empty()) {
+            error = problem;
+            return false;
+        }
+        break;
     }
     return true;
 }
 
+ScreenshotCapture::Press* ScreenshotCapture::FindPressLocked(std::uint64_t number) {
+    for (Press& press : presses_) {
+        if (press.number == number) return &press;
+    }
+    return nullptr;
+}
+
+void ScreenshotCapture::EndTicketLocked(SubmittedImageGpu* gpu, Shot& shot) {
+    if (shot.stage == Shot::Stage::kDone) return;
+    if (gpu) gpu->Finish(shot.ticket);
+    shot.stage = Shot::Stage::kDone;
+    pending_bytes_.fetch_sub(shot.bytes, std::memory_order_acq_rel);
+    shot.bytes = 0;
+}
+
 bool ScreenshotCapture::Begin(SubmittedImageGpu& gpu, const std::vector<SubmittedView>& views,
                               const std::vector<ScreenshotEye>& eyes, const std::filesystem::path& folder,
-                              const std::string& exe_name, std::string& error) {
-    return Begin(gpu, views, eyes, ScreenshotFolderSource([folder] { return folder; }), exe_name, error);
+                              const std::string& exe_name, std::string& error, std::uint64_t* press) {
+    return Begin(gpu, views, eyes, ScreenshotFolderSource([folder] { return folder; }), exe_name, error, press);
 }
 
 bool ScreenshotCapture::Begin(SubmittedImageGpu& gpu, const std::vector<SubmittedView>& views,
                               const std::vector<ScreenshotEye>& eyes, ScreenshotFolderSource folder,
-                              const std::string& exe_name, std::string& error) {
+                              const std::string& exe_name, std::string& error, std::uint64_t* press) {
     std::scoped_lock lock(mutex_);
-    if (active_) {
-        error = "the last screenshot is still being saved";
+    if (!Room(PixelBytes(gpu.Api(), views, eyes))) {
+        error = presses_.size() == 1 ? "the last screenshot is still being saved"
+                                     : "the last " + std::to_string(presses_.size()) + " screenshots are still being saved";
         return false;
     }
     if (eyes.empty()) {
@@ -335,7 +381,7 @@ bool ScreenshotCapture::Begin(SubmittedImageGpu& gpu, const std::vector<Submitte
         return false;
     }
     // Before anything is read back for it.
-    if (!EnsureWorker(error)) {
+    if (!EnsureWorkers(error)) {
         return false;
     }
     const ScreenshotTime time = ScreenshotLocalTime();
@@ -356,90 +402,95 @@ bool ScreenshotCapture::Begin(SubmittedImageGpu& gpu, const std::vector<Submitte
             break;
         }
         shot.file_name = ScreenshotFileName(exe_name, time, eye.letter);
+        shot.bytes = PixelBytes(gpu.Api(), views, {eye});
         shots.push_back(std::move(shot));
     }
     if (shots.size() != eyes.size()) {
         for (const Shot& shot : shots) gpu.Finish(shot.ticket);
         return false;
     }
-    shots_ = std::move(shots);
-    folder_ = std::move(folder);
-    written_ = 0;
-    result_ = {};
-    ++press_;
-    active_ = true;
-    busy_.store(true, std::memory_order_release);
+    Press taken;
+    taken.number = ++last_press_;
+    taken.result.press = taken.number;
+    for (const Shot& shot : shots) pending_bytes_.fetch_add(shot.bytes, std::memory_order_acq_rel);
+    taken.shots = std::move(shots);
+    taken.folder = std::make_shared<Folder>();
+    taken.folder->source = std::move(folder);
+    if (press) *press = taken.number;
+    presses_.push_back(std::move(taken));
+    in_flight_.store(presses_.size(), std::memory_order_release);
     return true;
 }
 
 std::optional<ScreenshotResult> ScreenshotCapture::Poll(SubmittedImageGpu* gpu) {
     // Every frame of every session: nothing in flight costs no lock.
-    if (!busy_.load(std::memory_order_acquire)) return std::nullopt;
+    if (!Busy()) return std::nullopt;
     std::unique_lock lock(mutex_);
-    if (!active_) return std::nullopt;
     bool queued = false;
-    bool tickets_open = false;
-    for (std::size_t i = 0; i < shots_.size(); ++i) {
-        Shot& shot = shots_[i];
-        if (shot.stage == Shot::Stage::kReadback) {
-            std::string error;
-            const ReadbackState state = gpu ? gpu->Poll(shot.ticket, shot.pixels, error) : ReadbackState::kNone;
-            if (state == ReadbackState::kReady) {
-                shot.stage = Shot::Stage::kConverting;
-                if (i == 0) {
-                    result_.width = shot.pixels.width;
-                    result_.height = shot.pixels.height;
+    std::optional<ScreenshotResult> ended;
+    for (auto press = presses_.begin(); press != presses_.end();) {
+        bool tickets_open = false;
+        for (std::size_t i = 0; i < press->shots.size(); ++i) {
+            Shot& shot = press->shots[i];
+            if (shot.stage == Shot::Stage::kReadback) {
+                std::string error;
+                const ReadbackState state = gpu ? gpu->Poll(shot.ticket, shot.pixels, error) : ReadbackState::kNone;
+                if (state == ReadbackState::kReady) {
+                    shot.stage = Shot::Stage::kConverting;
+                    if (i == 0) {
+                        press->result.width = shot.pixels.width;
+                        press->result.height = shot.pixels.height;
+                    }
+                    jobs_.push_back({press->number, i, shot.pixels, shot.file_name, press->folder});
+                    queued = true;
+                } else if (state != ReadbackState::kPending) {
+                    EndTicketLocked(gpu, shot);
+                    ++press->written;
+                    if (press->result.error.empty()) {
+                        press->result.error = error.empty() ? "the readback was lost" : error;
+                    }
                 }
-                jobs_.push_back({press_, i, shot.pixels, shot.file_name});
-                queued = true;
-            } else if (state != ReadbackState::kPending) {
-                if (gpu) gpu->Finish(shot.ticket);
-                shot.stage = Shot::Stage::kDone;
-                ++written_;
-                if (result_.error.empty()) result_.error = error.empty() ? "the readback was lost" : error;
+            } else if (shot.stage == Shot::Stage::kConverted) {
+                // The worker has its own copy: the mapped pixels go.
+                EndTicketLocked(gpu, shot);
             }
-        } else if (shot.stage == Shot::Stage::kConverted) {
-            // The worker has its own copy: the mapped pixels go.
-            if (gpu) gpu->Finish(shot.ticket);
-            shot.stage = Shot::Stage::kDone;
+            tickets_open = tickets_open || shot.stage != Shot::Stage::kDone;
         }
-        tickets_open = tickets_open || shot.stage != Shot::Stage::kDone;
+        // One outcome a call: the others are told of on the next frames.
+        if (ended || tickets_open || press->written < press->shots.size()) {
+            ++press;
+            continue;
+        }
+        ended = std::move(press->result);
+        ended->saved = ended->error.empty() && !ended->files.empty();
+        // Two workers write a press's files side by side: named in the
+        // same order whichever finished first (L before R).
+        std::sort(ended->files.begin(), ended->files.end());
+        press = presses_.erase(press);
     }
-    if (queued) wake_.notify_one();
-    if (tickets_open || written_ < shots_.size()) return std::nullopt;
-    active_ = false;
-    busy_.store(false, std::memory_order_release);
-    ScreenshotResult result = std::move(result_);
-    result.saved = result.error.empty() && !result.files.empty();
-    shots_.clear();
-    return result;
+    in_flight_.store(presses_.size(), std::memory_order_release);
+    if (queued) wake_.notify_all();
+    return ended;
 }
 
 void ScreenshotCapture::Stop(SubmittedImageGpu* gpu) {
     std::unique_lock lock(mutex_);
     jobs_.clear();
     converted_.wait(lock, [this] { return converting_ == 0; });
-    if (gpu) {
-        for (const Shot& shot : shots_) {
-            if (shot.stage != Shot::Stage::kDone) gpu->Finish(shot.ticket);
-        }
+    for (Press& press : presses_) {
+        for (Shot& shot : press.shots) EndTicketLocked(gpu, shot);
     }
-    shots_.clear();
-    active_ = false;
-    busy_.store(false, std::memory_order_release);
-    ++press_; // what the worker still writes belongs to no press
+    // What a worker still writes belongs to no press.
+    presses_.clear();
+    in_flight_.store(0, std::memory_order_release);
+    pending_bytes_.store(0, std::memory_order_release);
 }
 
 void ScreenshotCapture::WorkerLoop() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    // The folder of the press being written, asked for here (Windows may
-    // take its time to name the Pictures folder), once for its files.
-    std::uint64_t folder_press = 0;
-    std::filesystem::path folder;
     for (;;) {
         Job job;
-        ScreenshotFolderSource folder_source;
         {
             std::unique_lock lock(mutex_);
             wake_.wait(lock, [this] { return stop_ || !jobs_.empty(); });
@@ -447,7 +498,6 @@ void ScreenshotCapture::WorkerLoop() {
             job = std::move(jobs_.front());
             jobs_.pop_front();
             ++converting_;
-            if (job.press != folder_press && job.press == press_) folder_source = folder_;
         }
         std::vector<std::uint8_t> rgba;
         std::string error;
@@ -472,8 +522,8 @@ void ScreenshotCapture::WorkerLoop() {
         {
             std::scoped_lock lock(mutex_);
             --converting_;
-            if (job.press == press_ && active_ && job.shot < shots_.size()) {
-                shots_[job.shot].stage = Shot::Stage::kConverted;
+            if (Press* press = FindPressLocked(job.press); press && job.shot < press->shots.size()) {
+                press->shots[job.shot].stage = Shot::Stage::kConverted;
             }
         }
         converted_.notify_all();
@@ -483,11 +533,16 @@ void ScreenshotCapture::WorkerLoop() {
         }
         std::filesystem::path path;
         try {
-            if (folder_source) {
-                folder = folder_source();
-                folder_press = job.press;
+            {
+                // The folder of the press, asked for here (Windows may take
+                // its time to name the Pictures folder), once for its files.
+                std::scoped_lock folder_lock(job.folder->mutex);
+                if (!job.folder->asked) {
+                    job.folder->asked = true;
+                    job.folder->path = job.folder->source();
+                }
+                if (!job.folder->path.empty()) path = job.folder->path / Utf8Path(job.file_name);
             }
-            if (job.press == folder_press && !folder.empty()) path = folder / Utf8Path(job.file_name);
             if (ok && path.empty()) {
                 ok = false;
                 error = "There is no folder to save to";
@@ -507,12 +562,12 @@ void ScreenshotCapture::WorkerLoop() {
             error = "Writing the PNG failed";
         }
         std::scoped_lock lock(mutex_);
-        if (job.press == press_ && active_) {
-            ++written_;
+        if (Press* press = FindPressLocked(job.press)) {
+            ++press->written;
             if (ok) {
-                result_.files.push_back(path);
-            } else if (result_.error.empty()) {
-                result_.error = error;
+                press->result.files.push_back(path);
+            } else if (press->result.error.empty()) {
+                press->result.error = error;
             }
         }
     }

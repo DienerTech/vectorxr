@@ -1304,8 +1304,9 @@ Press the binding in the headset. The image is copied on the GPU and converted a
 the background, so the game does not stall; a large image takes a second or two to appear in
 the folder. When the binding's sound is on, the activate sound plays once the files are saved
 and the deactivate sound if the screenshot could not be taken. The VectorXR log names each
-file, or says why none was saved. While one screenshot is still being written, another press
-is refused.
+file, or says why none was saved. You can press again right away: up to four screenshots are
+saved at a time, each with its own files. A press that comes while four are still being
+written is not taken; the deactivate sound plays and the log says so.
 
 What is saved:
 

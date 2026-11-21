@@ -93,12 +93,29 @@ bool ReadPng(const std::filesystem::path& path, std::vector<std::uint8_t>& rgba,
 
 // What became of a press.
 struct ScreenshotResult {
+    std::uint64_t press{0}; // the number Begin gave it
     bool saved{false};
     std::vector<std::filesystem::path> files;
     std::string error;
     std::uint32_t width{0}; // of the first file
     std::uint32_t height{0};
 };
+
+// Presses in quick succession each save a picture: a press is taken while
+// earlier ones are still being read back, converted or written, up to this
+// many at a time...
+inline constexpr std::size_t kMaxScreenshotPresses = 4;
+// ...and while the pixels read back for them and not yet handed to a worker
+// (a view's rectangle in the image's own format, in memory the GPU's copy
+// went to) stay within this. A stereo press of 4880x4124 8-bit views is 161
+// MB, so four of those fit; a first press is taken whatever its size. Each
+// worker holds one more picture as 8-bit RGBA while it encodes it (80 MB at
+// that size), which is not counted here.
+inline constexpr std::uint64_t kMaxScreenshotPendingBytes = 768ull << 20;
+// The threads that convert and encode: a press's two eyes are written side
+// by side (the PNG encoder takes about a second for a 20-megapixel view,
+// whichever of PNG's row filters it is given).
+inline constexpr std::size_t kScreenshotWorkers = 2;
 
 // One session's screenshots. Begin, Poll and Stop are the frame thread's
 // (with the game's Direct3D 11 context held where there is one); nothing in
@@ -109,29 +126,37 @@ class ScreenshotCapture {
     ScreenshotCapture();
     virtual ~ScreenshotCapture();
 
-    // A press being read back, converted or written: another is refused.
-    // Takes no lock.
+    // A press being read back, converted or written. Takes no lock.
     bool Busy() const;
-    // Starts reading back `eyes` of `views`. False with `error` when busy or
-    // nothing could be started (a worker thread that cannot be started
-    // included). `folder` is asked for on the worker thread.
+    // The bytes a press of `eyes` of `views` reads back.
+    static std::uint64_t PixelBytes(SubmittedImageApi api, const std::vector<SubmittedView>& views,
+                                    const std::vector<ScreenshotEye>& eyes);
+    // Whether another press of that many bytes is taken now
+    // (kMaxScreenshotPresses, kMaxScreenshotPendingBytes). Takes no lock.
+    bool Room(std::uint64_t pixel_bytes) const;
+    // Starts reading back `eyes` of `views`. False with `error` when there
+    // is no room for the press or nothing could be started (a worker thread
+    // that cannot be started included). `folder` is asked for on a worker
+    // thread. `press`: the number its outcome carries.
     bool Begin(SubmittedImageGpu& gpu, const std::vector<SubmittedView>& views, const std::vector<ScreenshotEye>& eyes,
-               ScreenshotFolderSource folder, const std::string& exe_name, std::string& error);
+               ScreenshotFolderSource folder, const std::string& exe_name, std::string& error,
+               std::uint64_t* press = nullptr);
     // With the folder known already.
     bool Begin(SubmittedImageGpu& gpu, const std::vector<SubmittedView>& views, const std::vector<ScreenshotEye>& eyes,
-               const std::filesystem::path& folder, const std::string& exe_name, std::string& error);
-    // Every frame: moves readbacks the GPU finished to the worker, and ends
-    // those the worker has read. Returns a press's outcome once, when its
-    // files are written or it failed. With no press in flight it takes no
-    // lock.
+               const std::filesystem::path& folder, const std::string& exe_name, std::string& error,
+               std::uint64_t* press = nullptr);
+    // Every frame: moves readbacks the GPU finished to the workers, and ends
+    // those a worker has read. Returns one press's outcome, once, when its
+    // files are written or it failed (a call for each press that ended).
+    // With no press in flight it takes no lock.
     std::optional<ScreenshotResult> Poll(SubmittedImageGpu* gpu);
-    // Teardown: waits for the worker to stop reading mapped pixels (not for
-    // files being encoded from its own copy), ends the tickets and drops the
-    // press. The worker thread stays for the next session.
+    // Teardown: waits for the workers to stop reading mapped pixels (not for
+    // files being encoded from their own copies), ends the tickets and drops
+    // every press. The worker threads stay for the next session.
     void Stop(SubmittedImageGpu* gpu);
 
   protected:
-    // Starts the worker thread; may throw (std::system_error).
+    // Starts one worker thread; may throw (std::system_error).
     virtual void StartWorker();
     void WorkerLoop();
     // Tests: what the worker writes a file with instead of WritePng (set
@@ -139,6 +164,9 @@ class ScreenshotCapture {
     using PngWriter = bool (*)(const std::filesystem::path&, const std::uint8_t*, std::uint32_t, std::uint32_t,
                                std::string&);
     PngWriter png_writer_{nullptr};
+    // Tests and measurements: fewer worker threads than kScreenshotWorkers
+    // (set before the first press).
+    std::size_t worker_limit_{kScreenshotWorkers};
 
   private:
     struct Shot {
@@ -146,30 +174,47 @@ class ScreenshotCapture {
         std::string file_name;
         enum class Stage { kReadback, kConverting, kConverted, kDone } stage{Stage::kReadback};
         SubmittedPixels pixels;
+        std::uint64_t bytes{0}; // counted in pending_bytes_ until its ticket ends
+    };
+    // Where a press's files go: asked for once, by the first worker that
+    // writes one of them.
+    struct Folder {
+        std::mutex mutex;
+        ScreenshotFolderSource source;
+        bool asked{false};
+        std::filesystem::path path;
+    };
+    struct Press {
+        std::uint64_t number{0};
+        std::vector<Shot> shots;
+        std::shared_ptr<Folder> folder;
+        std::size_t written{0};
+        ScreenshotResult result;
     };
     struct Job {
         std::uint64_t press{0};
         std::size_t shot{0};
         SubmittedPixels pixels;
         std::string file_name;
+        std::shared_ptr<Folder> folder;
     };
-    bool EnsureWorker(std::string& error);
+    bool EnsureWorkers(std::string& error);
+    Press* FindPressLocked(std::uint64_t number);
+    void EndTicketLocked(SubmittedImageGpu* gpu, Shot& shot);
 
     mutable std::mutex mutex_;
     std::condition_variable wake_;
     std::condition_variable converted_;
-    std::thread worker_;
+    std::vector<std::thread> workers_;
     bool stop_{false};
     std::deque<Job> jobs_;
-    // The press in flight (frame thread, under mutex_ where the worker reads it).
-    bool active_{false};
-    std::atomic<bool> busy_{false}; // `active_`, read without the lock
-    ScreenshotFolderSource folder_; // the press's
-    std::uint64_t press_{0};
-    std::vector<Shot> shots_;
-    std::size_t written_{0};
-    std::size_t converting_{0}; // jobs whose mapped pixels the worker still reads
-    ScreenshotResult result_;
+    // The presses in flight, oldest first (frame thread, under mutex_ where
+    // a worker reads them).
+    std::deque<Press> presses_;
+    std::atomic<std::size_t> in_flight_{0};         // presses_.size(), read without the lock
+    std::atomic<std::uint64_t> pending_bytes_{0};   // of tickets not ended yet
+    std::uint64_t last_press_{0};
+    std::size_t converting_{0}; // jobs whose mapped pixels a worker still reads
 };
 
 } // namespace depthxr

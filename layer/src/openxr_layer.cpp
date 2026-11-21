@@ -16830,6 +16830,7 @@ void OpenXrLayer::StopScreenshotsLocked(bool device_gone) {
     submitted_binding_ = {};
     layer_released_images_.clear();
     screenshot_requested_ = false;
+    screenshot_sounds_.clear();
     // Releases already held go on at the frame's end or the session's.
     capture_holds_releases_ = false;
 }
@@ -16955,8 +16956,11 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held
         } else {
             logger_.Error("Screenshot failed: " + result->error + (files.empty() ? "" : " (saved: " + files + ")"));
         }
-        SoundPlayer::Instance().PlayTransition(screenshot_sound_, result->saved, dll_directory_,
-                                               resolved_settings_.core.sound_volume);
+        if (const auto sound = screenshot_sounds_.find(result->press); sound != screenshot_sounds_.end()) {
+            SoundPlayer::Instance().PlayTransition(sound->second, result->saved, dll_directory_,
+                                                   resolved_settings_.core.sound_volume);
+            screenshot_sounds_.erase(sound);
+        }
     }
     if (!screenshot_requested_) {
         return;
@@ -16970,8 +16974,15 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held
     EnsureSubmittedImagesLocked();
     const ScreenshotSettings& settings = resolved_settings_.core.screenshot;
     const InputBinding binding = ActingBinding(screenshot_pressed_, settings.bindings);
-    const auto refuse = [&](const std::string& why) {
-        logger_.Error("Screenshot not taken (" + BindingLabel(binding) + "): " + why + ".");
+    // `expected`: nothing is wrong (presses came faster than pictures are
+    // saved), so the log says so without calling it an error.
+    const auto refuse = [&](const std::string& why, bool expected = false) {
+        const std::string line = "Screenshot not taken (" + BindingLabel(binding) + "): " + why + ".";
+        if (expected) {
+            logger_.Info(line);
+        } else {
+            logger_.Error(line);
+        }
         SoundPlayer::Instance().PlayTransition(binding.sound, false, dll_directory_,
                                                resolved_settings_.core.sound_volume);
     };
@@ -16980,9 +16991,6 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held
     }
     if (!submitted_images_->SupportsReadback()) {
         return refuse("Vulkan images cannot be read back yet");
-    }
-    if (screenshot_.Busy()) {
-        return refuse("the last one is still being saved");
     }
     std::vector<SubmittedView> views;
     std::string problem;
@@ -16994,6 +17002,12 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held
     }
     const std::vector<ScreenshotEye> eyes =
         SelectScreenshotEyes(static_cast<std::uint32_t>(views.size()), settings.eyes);
+    // A few presses are saved at a time (kMaxScreenshotPresses, within
+    // kMaxScreenshotPendingBytes of pixels read back); one more waits for
+    // none of them and is not taken.
+    if (!screenshot_.Room(ScreenshotCapture::PixelBytes(submitted_images_->Api(), views, eyes))) {
+        return refuse("the screenshots taken just before are still being saved", true);
+    }
     for (const ScreenshotEye& eye : eyes) {
         if (views[eye.view_index].released) {
             // Released twice before its frame's end: the next frame's image.
@@ -17021,10 +17035,11 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held
     ScreenshotFolderSource folder = [custom = settings.folder, exe = current_exe_name_, local = LocalAppDataPath()] {
         return ScreenshotFolder(custom, exe, PicturesFolder(), local);
     };
-    if (!screenshot_.Begin(*submitted_images_, views, eyes, std::move(folder), current_exe_name_, problem)) {
+    std::uint64_t press = 0;
+    if (!screenshot_.Begin(*submitted_images_, views, eyes, std::move(folder), current_exe_name_, problem, &press)) {
         return refuse(problem);
     }
-    screenshot_sound_ = binding.sound;
+    screenshot_sounds_[press] = binding.sound;
     std::string sizes;
     for (const ScreenshotEye& eye : eyes) {
         const XrRect2Di& rect = views[eye.view_index].rect;

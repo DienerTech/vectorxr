@@ -1481,7 +1481,8 @@ class OpenXrLayer {
     bool screenshot_framegen_logged_{false};
     std::string screenshot_folder_ignored_; // the folder setting last logged as not used (not a full path)
     std::optional<InputBinding> screenshot_pressed_; // its list's binding that last went down (ActingBinding)
-    SoundFeedback screenshot_sound_;                 // of the binding whose press is being saved
+    // Of the bindings whose presses are being saved, by the press's number.
+    std::unordered_map<std::uint64_t, SoundFeedback> screenshot_sounds_;
     std::optional<std::chrono::steady_clock::time_point> screenshot_last_poll_time_;
     // The image each of the layer's own swapchains last released drawn (ReleaseLayerSwapchainImage).
     std::unordered_map<XrSwapchain, uint32_t> layer_released_images_;
