@@ -715,25 +715,33 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thre
     g_best_cost[slice * 64 + slot] = best_cost;
     g_best_index[slice * 64 + slot] = best_index;
     GroupMemoryBarrierWithGroupSync();
+    // Research (FG_FLAG_FLOW_SHORTEST): a second scan for the shortest
+    // displacement within the tolerance of the lowest cost of all four slices
+    // (ShortestScan). Its barriers stand outside any flow control, every
+    // thread of the group reaching each: WARP, the software adapter, crashed
+    // running the pass with them inside the flag's branch (2026-11-21), and
+    // other drivers may be as strict.
+    const bool shortest_scan = (g.options.y & FG_FLAG_FLOW_SHORTEST) != 0u;
+    float lowest = g_best_cost[slot];
+    int first = g_best_index[slot];
+    [unroll]
+    for (int k = 1; k < FG_SEARCH_SLICES; ++k) {
+        const float cost = g_best_cost[k * 64 + slot];
+        const int candidate = g_best_index[k * 64 + slot];
+        if (cost < lowest || (cost == lowest && candidate < first)) {
+            lowest = cost;
+            first = candidate;
+        }
+    }
+    if (shortest_scan && slice == 0) {
+        g_first[slot] = active ? first : -1;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    float shortest = 1e30;
+    float shortest_cost = 1e30;
+    int shortest_index = -2;
     [branch]
-    if ((g.options.y & FG_FLAG_FLOW_SHORTEST) != 0u) {
-        // Research: a second scan for the shortest displacement within the
-        // tolerance of the lowest cost of all four slices (ShortestScan).
-        float lowest = g_best_cost[slot];
-        int first = g_best_index[slot];
-        [unroll]
-        for (int s = 1; s < FG_SEARCH_SLICES; ++s) {
-            const float cost = g_best_cost[s * 64 + slot];
-            const int candidate = g_best_index[s * 64 + slot];
-            if (cost < lowest || (cost == lowest && candidate < first)) {
-                lowest = cost;
-                first = candidate;
-            }
-        }
-        if (slice == 0) {
-            g_first[slot] = active ? first : -1;
-        }
-        GroupMemoryBarrierWithGroupSync();
+    if (shortest_scan) {
         // tuning.w 1: shortest from the median of the first scan's choices
         // of the 3x3 cells around (within the thread group), not from no
         // motion: content that really moves far moves far together.
@@ -752,19 +760,20 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thre
             }
             target = float2(Median9(xs), Median9(ys));
         }
-        float shortest = 1e30;
-        float shortest_cost = 1e30;
-        int shortest_index = -2;
         if (active) {
             ShortestScan(cell, origin, extent, slice, radius, lowest, target, shortest, shortest_cost, shortest_index);
         }
+        // Every slice read the first scan's results before the barrier above.
         g_short_length[slice * 64 + slot] = shortest;
         g_best_cost[slice * 64 + slot] = shortest_cost;
         g_best_index[slice * 64 + slot] = shortest_index;
-        GroupMemoryBarrierWithGroupSync();
-        if (!active || slice != 0) {
-            return;
-        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (!active || slice != 0) {
+        return;
+    }
+    [branch]
+    if (shortest_scan) {
         [unroll]
         for (int r = 1; r < FG_SEARCH_SLICES; ++r) {
             const float length2 = g_short_length[r * 64 + slot];
@@ -779,9 +788,6 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thre
         const int2 nearest = shortest_index < 0 ? int2(0, 0)
                                                 : int2(uint(shortest_index) % uint(side), uint(shortest_index) / uint(side)) - radius;
         g_flow[id.xy] = float4(float2(nearest) / float2(extent), shortest_index >= -1 ? shortest_cost : lowest, 1.0);
-        return;
-    }
-    if (!active || slice != 0) {
         return;
     }
     [unroll]
