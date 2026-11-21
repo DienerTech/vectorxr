@@ -17000,8 +17000,32 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held
     if (!ResolveSubmittedViews(frame, lookup, views, problem)) {
         return refuse(problem);
     }
-    const std::vector<ScreenshotEye> eyes =
-        SelectScreenshotEyes(static_cast<std::uint32_t>(views.size()), settings.eyes);
+    std::vector<ScreenshotEye> eyes = SelectScreenshotEyes(static_cast<std::uint32_t>(views.size()), settings.eyes);
+    // Quad views the runtime or Frame Generation composes are saved with
+    // each eye's focus view drawn over it, where this session's images can
+    // be drawn so.
+    const bool focus_views = views.size() > 3 && submitted_images_->SupportsFocus();
+    for (const ScreenshotEye& eye : eyes) {
+        if (views[eye.view_index].released || (focus_views && eye.view_index < 2 && views[eye.view_index + 2].released)) {
+            // Released twice before its frame's end: the next frame's image.
+            screenshot_requested_ = true;
+            return;
+        }
+    }
+    bool with_focus = focus_views;
+    if (focus_views) {
+        for (ScreenshotEye& eye : eyes) {
+            FrameGenExtent picture{};
+            eye.composed = UncomposedFocusLocked(frame, views, eye.view_index, eye.focus, &picture);
+            eye.width = picture.width;
+            eye.height = picture.height;
+            with_focus = with_focus && eye.composed;
+        }
+        if (!with_focus) {
+            // Both eyes alike: with their focus views, or without.
+            for (ScreenshotEye& eye : eyes) eye = ScreenshotEye{eye.view_index, eye.letter};
+        }
+    }
     // A few presses are saved at a time (kMaxScreenshotPresses, within
     // kMaxScreenshotPendingBytes of pixels read back); one more waits for
     // none of them and is not taken.
@@ -17009,15 +17033,11 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held
         return refuse("the screenshots taken just before are still being saved", true);
     }
     for (const ScreenshotEye& eye : eyes) {
-        if (views[eye.view_index].released) {
-            // Released twice before its frame's end: the next frame's image.
-            screenshot_requested_ = true;
-            return;
-        }
-    }
-    for (const ScreenshotEye& eye : eyes) {
         const SubmittedView& view = views[eye.view_index];
         if (view.resolved && !TrackScreenshotSwapchainLocked(view.swapchain, problem)) {
+            return refuse(problem);
+        }
+        if (eye.composed && !TrackScreenshotSwapchainLocked(eye.focus.view.swapchain, problem)) {
             return refuse(problem);
         }
     }
@@ -17043,16 +17063,21 @@ void OpenXrLayer::UpdateScreenshotsLocked(const XrFrameEndInfo& frame, bool held
     std::string sizes;
     for (const ScreenshotEye& eye : eyes) {
         const XrRect2Di& rect = views[eye.view_index].rect;
-        sizes += (sizes.empty() ? "" : ", ") + std::string(1, eye.letter) + " " + std::to_string(rect.extent.width) +
-                 "x" + std::to_string(rect.extent.height);
+        sizes += (sizes.empty() ? "" : ", ") + std::string(1, eye.letter) + " " +
+                 std::to_string(eye.composed ? static_cast<std::int32_t>(eye.width) : rect.extent.width) + "x" +
+                 std::to_string(eye.composed ? static_cast<std::int32_t>(eye.height) : rect.extent.height);
     }
     logger_.Info("Screenshot via " + BindingLabel(binding) + ": saving " + sizes + " to " +
                  (custom_folder ? "the folder set, " + settings.folder : std::string("VectorXR in the Pictures folder")) +
                  ".");
     if (views.size() > 2 && !screenshot_quad_logged_) {
         screenshot_quad_logged_ = true;
-        logger_.Info("Screenshots: this frame's quad views are not composed by VectorXR (the runtime or Frame "
-                     "Generation composes them), so its two stereo views are saved, without the focus views.");
+        logger_.Info(with_focus
+                         ? "Screenshots: this frame's quad views are composed by the runtime or by Frame Generation, "
+                           "so each eye is saved with its focus view drawn over it, as the headset shows it "
+                           "(without Quadviews' focus sharpening)."
+                         : "Screenshots: this frame's quad views are not composed by VectorXR (the runtime or Frame "
+                           "Generation composes them), so its two stereo views are saved, without the focus views.");
     }
     if (framegen_owns_pacing_.load(std::memory_order_acquire) && !screenshot_framegen_logged_) {
         screenshot_framegen_logged_ = true;
@@ -17080,6 +17105,80 @@ bool SameMirrorSettings(const MirrorResolvedSettings& lhs, const MirrorResolvedS
 
 bool OpenXrLayer::MirrorWantedLocked() const {
     return resolved_settings_.core.enabled && resolved_settings_.mirror.enabled;
+}
+
+bool OpenXrLayer::UncomposedFocusLocked(const XrFrameEndInfo& frame, const std::vector<SubmittedView>& views,
+                                        std::uint32_t eye, SubmittedFocus& focus, FrameGenExtent* picture) const {
+    if (eye > 1 || views.size() < 4) {
+        return false;
+    }
+    // The projection layer the views were resolved from.
+    const XrCompositionLayerProjection* projection = nullptr;
+    for (std::uint32_t i = 0; frame.layers && i < frame.layerCount && !projection; ++i) {
+        const XrCompositionLayerBaseHeader* header = frame.layers[i];
+        if (!header || header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+        const auto* candidate = reinterpret_cast<const XrCompositionLayerProjection*>(header);
+        if (candidate->views && candidate->viewCount > 0) projection = candidate;
+    }
+    if (!projection || projection->viewCount < 4) {
+        return false;
+    }
+    const SubmittedView& eye_view = views[eye];
+    const SubmittedView& focus_view = views[eye + 2];
+    if (!eye_view.resolved || !focus_view.resolved || eye_view.rect.extent.width <= 0 ||
+        eye_view.rect.extent.height <= 0) {
+        return false;
+    }
+    const FrameGenExtent focus_extent{static_cast<std::uint32_t>(focus_view.rect.extent.width),
+                                      static_cast<std::uint32_t>(focus_view.rect.extent.height)};
+    FrameGenComposeEye composed;
+    FrameGenExtent output{};
+    const bool claimed = pending_framegen_quad_ && pending_framegen_quad_->route == FrameGenQuadRoute::kClaimed;
+    if (claimed) {
+        // Frame Generation composes this frame: the eye as it places and
+        // blends it.
+        const FrameGenComposition& composition = pending_framegen_quad_->composition;
+        if (composition.eyes.size() <= eye || composition.eyes[eye].peripheral != eye ||
+            composition.eyes[eye].focus != eye + 2) {
+            return false;
+        }
+        composed = composition.eyes[eye];
+        output = composition.output;
+    } else {
+        // The runtime composes the four views: placed by their fields of
+        // view (an eye's two views share its pose), the picture large enough
+        // to hold the focus view at its own density.
+        const FrameGenFov eye_fov = ToFrameGenFov(projection->views[eye].fov);
+        const FrameGenFov focus_fov = ToFrameGenFov(projection->views[eye + 2].fov);
+        const double transition = resolved_settings_.quadviews.transition_thickness_percent;
+        const FrameGenExtent eye_extent{static_cast<std::uint32_t>(eye_view.rect.extent.width),
+                                        static_cast<std::uint32_t>(eye_view.rect.extent.height)};
+        composed = BuildFrameGenComposeEye(eye_fov, focus_fov, eye_extent, focus_extent, transition, 0.0);
+        const double rect_width = static_cast<double>(composed.focus_rect[2]) - composed.focus_rect[0];
+        const double rect_height = static_cast<double>(composed.focus_rect[3]) - composed.focus_rect[1];
+        if (!(rect_width > 1e-3) || !(rect_height > 1e-3)) {
+            return false;
+        }
+        constexpr double kLargestSide = 8192.0;
+        double density = std::max({1.0, focus_extent.width / (rect_width * eye_extent.width),
+                                   focus_extent.height / (rect_height * eye_extent.height)});
+        density = std::min({density, kLargestSide / eye_extent.width, kLargestSide / eye_extent.height});
+        output.width = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(std::lround(eye_extent.width * density)));
+        output.height = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(std::lround(eye_extent.height * density)));
+        composed = BuildFrameGenComposeEye(eye_fov, focus_fov, output, focus_extent, transition, 0.0);
+    }
+    if (!(composed.focus_rect[2] - composed.focus_rect[0] > 1e-4f) ||
+        !(composed.focus_rect[3] - composed.focus_rect[1] > 1e-4f) || output.width == 0 || output.height == 0) {
+        return false;
+    }
+    focus.present = true;
+    focus.view = focus_view;
+    focus.place.rect = composed.focus_rect;
+    focus.place.feather = composed.feather;
+    if (picture) {
+        *picture = output;
+    }
+    return true;
 }
 
 std::optional<bool> OpenXrLayer::MirrorWindowVisibilityLocked() const {
@@ -17378,6 +17477,16 @@ void OpenXrLayer::UpdateMirrorLocked(const XrFrameEndInfo& frame, bool held) {
         return failed_frame(problem);
     }
     draw.homography = aim.homography;
+    // Quad views the runtime or Frame Generation composes: the eye's focus
+    // view is drawn over it, so the window shows the eye as the headset does
+    // and not its low-resolution peripheral view alone.
+    if (views.size() > 2 && submitted_images_->SupportsFocus()) {
+        SubmittedFocus focus;
+        if (UncomposedFocusLocked(frame, views, static_cast<std::uint32_t>(index), focus, nullptr) &&
+            TrackScreenshotSwapchainLocked(focus.view.swapchain, problem)) {
+            draw.focus = focus;
+        }
+    }
     switch (submitted_images_->DrawMirror(view, draw, problem)) {
     case MirrorDrawResult::kShown:
         mirror.failures = 0;
@@ -17395,8 +17504,12 @@ void OpenXrLayer::UpdateMirrorLocked(const XrFrameEndInfo& frame, bool held) {
     }
     if (views.size() > 2 && !mirror.quad_logged) {
         mirror.quad_logged = true;
-        logger_.Info("Mirror window: this frame's quad views are not composed by VectorXR, so the window shows the "
-                     "stereo view without the focus view.");
+        logger_.Info(draw.focus.present
+                         ? "Mirror window: this frame's quad views are composed by the runtime or by Frame "
+                           "Generation, so the window draws the eye's focus view over it, as the headset shows it "
+                           "(without Quadviews' focus sharpening)."
+                         : "Mirror window: this frame's quad views are not composed by VectorXR, so the window shows "
+                           "the stereo view without the focus view.");
     }
 }
 

@@ -42,6 +42,7 @@ const XrSpace kLocalSpace = reinterpret_cast<XrSpace>(std::uintptr_t{2});
 const XrSwapchain kColor = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xc0});
 const XrSwapchain kDepth = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xd0});
 const XrSwapchain kHud = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xe0});
+const XrSwapchain kFocus = reinterpret_cast<XrSwapchain>(std::uintptr_t{0xf0});
 constexpr std::int64_t kFormat = 29; // DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
 constexpr XrDuration kFrame = 11'111'111; // 90 Hz
 
@@ -130,9 +131,31 @@ class FakeGpu final : public depthxr::SubmittedImageGpu {
     }
     void Forget(XrSwapchain swapchain) override { tracked.erase(swapchain); }
     bool Tracked(XrSwapchain swapchain) const override { return tracked.count(swapchain) != 0; }
-    std::uint64_t Readback(const depthxr::SubmittedView&, std::string&) override { return 0; }
+    // `reads`: readbacks start and never finish.
+    bool reads{false};
+    std::uint64_t tickets{0};
+    std::vector<depthxr::SubmittedView> readbacks;
+    struct Composed {
+        depthxr::SubmittedView view;
+        depthxr::SubmittedFocus focus;
+        std::uint32_t width{0}, height{0};
+    };
+    std::vector<Composed> composed_readbacks;
+    bool supports_focus{false};
+    std::uint64_t Readback(const depthxr::SubmittedView& view, std::string&) override {
+        if (!reads) return 0;
+        readbacks.push_back(view);
+        return ++tickets;
+    }
+    bool SupportsFocus() const override { return supports_focus; }
+    std::uint64_t ReadbackComposed(const depthxr::SubmittedView& view, const depthxr::SubmittedFocus& focus,
+                                   std::uint32_t width, std::uint32_t height, std::string&) override {
+        if (!reads) return 0;
+        composed_readbacks.push_back({view, focus, width, height});
+        return ++tickets;
+    }
     depthxr::ReadbackState Poll(std::uint64_t, depthxr::SubmittedPixels&, std::string&) override {
-        return depthxr::ReadbackState::kNone;
+        return reads ? depthxr::ReadbackState::kPending : depthxr::ReadbackState::kNone;
     }
     void Finish(std::uint64_t) override {}
     bool SupportsMirror() const override { return supports_mirror; }
@@ -464,6 +487,52 @@ class MirrorTestPeer {
         std::ifstream stream(Layer().logger_.ActiveLogPath(), std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(stream), {});
     }
+    // A swapchain of the game's with an image released and held, as kColor.
+    static void AddSwapchain(XrSwapchain swapchain, std::uint32_t width, std::uint32_t height, std::uint32_t image) {
+        std::scoped_lock lock(Layer().mutex_);
+        OpenXrLayer::SwapchainInfo info;
+        info.session = kSession;
+        info.width = width;
+        info.height = height;
+        info.array_size = 1;
+        info.sample_count = 1;
+        info.format = kFormat;
+        info.usage_flags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+        info.last_released_image_index = image;
+        info.has_last_released_image_index = true;
+        info.deferred_release_count = 1;
+        Layer().tracked_swapchains_[swapchain] = info;
+    }
+    // Frame Generation composes the frame's quad views itself, each eye as
+    // given (ClaimQuadFrame's route), or does not.
+    static void ClaimQuad(const FrameGenComposition* composition) {
+        std::scoped_lock lock(Layer().mutex_);
+        Layer().pending_framegen_quad_.reset();
+        if (composition) {
+            FrameGenQuadFrame& pending = Layer().pending_framegen_quad_.emplace();
+            pending.route = FrameGenQuadRoute::kClaimed;
+            pending.composition = *composition;
+        }
+    }
+    static void SetTransition(double percent) {
+        std::scoped_lock lock(Layer().mutex_);
+        Layer().resolved_settings_.quadviews.transition_thickness_percent = percent;
+    }
+    // The screenshot binding (a silent one) pressed, the frame handed over
+    // with its releases held.
+    static void PressScreenshot(const XrFrameEndInfo& frame) {
+        std::scoped_lock lock(Layer().mutex_);
+        InputBinding binding;
+        binding.sound.enabled = false;
+        Layer().resolved_settings_.core.screenshot.bindings = {binding};
+        Layer().resolved_settings_.core.screenshot.folder = "D:\\Shots";
+        Layer().screenshot_pressed_ = binding;
+        Layer().screenshot_requested_ = true;
+        Layer().UpdateScreenshotsLocked(frame, true);
+        // The stand-in never finishes a readback: the press is dropped.
+        Layer().screenshot_.Stop(nullptr);
+        Layer().screenshot_sounds_.clear();
+    }
     static void SetSettingsOnly(const MirrorSettings& mirror) {
         std::scoped_lock lock(Layer().mutex_);
         static_cast<MirrorSettings&>(Layer().resolved_settings_.mirror) = mirror;
@@ -589,6 +658,187 @@ void TestShowsTheEye() {
                gpu->mirror_draws.back().draw.homography == PlainCrop(game.views[1].fov, settings),
            "The right eye's rectangle and field of view are shown when it is chosen");
     Expect(Peer::Reason() == "showing the right eye at 1280x720", "The status names the eye");
+}
+
+// A quad views frame as it is handed on when nothing of VectorXR's composed
+// it into one image (the runtime composes the four views, or Frame
+// Generation does): the two peripheral views in the game's double-wide
+// image, the two focus views in an image of their own.
+struct QuadFrame : GameFrame {
+    XrCompositionLayerProjectionView quad_views[4]{};
+    QuadFrame() {
+        for (uint32_t i = 0; i < 4; ++i) {
+            quad_views[i] = views[i % 2];
+            quad_views[i].next = nullptr;
+        }
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            XrCompositionLayerProjectionView& focus = quad_views[eye + 2];
+            // The middle of the eye's field of view, in tangents: a quarter
+            // to three quarters across, three tenths to seven tenths down.
+            const XrFovf& full = quad_views[eye].fov;
+            const double left = std::tan(full.angleLeft), right = std::tan(full.angleRight);
+            const double up = std::tan(full.angleUp), down = std::tan(full.angleDown);
+            focus.fov.angleLeft = static_cast<float>(std::atan(left + 0.25 * (right - left)));
+            focus.fov.angleRight = static_cast<float>(std::atan(left + 0.75 * (right - left)));
+            focus.fov.angleUp = static_cast<float>(std::atan(up - 0.3 * (up - down)));
+            focus.fov.angleDown = static_cast<float>(std::atan(up - 0.7 * (up - down)));
+            focus.subImage.swapchain = kFocus;
+            focus.subImage.imageRect = {{static_cast<int32_t>(eye) * 1600, 0}, {1500, 1080}};
+            focus.subImage.imageArrayIndex = 0;
+        }
+        projection.viewCount = 4;
+        projection.views = quad_views;
+    }
+};
+
+bool Near(float a, double b, double tolerance = 1e-4) {
+    return std::fabs(static_cast<double>(a) - b) <= tolerance;
+}
+
+// Quad views the runtime or Frame Generation composes reach the frame's end
+// as four views: the mirror window and screenshots draw the eye's focus view
+// over its peripheral view, placed as the composer places it, where the
+// session's images can be drawn so; otherwise they show the peripheral view
+// as before. The frame that goes on is not changed.
+void TestQuadViewsFocus() {
+    const auto logs = std::filesystem::temp_directory_path() / "vectorxr-test-mirror-layer";
+    std::filesystem::create_directories(logs);
+    Peer::LogTo(logs / "mirror-quad.log");
+    QuadFrame game;
+    depthxr::MirrorSettings settings;
+    settings.frame_rate = 1000; // every frame
+
+    // A backend that cannot draw a focus view: the peripheral view, as before.
+    FakeGpu* gpu = Peer::Start(settings);
+    Peer::AddSwapchain(kFocus, 3200, 1080, 1);
+    Frames(game, 3);
+    Expect(!gpu->mirror_draws.empty() && !gpu->mirror_draws.back().draw.focus.present &&
+               gpu->mirror_draws.back().view.view_index == 0 && gpu->tracked.count(kFocus) == 0,
+           "A backend that draws no focus view shows the eye's peripheral view alone");
+    Expect(Peer::Log().find("shows the stereo view without the focus view") != std::string::npos,
+           "...and the log says the focus view is not shown");
+
+    // The runtime composes the four views: the focus view placed by the
+    // views' fields of view.
+    gpu = Peer::Start(settings);
+    gpu->supports_focus = true;
+    Peer::AddSwapchain(kFocus, 3200, 1080, 1);
+    Peer::SetTransition(20.0);
+    const std::string before = game.Bytes();
+    const XrTime began = game.info.displayTime;
+    const std::string on = Peer::HandOn(game.info);
+    Expect(game.Bytes() == before && on == FrameBytes(game.info), "The frame that goes on is the game's, unchanged");
+    Frames(game, 3);
+    Expect(!gpu->mirror_draws.empty(), "A quad views frame is drawn into the window");
+    {
+        const FakeGpu::Shown& shown = gpu->mirror_draws.back();
+        const depthxr::SubmittedFocus& focus = shown.draw.focus;
+        Expect(shown.view.view_index == 0 && shown.view.swapchain == kColor && focus.present &&
+                   focus.view.view_index == 2 && focus.view.swapchain == kFocus && focus.view.image_index == 1 &&
+                   focus.view.rect.offset.x == 0 && focus.view.rect.extent.width == 1500 &&
+                   focus.view.rect.extent.height == 1080 && focus.view.resolved,
+               "The left eye's focus view is drawn over its peripheral view");
+        Expect(Near(focus.place.rect[0], 0.25) && Near(focus.place.rect[1], 0.3) && Near(focus.place.rect[2], 0.75) &&
+                   Near(focus.place.rect[3], 0.7),
+               "The focus view lies where its field of view puts it in the eye's");
+        Expect(Near(focus.place.feather[0], 0.5 * 0.2) && Near(focus.place.feather[1], 0.4 * 0.2),
+               "It is blended in over the Quadviews transition band");
+        Expect(shown.draw.homography == PlainCrop(game.quad_views[0].fov, settings),
+               "The window is aimed by the eye's own view, as without a focus view");
+        Expect(gpu->tracked.count(kFocus) == 1 && gpu->tracked.count(kColor) == 1, "Both images are tracked");
+    }
+    // Shown, the frame is still what the game made (a frame later on).
+    const XrTime now = game.info.displayTime;
+    game.info.displayTime = began;
+    Expect(game.Bytes() == before, "The game's frame is not written");
+    game.info.displayTime = now;
+    Expect(Peer::Log().find("draws the eye's focus view over it") != std::string::npos,
+           "The log says the focus view is drawn over the eye");
+    // The right eye.
+    settings.eye = depthxr::MirrorEye::Right;
+    Peer::Reconfigure(settings);
+    gpu->mirror_draws.clear();
+    Frames(game, 2, false);
+    Expect(!gpu->mirror_draws.empty() && gpu->mirror_draws.back().view.view_index == 1 &&
+               gpu->mirror_draws.back().draw.focus.present &&
+               gpu->mirror_draws.back().draw.focus.view.view_index == 3 &&
+               gpu->mirror_draws.back().draw.focus.view.rect.offset.x == 1600,
+           "The right eye is shown with the right eye's focus view");
+    settings.eye = depthxr::MirrorEye::Left;
+    Peer::Reconfigure(settings);
+
+    // A focus view whose image is already the runtime's is not read: the
+    // peripheral view alone for that frame.
+    Peer::ReleaseToRuntime(kFocus);
+    gpu->mirror_draws.clear();
+    Frames(game, 2, false);
+    Expect(!gpu->mirror_draws.empty() && !gpu->mirror_draws.back().draw.focus.present,
+           "A focus view the runtime already has is not read");
+    Peer::Release(kFocus, 1);
+
+    // A screenshot of such a frame: each eye with its focus view, large
+    // enough to hold the focus view at its own density (1500 texels over
+    // half the eye's 1000: three times the eye's size).
+    gpu->reads = true;
+    Peer::PressScreenshot(game.info);
+    Expect(gpu->composed_readbacks.size() == 2 && gpu->readbacks.empty(), "Both eyes are saved with their focus views");
+    for (std::uint32_t eye = 0; eye < 2 && gpu->composed_readbacks.size() == 2; ++eye) {
+        const FakeGpu::Composed& composed = gpu->composed_readbacks[eye];
+        Expect(composed.view.view_index == eye && composed.focus.present && composed.focus.view.view_index == eye + 2 &&
+                   composed.width == 3000 && composed.height == 2700 && Near(composed.focus.place.rect[0], 0.25) &&
+                   Near(composed.focus.place.rect[3], 0.7),
+               "An eye's screenshot draws its focus view over it at the focus view's density");
+    }
+    Expect(Peer::Log().find("each eye is saved with its focus view drawn over it") != std::string::npos,
+           "The log says what a quad views screenshot holds");
+
+    // Frame Generation composes the frame: the eye as it places and blends
+    // it, at the size it composes.
+    gpu = Peer::Start(settings);
+    gpu->supports_focus = true;
+    Peer::AddSwapchain(kFocus, 3200, 1080, 1);
+    depthxr::FrameGenComposition composition;
+    composition.output = {2400, 2160};
+    composition.eyes.resize(2);
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        composition.eyes[eye].peripheral = eye;
+        composition.eyes[eye].focus = eye + 2;
+        composition.eyes[eye].focus_rect = {0.2f + 0.05f * eye, 0.35f, 0.7f + 0.05f * eye, 0.8f};
+        composition.eyes[eye].feather = {0.03f, 0.04f};
+    }
+    Peer::ClaimQuad(&composition);
+    Frames(game, 3);
+    Expect(!gpu->mirror_draws.empty() && gpu->mirror_draws.back().draw.focus.present &&
+               gpu->mirror_draws.back().draw.focus.place.rect == composition.eyes[0].focus_rect &&
+               gpu->mirror_draws.back().draw.focus.place.feather == composition.eyes[0].feather &&
+               gpu->mirror_draws.back().draw.focus.view.view_index == 2,
+           "A frame Frame Generation composes is shown with the focus view where Frame Generation puts it");
+    gpu->reads = true;
+    Peer::PressScreenshot(game.info);
+    Expect(gpu->composed_readbacks.size() == 2 && gpu->composed_readbacks[1].width == 2400 &&
+               gpu->composed_readbacks[1].height == 2160 &&
+               gpu->composed_readbacks[1].focus.place.rect == composition.eyes[1].focus_rect &&
+               gpu->composed_readbacks[1].focus.view.view_index == 3,
+           "Its screenshot is the eye at the size Frame Generation composes, each eye with its own focus view");
+    // A composition that does not name the eye's own views is not used.
+    composition.eyes[0].focus = 3;
+    Peer::ClaimQuad(&composition);
+    gpu->mirror_draws.clear();
+    Frames(game, 2, false);
+    Expect(!gpu->mirror_draws.empty() && !gpu->mirror_draws.back().draw.focus.present,
+           "A composition of other views than the eye's is not drawn");
+    Peer::ClaimQuad(nullptr);
+
+    // A stereo frame has no focus view, whatever the backend can draw.
+    GameFrame stereo;
+    gpu = Peer::Start(settings);
+    gpu->supports_focus = true;
+    Frames(stereo, 3);
+    Expect(!gpu->mirror_draws.empty() && !gpu->mirror_draws.back().draw.focus.present,
+           "A stereo frame is shown as it is");
+    gpu->reads = true;
+    Peer::PressScreenshot(stereo.info);
+    Expect(gpu->readbacks.size() == 2 && gpu->composed_readbacks.empty(), "...and saved as it is");
 }
 
 // The runtime may read an image, or change its state, once its release has
@@ -1225,6 +1475,7 @@ int main() {
         TestOffDoesNothing();
         TestShowsTheEye();
         TestReadsOnlyHeldImages();
+        TestQuadViewsFocus();
         TestFrameIsTheSameOnAndOff();
         TestSmoothingAndPacing();
         TestHideAndShow();

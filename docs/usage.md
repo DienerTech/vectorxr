@@ -1312,11 +1312,15 @@ What is saved:
 
 - Only the part of the image the game submitted for the eye, without the unused area around
   it, and without the VectorXR On-Screen Display or any overlay from another tool.
-- With **Quadviews** composed by VectorXR, the complete image for each eye: the focus area
-  over the surrounding view. Where the runtime composes quad views itself (Varjo), or Frame
-  Generation composes them, the two full-field views are saved without the focus views, and
-  the log says so.
-- With **Frame Generation**, a frame the game rendered.
+- With **Quadviews**, the complete image for each eye: the focus area over the surrounding
+  view. Where VectorXR composes the quad views that is the image it composed. Where the
+  runtime composes them itself (Varjo), or Frame Generation does, VectorXR draws the focus
+  view over the surrounding view for the screenshot, placed and blended the same way but
+  without Quadviews' focus sharpening, at the size Frame Generation composes (or large enough
+  to hold the focus view at its own resolution). This works in Direct3D 11 games; in a
+  Direct3D 12 game with a runtime's own quad views, the two full-field views are saved
+  without the focus views. The log says which.
+- With **Frame Generation**, a frame the game rendered, never a generated frame.
 - Colors: 8-bit images are saved as they are. HDR-style (16-bit float) and 10-bit images are
   clamped to the displayable range and converted to sRGB. The file is always opaque.
 
@@ -1385,10 +1389,14 @@ Good to know:
   activate it. Closing it hides it. Use **Show mirror** or the binding to get
   it back. A window that fills a monitor has no close button: use the binding.
 - Head rotation is smoothed. Position (bobbing up and down, leaning) is not.
-- It shows the complete image for the eye when VectorXR composes Quadviews. Where the runtime or
-  Frame Generation composes quad views itself, the window shows the full-field view without
-  the focus view. The On-Screen Display is not in the picture.
-- With **Frame Generation**, the window shows frames rendered by the game.
+- It shows the image as the headset receives it: with Quadviews, the complete image for the
+  eye. Where the runtime or Frame Generation
+  composes the quad views itself, the window draws the eye's focus view over its surrounding
+  view, placed and blended the same way but without Quadviews' focus sharpening (Direct3D 11
+  games; in a Direct3D 12 game with a runtime's own quad views it shows the full-field view
+  without the focus view). The On-Screen Display is not in the picture.
+- With **Frame Generation**, the window shows the frames the game rendered, not generated
+  ones.
 - Cost: one small draw at the picture's size for each frame it shows, and two buffers of
   that size in video memory. The mirror skips a frame when its buffers are busy. Creating the
   window's swapchain can briefly hold up the game, including after a change of **Picture width**,

@@ -1272,6 +1272,16 @@ class OpenXrLayer {
     std::optional<InputBinding> mirror_pressed_;
     std::optional<std::chrono::steady_clock::time_point> mirror_last_poll_time_;
     bool MirrorWantedLocked() const;
+    // A frame whose quad views nothing of VectorXR's composed into one image
+    // by the frame's end (the runtime composes the four views, or Frame
+    // Generation does on its own thread): the eye's focus view and where it
+    // lies in the eye's own view, for the mirror window and screenshots to
+    // draw it over the eye. `picture`: the size of the eye composed, as
+    // Frame Generation composes it or with the focus view at its own
+    // density. False for any other frame, and where the focus view cannot
+    // be read.
+    bool UncomposedFocusLocked(const XrFrameEndInfo& frame, const std::vector<SubmittedView>& views,
+                               std::uint32_t eye, SubmittedFocus& focus, FrameGenExtent* picture) const;
     std::optional<bool> MirrorWindowVisibilityLocked() const;
     bool SetMirrorWindowVisibilityLocked(bool visible);
     void PollMirrorBinding();

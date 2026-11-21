@@ -600,6 +600,47 @@ void TestShaderConstants() {
     const float between = PackMirrorConstants(whole, 0, 0, 600, 450, 400, 300, false).spread;
     Expect(std::fabs(between - 0.5f) < 1e-3f, "A picture shrunk by a third is spread half way");
     Expect(PackMirrorConstants(whole, 0, 0, 400, 300, 0, 0, false).spread == 0.0f, "No picture, no spread");
+
+    // The whole view at its own shape: the window's corners are the view's.
+    const MirrorHomography all = MirrorWholeView();
+    double u = 0.0, v = 0.0;
+    Expect(MirrorMap(all, -1.0, 1.0, u, v) && Near(u, 0.0) && Near(v, 0.0) && MirrorMap(all, 1.0, -1.0, u, v) &&
+               Near(u, 1.0) && Near(v, 1.0) && MirrorMap(all, 0.0, 0.0, u, v) && Near(u, 0.5) && Near(v, 0.5) &&
+               MirrorFilled(all),
+           "The whole view maps the window's corners to the view's");
+
+    // A quad views eye's focus view drawn over it: its constants follow the
+    // eye's in the Direct3D 11 buffer.
+    Expect(sizeof(MirrorFocusShaderConstants) == 48 && sizeof(MirrorFocusedShaderConstants) == 128 &&
+               offsetof(MirrorFocusedShaderConstants, focus) == 80 && offsetof(MirrorFocusShaderConstants, offset) == 16 &&
+               offsetof(MirrorFocusShaderConstants, size) == 24 && offsetof(MirrorFocusShaderConstants, feather) == 32 &&
+               offsetof(MirrorFocusShaderConstants, spread) == 40,
+           "The focus view's constants are laid out as the shader's buffer");
+    MirrorFocusPlace place;
+    place.rect = {0.25f, 0.2f, 0.75f, 0.8f};
+    place.feather = {0.05f, 0.06f};
+    // A 1000x600 picture of the whole eye: the focus view covers 500x360 of it.
+    MirrorFocusShaderConstants focus = PackMirrorFocusConstants(all, place, 11, 13, 500, 360, 1000, 600);
+    Expect(focus.rect[0] == 0.25f && focus.rect[1] == 0.2f && focus.rect[2] == 0.75f && focus.rect[3] == 0.8f &&
+               focus.offset[0] == 11 && focus.offset[1] == 13 && focus.size[0] == 500 && focus.size[1] == 360 &&
+               focus.feather[0] == 0.05f && focus.feather[1] == 0.06f,
+           "The focus constants carry its place in the eye, its rectangle and the blend band");
+    Expect(focus.spread == 0.0f, "A focus view at its own scale is sampled texel for texel");
+    Expect(PackMirrorFocusConstants(all, place, 0, 0, 250, 180, 1000, 600).spread == 0.0f,
+           "An enlarged focus view is not spread");
+    Expect(PackMirrorFocusConstants(all, place, 0, 0, 1000, 720, 1000, 600).spread > 0.999f &&
+               PackMirrorFocusConstants(all, place, 0, 0, 3000, 2000, 1000, 600).spread == 1.0f,
+           "A focus view shrunk to half or less is sampled at the full spread");
+    Expect(std::fabs(PackMirrorFocusConstants(all, place, 0, 0, 750, 540, 1000, 600).spread - 0.5f) < 1e-3f,
+           "A focus view shrunk by a third is spread half way");
+    // The eye itself may be enlarged where its focus view is shrunk.
+    Expect(PackMirrorConstants(all, 0, 0, 350, 210, 1000, 600, false).spread == 0.0f &&
+               PackMirrorFocusConstants(all, place, 0, 0, 1000, 720, 1000, 600).spread > 0.999f,
+           "The focus view's spread is its own, whatever the eye's");
+    MirrorFocusPlace none;
+    Expect(PackMirrorFocusConstants(all, none, 0, 0, 500, 360, 1000, 600).spread == 0.0f &&
+               PackMirrorFocusConstants(all, place, 0, 0, 500, 360, 0, 0).spread == 0.0f,
+           "No focus rectangle or no picture, no spread");
 }
 
 void TestPlacement() {
@@ -1799,6 +1840,222 @@ int D3D11Tests() {
                        !now_vertex,
                    api + ": the game's context state is as it left it");
             rig.context->ClearState();
+        }
+        // A quad views eye that was not composed into one image: its focus
+        // view drawn over the part of the eye it covers.
+        for (const bool readable : {true, false}) {
+            const std::string how = api + (readable ? "" : ", images copied first");
+            Expect(gpu->SupportsFocus(), how + ": a focus view can be drawn over its eye");
+            // The eye's own (peripheral) view: 64x48 of a larger image, shown
+            // at twice its size. The focus view: 64x48 texels of slice 1 of
+            // another image, over the middle half of the eye, which is 64x48
+            // pixels of the picture: its texels one to one.
+            void* eye_image = nullptr;
+            void* focus_image = nullptr;
+            const XrSwapchain eye_source =
+                harness.Source(DXGI_FORMAT_R8G8B8A8_UNORM, 96, 64, 1, 1, readable, &eye_image);
+            const XrSwapchain focus_source =
+                harness.Source(DXGI_FORMAT_R8G8B8A8_UNORM, 100, 60, 2, 1, readable, &focus_image);
+            const std::vector<std::uint8_t> eye_data = PatternImage(96, 64, 3);
+            const std::vector<std::uint8_t> focus_data = PatternImage(100, 60, 7);
+            rig.Fill(eye_image, DXGI_FORMAT_R8G8B8A8_UNORM, 0, eye_data.data(), 4);
+            rig.Fill(focus_image, DXGI_FORMAT_R8G8B8A8_UNORM, 1, focus_data.data(), 4);
+            const XrRect2Di eye_rect{{20, 10}, {64, 48}};
+            const XrRect2Di focus_rect{{30, 8}, {64, 48}};
+            const SubmittedView eye_view = Harness::View(eye_source, DXGI_FORMAT_R8G8B8A8_UNORM, 96, 64, 1, 0, eye_rect);
+            SubmittedFocus focus;
+            focus.present = true;
+            focus.view = Harness::View(focus_source, DXGI_FORMAT_R8G8B8A8_UNORM, 100, 60, 2, 1, focus_rect);
+            focus.place.rect = {0.25f, 0.25f, 0.75f, 0.75f};
+            focus.place.feather = {4.0f / 128.0f, 4.0f / 96.0f}; // four pixels of the picture
+            const XrSwapchain target = harness.Target(128, 96);
+            const auto draw_with = [&](const SubmittedFocus& over, std::string& why) {
+                MirrorDraw draw;
+                draw.target = target;
+                draw.width = 128;
+                draw.height = 96;
+                draw.homography = MirrorWholeView();
+                draw.focus = over;
+                return gpu->DrawMirror(eye_view, draw, why);
+            };
+            std::string why;
+            Expect(draw_with(SubmittedFocus{}, why) == MirrorDrawResult::kShown, how + ": the eye alone is drawn: " + why);
+            const std::vector<std::uint8_t> alone = harness.Read(target, 128, 96);
+            // A stand-in game's resource in the second slot, which only the
+            // focus view's draw uses.
+            ComPtr<ID3D11Texture2D> sampled = static_cast<ID3D11Texture2D*>(
+                rig.Image(DXGI_FORMAT_R8G8B8A8_UNORM, 8, 8, 1, 1, true, true));
+            ComPtr<ID3D11ShaderResourceView> game_resource;
+            Expect(SUCCEEDED(rig.device->CreateShaderResourceView(sampled.Get(), nullptr, &game_resource)),
+                   "The stand-in game's resource view is made");
+            ID3D11ShaderResourceView* const resources[] = {game_resource.Get()};
+            rig.context->PSSetShaderResources(1, 1, resources);
+            Expect(draw_with(focus, why) == MirrorDrawResult::kShown, how + ": the eye with its focus view is drawn: " + why);
+            ComPtr<ID3D11ShaderResourceView> now_resource;
+            rig.context->PSGetShaderResources(1, 1, &now_resource);
+            Expect(now_resource == game_resource, how + ": the game's second resource slot is as it left it");
+            rig.context->ClearState();
+            const std::vector<std::uint8_t> composed = harness.Read(target, 128, 96);
+            bool outside = true, inside = true, band = true, differs = false;
+            int band_pixels = 0;
+            for (std::uint32_t y = 0; y < 96; ++y) {
+                for (std::uint32_t x = 0; x < 128; ++x) {
+                    const std::uint8_t* got = &composed[(static_cast<std::size_t>(y) * 128 + x) * 4];
+                    const std::uint8_t* eye = &alone[(static_cast<std::size_t>(y) * 128 + x) * 4];
+                    // Pixels from the focus rectangle's edge (32..96 across, 24..72 down).
+                    const double edge = std::min(std::min(x + 0.5 - 32.0, 96.0 - (x + 0.5)),
+                                                 std::min(y + 0.5 - 24.0, 72.0 - (y + 0.5)));
+                    if (edge < 0.0) {
+                        for (int c = 0; c < 3; ++c) outside = outside && got[c] == eye[c];
+                        continue;
+                    }
+                    const std::uint8_t* texel =
+                        &focus_data[(static_cast<std::size_t>(y - 24 + 8) * 100 + (x - 32 + 30)) * 4];
+                    if (edge >= 4.0) {
+                        for (int c = 0; c < 3; ++c) {
+                            inside = inside && std::abs(static_cast<int>(got[c]) - texel[c]) <= 1;
+                            differs = differs || got[c] != eye[c];
+                        }
+                        continue;
+                    }
+                    // In the band: the compositor's smooth step from the eye to the focus view.
+                    const double t = edge / 4.0;
+                    const double share = t * t * (3.0 - 2.0 * t);
+                    ++band_pixels;
+                    for (int c = 0; c < 3; ++c) {
+                        const double want = eye[c] + (static_cast<double>(texel[c]) - eye[c]) * share;
+                        band = band && std::fabs(got[c] - want) <= 2.0;
+                    }
+                }
+            }
+            Expect(outside, how + ": outside the focus view the picture is the eye's own view, bit for bit");
+            Expect(inside && differs, how + ": inside it the picture is the focus view's texels, of its slice and rectangle");
+            Expect(band && band_pixels > 0, how + ": across the band the two are blended as the quad views compositor blends");
+            Expect(composed[3] == 255 && composed[(48 * 128 + 64) * 4 + 3] == 255, how + ": the picture is opaque");
+
+            // A screenshot of the eye with its focus view: the same picture, read back.
+            const std::uint64_t ticket = gpu->ReadbackComposed(eye_view, focus, 128, 96, why);
+            Expect(ticket != 0, how + ": the eye with its focus view is read back: " + why);
+            SubmittedPixels pixels;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+            ReadbackState state = ReadbackState::kPending;
+            while ((state = gpu->Poll(ticket, pixels, why)) == ReadbackState::kPending &&
+                   std::chrono::steady_clock::now() < deadline) {
+                rig.Idle();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            Expect(state == ReadbackState::kReady && pixels.width == 128 && pixels.height == 96 &&
+                       pixels.format.kind == SubmittedPixelKind::kUnorm8 && !pixels.format.srgb && !pixels.format.bgra,
+                   how + ": the readback is the picture's size, 8-bit and display-encoded: " + why);
+            bool same = state == ReadbackState::kReady;
+            for (std::uint32_t y = 0; same && y < 96; ++y) {
+                for (std::uint32_t x = 0; x < 128; ++x) {
+                    for (int c = 0; c < 3; ++c) {
+                        same = same && pixels.data[static_cast<std::size_t>(y) * pixels.row_pitch + x * 4 + c] ==
+                                           composed[(static_cast<std::size_t>(y) * 128 + x) * 4 + c];
+                    }
+                }
+            }
+            Expect(same, how + ": the readback holds the picture the window would show");
+            gpu->Finish(ticket);
+            // A larger picture than the first, then the first's size again.
+            const std::uint64_t larger = gpu->ReadbackComposed(eye_view, focus, 256, 192, why);
+            Expect(larger != 0, how + ": a larger picture is read back: " + why);
+            gpu->Finish(larger);
+
+            // A focus view that cannot be drawn fails the draw and leaves the mirror usable.
+            SubmittedFocus bad = focus;
+            bad.view.rect = {{60, 8}, {64, 48}};
+            Expect(draw_with(bad, why) == MirrorDrawResult::kFailed && why.find("focus view") != std::string::npos,
+                   how + ": a focus rectangle outside its image is refused: " + why);
+            bad = focus;
+            bad.view.format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            Expect(draw_with(bad, why) == MirrorDrawResult::kFailed && why.find("encoded") != std::string::npos,
+                   how + ": a focus view encoded otherwise than its eye is refused: " + why);
+            Expect(gpu->ReadbackComposed(eye_view, bad, 128, 96, why) == 0 && gpu->ReadbackComposed(eye_view, focus, 0, 96, why) == 0 &&
+                       gpu->ReadbackComposed(eye_view, SubmittedFocus{}, 128, 96, why) == 0,
+                   how + ": a readback that cannot be drawn is refused");
+            // A focus view whose swapchain is not known is not drawn: the eye alone.
+            bad = focus;
+            bad.view.swapchain = reinterpret_cast<XrSwapchain>(std::uintptr_t{0x7777});
+            Expect(draw_with(bad, why) == MirrorDrawResult::kShown, how + ": an unknown focus image leaves the eye alone: " + why);
+            const std::vector<std::uint8_t> again = harness.Read(target, 128, 96);
+            Expect(again == alone, how + ": ...the picture then is the eye's own view");
+            Expect(draw_with(focus, why) == MirrorDrawResult::kShown, how + ": the mirror draws on after refusals: " + why);
+
+            // A focus view shrunk into its rectangle (160x120 texels over
+            // 64x48 pixels): a flat view stays flat, with no pixel of the
+            // eye inside the band's inner edge.
+            void* flat_image = nullptr;
+            const XrSwapchain flat_source =
+                harness.Source(DXGI_FORMAT_R8G8B8A8_UNORM, 160, 120, 1, 1, readable, &flat_image);
+            std::vector<std::uint8_t> flat(160 * 120 * 4);
+            for (std::size_t i = 0; i < flat.size(); i += 4) {
+                flat[i] = 200;
+                flat[i + 1] = 100;
+                flat[i + 2] = 50;
+                flat[i + 3] = 255;
+            }
+            rig.Fill(flat_image, DXGI_FORMAT_R8G8B8A8_UNORM, 0, flat.data(), 4);
+            SubmittedFocus shrunk = focus;
+            shrunk.view = Harness::View(flat_source, DXGI_FORMAT_R8G8B8A8_UNORM, 160, 120, 1, 0, {{0, 0}, {160, 120}});
+            Expect(draw_with(shrunk, why) == MirrorDrawResult::kShown, how + ": a shrunk focus view is drawn: " + why);
+            const std::vector<std::uint8_t> shrunk_picture = harness.Read(target, 128, 96);
+            bool flat_inside = true;
+            for (std::uint32_t y = 30; y < 66; ++y) {
+                for (std::uint32_t x = 38; x < 90; ++x) {
+                    const std::uint8_t* got = &shrunk_picture[(static_cast<std::size_t>(y) * 128 + x) * 4];
+                    flat_inside = flat_inside && std::abs(got[0] - 200) <= 1 && std::abs(got[1] - 100) <= 1 &&
+                                  std::abs(got[2] - 50) <= 1;
+                }
+            }
+            Expect(flat_inside, how + ": a shrunk focus view fills its rectangle");
+            gpu->Forget(flat_source);
+            gpu->Forget(focus_source);
+            gpu->Forget(eye_source);
+        }
+        // Linear texels (an sRGB format's view): the two views are blended as
+        // stored and then encoded for the picture.
+        {
+            void* eye_image = nullptr;
+            void* focus_image = nullptr;
+            const XrSwapchain eye_source = harness.Source(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 32, 32, 1, 1, true, &eye_image);
+            const XrSwapchain focus_source =
+                harness.Source(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 32, 32, 1, 1, true, &focus_image);
+            const std::vector<std::uint8_t> eye_data = PatternImage(32, 32, 4);
+            const std::vector<std::uint8_t> focus_data = PatternImage(32, 32, 5);
+            rig.Fill(eye_image, DXGI_FORMAT_R8G8B8A8_UNORM, 0, eye_data.data(), 4);
+            rig.Fill(focus_image, DXGI_FORMAT_R8G8B8A8_UNORM, 0, focus_data.data(), 4);
+            SubmittedFocus focus;
+            focus.present = true;
+            focus.view = Harness::View(focus_source, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 32, 32, 1, 0, {{0, 0}, {32, 32}});
+            focus.place.rect = {0.0f, 0.0f, 1.0f, 1.0f};
+            focus.place.feather = {1.0f / 32.0f, 1.0f / 32.0f};
+            const XrSwapchain target = harness.Target(32, 32);
+            MirrorDraw draw;
+            draw.target = target;
+            draw.width = 32;
+            draw.height = 32;
+            draw.homography = MirrorWholeView();
+            draw.focus = focus;
+            std::string why;
+            Expect(gpu->DrawMirror(Harness::View(eye_source, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 32, 32, 1, 0,
+                                                 {{0, 0}, {32, 32}}),
+                                   draw, why) == MirrorDrawResult::kShown,
+                   api + ": sRGB views are drawn with a focus view: " + why);
+            const std::vector<std::uint8_t> drawn = harness.Read(target, 32, 32);
+            bool stored = true;
+            for (std::uint32_t y = 2; y < 30; ++y) {
+                for (std::uint32_t x = 2; x < 30; ++x) {
+                    for (int c = 0; c < 3; ++c) {
+                        stored = stored && std::abs(static_cast<int>(drawn[(y * 32 + x) * 4 + c]) -
+                                                    focus_data[(y * 32 + x) * 4 + c]) <= 1;
+                    }
+                }
+            }
+            Expect(stored, api + ": an sRGB focus view is shown as its stored values");
+            gpu->Forget(focus_source);
+            gpu->Forget(eye_source);
         }
         // Nothing of the session's images is held after the teardown.
         ComPtr<ID3D11Texture2D> held = rig.images.front();

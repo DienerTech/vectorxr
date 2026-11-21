@@ -298,6 +298,11 @@ std::uint64_t ScreenshotCapture::PixelBytes(SubmittedImageApi api, const std::ve
     std::uint64_t bytes = 0;
     for (const ScreenshotEye& eye : eyes) {
         if (eye.view_index >= views.size()) continue;
+        if (eye.composed) {
+            // Drawn into an 8-bit picture first.
+            bytes += static_cast<std::uint64_t>(eye.width) * eye.height * 4;
+            continue;
+        }
         const SubmittedView& view = views[eye.view_index];
         const std::uint32_t texel = ClassifyFormat(api, view.format).bytes_per_pixel;
         bytes += static_cast<std::uint64_t>(std::max(view.rect.extent.width, 0)) *
@@ -395,8 +400,13 @@ bool ScreenshotCapture::Begin(SubmittedImageGpu& gpu, const std::vector<Submitte
             error = "view " + std::to_string(eye.view_index) + ": " + views[eye.view_index].problem;
             break;
         }
+        if (eye.composed && !eye.focus.view.resolved) {
+            error = "view " + std::to_string(eye.view_index) + "'s focus view: " + eye.focus.view.problem;
+            break;
+        }
         Shot shot;
-        shot.ticket = gpu.Readback(views[eye.view_index], error);
+        shot.ticket = eye.composed ? gpu.ReadbackComposed(views[eye.view_index], eye.focus, eye.width, eye.height, error)
+                                   : gpu.Readback(views[eye.view_index], error);
         if (shot.ticket == 0) {
             error = "view " + std::to_string(eye.view_index) + ": " + error;
             break;

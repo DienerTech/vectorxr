@@ -128,9 +128,11 @@ class D3D11Mirror {
     // kSkipped while it is being made and when a frame cannot be presented
     // now.
     MirrorDrawResult Prepare(const MirrorDraw& draw, std::string& error);
-    // `target`: a texture to draw into instead of the window (tests).
+    // `target`: a texture to draw into instead of the window (tests, and a
+    // screenshot of a quad views eye with its focus view). `focus`: the
+    // image of draw.focus's view, drawn over the eye where it is present.
     bool Draw(ID3D11Texture2D* source, const SubmittedView& view, const SubmittedFormat& source_format,
-              ID3D11Texture2D* target, const MirrorDraw& draw, std::string& error);
+              ID3D11Texture2D* target, const MirrorDraw& draw, std::string& error, ID3D11Texture2D* focus = nullptr);
     // After the state guard.
     MirrorDrawResult Present(std::string& error);
     void Forget(ID3D11Texture2D* texture);
@@ -174,21 +176,32 @@ class D3D11Mirror {
         std::uint64_t key{0};
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
     };
+    // A source the runtime made without shader-resource binding is copied
+    // here first.
+    struct Copy {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+        std::uint32_t width{0};
+        std::uint32_t height{0};
+        DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+    };
     bool Ensure(std::string& error);
+    // The view to read `view`'s rectangle of `source` by, and where the
+    // rectangle starts in it: the image itself, or `copy` of the rectangle.
+    ID3D11ShaderResourceView* Readable(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& source_desc,
+                                       const SubmittedView& view, DXGI_FORMAT view_format, Copy& copy,
+                                       std::int32_t& offset_x, std::int32_t& offset_y, std::string& error);
 
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> vertex_shader_;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> pixel_shader_;
+    // With a focus view drawn over the eye; made with the first such draw.
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> focus_pixel_shader_;
     Microsoft::WRL::ComPtr<ID3D11Buffer> constants_;
     std::vector<Source> sources_;
-    // A source the runtime made without shader-resource binding is copied
-    // here first.
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> copy_;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> copy_view_;
-    std::uint32_t copy_width_{0};
-    std::uint32_t copy_height_{0};
-    DXGI_FORMAT copy_format_{DXGI_FORMAT_UNKNOWN};
+    Copy copy_;
+    Copy focus_copy_;
     MirrorSwapChain swapchain_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> back_buffer_;
     Microsoft::WRL::ComPtr<IDXGIFactory2> factory_; // the device's, found once

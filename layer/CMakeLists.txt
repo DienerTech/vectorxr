@@ -208,6 +208,16 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             VERBATIM)
         list(APPEND _mirror_headers "${_mirror_header}")
     endforeach()
+    # The pixel shader that draws a quad views eye's focus view over it.
+    set(_mirror_header "${_mirror_out}/mirror_focus_ps.h")
+    add_custom_command(
+        OUTPUT "${_mirror_header}"
+        COMMAND "${DEPTHXR_FXC}" -nologo -T ps_5_0 -E PSMain -D "MIRROR_PS=1" -D "MIRROR_FOCUS=1" -O3 -WX
+                -Vn kMirrorFocusPsDxbc -Fh "${_mirror_header}" "${_mirror_hlsl}"
+        DEPENDS "${_mirror_hlsl}"
+        COMMENT "Compiling mirror window PS with a focus view (DXBC)"
+        VERBATIM)
+    list(APPEND _mirror_headers "${_mirror_header}")
     target_sources(depthxr_imaging PRIVATE ${_mirror_headers})
     target_include_directories(depthxr_imaging PRIVATE "${_mirror_out}")
     set(DEPTHXR_DXC "")

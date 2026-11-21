@@ -290,6 +290,39 @@ MirrorShaderConstants PackMirrorConstants(const MirrorHomography& h, std::int32_
     return out;
 }
 
+MirrorHomography MirrorWholeView() {
+    return {0.5f, 0.0f, 0.5f, 0.0f, -0.5f, 0.5f, 0.0f, 0.0f, 1.0f};
+}
+
+MirrorFocusShaderConstants PackMirrorFocusConstants(const MirrorHomography& h, const MirrorFocusPlace& place,
+                                                    std::int32_t offset_x, std::int32_t offset_y, std::int32_t width,
+                                                    std::int32_t height, std::uint32_t target_width,
+                                                    std::uint32_t target_height) {
+    MirrorFocusShaderConstants out{};
+    for (int i = 0; i < 4; ++i) out.rect[i] = place.rect[i];
+    out.offset[0] = offset_x;
+    out.offset[1] = offset_y;
+    out.size[0] = width;
+    out.size[1] = height;
+    out.feather[0] = place.feather[0];
+    out.feather[1] = place.feather[1];
+    // Focus texels a window pixel covers at the window's centre: the eye's
+    // uv it covers, over the focus view's share of the eye, in its texels.
+    double u0 = 0.0, v0 = 0.0, u1 = 0.0, v1 = 0.0, u2 = 0.0, v2 = 0.0;
+    double texels = 1.0;
+    const double across_uv = static_cast<double>(place.rect[2]) - place.rect[0];
+    const double down_uv = static_cast<double>(place.rect[3]) - place.rect[1];
+    if (target_width > 0 && target_height > 0 && across_uv > 0.0 && down_uv > 0.0 && MirrorMap(h, 0.0, 0.0, u0, v0) &&
+        MirrorMap(h, 2.0 / target_width, 0.0, u1, v1) && MirrorMap(h, 0.0, 2.0 / target_height, u2, v2)) {
+        const double across = std::hypot((u1 - u0) / across_uv * width, (v1 - v0) / down_uv * height);
+        const double along = std::hypot((u2 - u0) / across_uv * width, (v2 - v0) / down_uv * height);
+        texels = std::max(across, along);
+    }
+    const double spread = std::clamp(texels - 1.0, 0.0, 1.0);
+    out.spread = spread < 1e-3 ? 0.0f : static_cast<float>(spread);
+    return out;
+}
+
 void MirrorStabilizer::Reset() {
     filter_.Reset();
     last_time_ = 0;

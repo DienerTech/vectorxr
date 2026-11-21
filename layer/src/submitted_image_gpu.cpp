@@ -69,6 +69,78 @@ class D3D11Images final : public SubmittedImageGpu {
     std::uint64_t next_ticket_{1};
     std::unique_ptr<D3D11Mirror> mirror_;
     bool context_states_;
+    // What a quad views eye is drawn into with its focus view for a
+    // screenshot (ReadbackComposed): kept while a picture fits in it, let go
+    // of with the session.
+    ComPtr<ID3D11Texture2D> composed_;
+    std::uint32_t composed_width_{0};
+    std::uint32_t composed_height_{0};
+
+    // The focus view's image of a draw, where it is known: null without one.
+    ID3D11Texture2D* FocusImage(const SubmittedFocus& focus) const {
+        if (!focus.present) return nullptr;
+        const auto found = swapchains_.find(focus.view.swapchain);
+        if (found == swapchains_.end() || focus.view.image_index >= found->second.size()) return nullptr;
+        return found->second[focus.view.image_index].Get();
+    }
+
+    // A ticket for `box` of the image's subresource, copied to a staging
+    // texture of `copy_format`. `samples` > 1: resolved first.
+    std::uint64_t Copy(ID3D11Texture2D* source, UINT subresource, const D3D11_BOX& box, const SubmittedFormat& format,
+                       DXGI_FORMAT copy_format, const D3D11_TEXTURE2D_DESC& desc, std::string& error) {
+        Ticket ticket;
+        ticket.format = format;
+        ticket.width = box.right - box.left;
+        ticket.height = box.bottom - box.top;
+        D3D11_TEXTURE2D_DESC staging{};
+        staging.Width = ticket.width;
+        staging.Height = ticket.height;
+        staging.MipLevels = 1;
+        staging.ArraySize = 1;
+        staging.Format = copy_format;
+        staging.SampleDesc.Count = 1;
+        staging.Usage = D3D11_USAGE_STAGING;
+        staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        HRESULT result = device_->CreateTexture2D(&staging, nullptr, &ticket.staging);
+        if (FAILED(result)) {
+            error = Failure("Creating the staging texture", result);
+            return 0;
+        }
+        D3D11_QUERY_DESC query{D3D11_QUERY_EVENT, 0};
+        result = device_->CreateQuery(&query, &ticket.done);
+        if (FAILED(result)) {
+            error = Failure("Creating the event query", result);
+            return 0;
+        }
+        const ScopedD3D11Unpredicated unpredicated(context_.Get());
+        if (desc.SampleDesc.Count > 1) {
+            // Resolved whole into a single-sample image first: a resolve has
+            // no rectangle.
+            D3D11_TEXTURE2D_DESC resolved{};
+            resolved.Width = desc.Width;
+            resolved.Height = desc.Height;
+            resolved.MipLevels = 1;
+            resolved.ArraySize = 1;
+            resolved.Format = copy_format;
+            resolved.SampleDesc.Count = 1;
+            resolved.Usage = D3D11_USAGE_DEFAULT;
+            resolved.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            ComPtr<ID3D11Texture2D> single;
+            result = device_->CreateTexture2D(&resolved, nullptr, &single);
+            if (FAILED(result)) {
+                error = Failure("Creating the resolve texture", result);
+                return 0;
+            }
+            context_->ResolveSubresource(single.Get(), 0, source, subresource, copy_format);
+            context_->CopySubresourceRegion(ticket.staging.Get(), 0, 0, 0, 0, single.Get(), 0, &box);
+        } else {
+            context_->CopySubresourceRegion(ticket.staging.Get(), 0, 0, 0, 0, source, subresource, &box);
+        }
+        context_->End(ticket.done.Get());
+        const std::uint64_t id = next_ticket_++;
+        tickets_.emplace(id, std::move(ticket));
+        return id;
+    }
 
     void ForgetViews(XrSwapchain swapchain) {
         const auto found = swapchains_.find(swapchain);
@@ -129,7 +201,8 @@ class D3D11Images final : public SubmittedImageGpu {
         const MirrorDrawResult prepared = mirror_->Prepare(draw, error);
         if (prepared != MirrorDrawResult::kShown) return prepared;
         const bool drawn = mirror_->Draw(source->second[view.image_index].Get(), view,
-                                         ClassifyFormat(SubmittedImageApi::kD3D11, view.format), target, draw, error);
+                                         ClassifyFormat(SubmittedImageApi::kD3D11, view.format), target, draw, error,
+                                         FocusImage(draw.focus));
         if (!drawn) return MirrorDrawResult::kFailed;
         return target ? MirrorDrawResult::kShown : mirror_->Present(error);
     }
@@ -151,66 +224,66 @@ class D3D11Images final : public SubmittedImageGpu {
         if (!CheckView(view, format, desc.Format, desc.Width, desc.Height, desc.ArraySize, error)) {
             return 0;
         }
-        const auto copy_format = static_cast<DXGI_FORMAT>(format.view_format);
-        const UINT subresource = D3D11CalcSubresource(0, view.array_slice, desc.MipLevels);
-        Ticket ticket;
-        ticket.format = format;
-        ticket.width = static_cast<std::uint32_t>(view.rect.extent.width);
-        ticket.height = static_cast<std::uint32_t>(view.rect.extent.height);
-        D3D11_TEXTURE2D_DESC staging{};
-        staging.Width = ticket.width;
-        staging.Height = ticket.height;
-        staging.MipLevels = 1;
-        staging.ArraySize = 1;
-        staging.Format = copy_format;
-        staging.SampleDesc.Count = 1;
-        staging.Usage = D3D11_USAGE_STAGING;
-        staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        HRESULT result = device_->CreateTexture2D(&staging, nullptr, &ticket.staging);
-        if (FAILED(result)) {
-            error = Failure("Creating the staging texture", result);
-            return 0;
-        }
-        D3D11_QUERY_DESC query{D3D11_QUERY_EVENT, 0};
-        result = device_->CreateQuery(&query, &ticket.done);
-        if (FAILED(result)) {
-            error = Failure("Creating the event query", result);
-            return 0;
-        }
         const D3D11_BOX box{static_cast<UINT>(view.rect.offset.x),
                             static_cast<UINT>(view.rect.offset.y),
                             0,
                             static_cast<UINT>(view.rect.offset.x + view.rect.extent.width),
                             static_cast<UINT>(view.rect.offset.y + view.rect.extent.height),
                             1};
-        const ScopedD3D11Unpredicated unpredicated(context_.Get());
-        if (desc.SampleDesc.Count > 1) {
-            // Resolved whole into a single-sample image first: a resolve has
-            // no rectangle.
-            D3D11_TEXTURE2D_DESC resolved{};
-            resolved.Width = desc.Width;
-            resolved.Height = desc.Height;
-            resolved.MipLevels = 1;
-            resolved.ArraySize = 1;
-            resolved.Format = copy_format;
-            resolved.SampleDesc.Count = 1;
-            resolved.Usage = D3D11_USAGE_DEFAULT;
-            resolved.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            ComPtr<ID3D11Texture2D> single;
-            result = device_->CreateTexture2D(&resolved, nullptr, &single);
+        return Copy(source, D3D11CalcSubresource(0, view.array_slice, desc.MipLevels), box, format,
+                    static_cast<DXGI_FORMAT>(format.view_format), desc, error);
+    }
+
+    bool SupportsFocus() const override { return true; }
+    std::uint64_t ReadbackComposed(const SubmittedView& view, const SubmittedFocus& focus, std::uint32_t width,
+                                   std::uint32_t height, std::string& error) override {
+        const auto found = swapchains_.find(view.swapchain);
+        ID3D11Texture2D* const focus_image = FocusImage(focus);
+        if (found == swapchains_.end() || view.image_index >= found->second.size() || !focus_image) {
+            error = "the swapchain's images are not known";
+            return 0;
+        }
+        if (width == 0 || height == 0 || width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+            height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+            error = "a picture of " + std::to_string(width) + "x" + std::to_string(height) + " cannot be drawn";
+            return 0;
+        }
+        constexpr DXGI_FORMAT kComposedFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        if (!composed_ || composed_width_ < width || composed_height_ < height) {
+            composed_.Reset();
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = width;
+            desc.Height = height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = kComposedFormat;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+            const HRESULT result = device_->CreateTexture2D(&desc, nullptr, &composed_);
             if (FAILED(result)) {
-                error = Failure("Creating the resolve texture", result);
+                composed_.Reset();
+                error = Failure("Creating the image a quad views eye is drawn into", result);
                 return 0;
             }
-            context_->ResolveSubresource(single.Get(), 0, source, subresource, copy_format);
-            context_->CopySubresourceRegion(ticket.staging.Get(), 0, 0, 0, 0, single.Get(), 0, &box);
-        } else {
-            context_->CopySubresourceRegion(ticket.staging.Get(), 0, 0, 0, 0, source, subresource, &box);
+            composed_width_ = width;
+            composed_height_ = height;
         }
-        context_->End(ticket.done.Get());
-        const std::uint64_t id = next_ticket_++;
-        tickets_.emplace(id, std::move(ticket));
-        return id;
+        MirrorDraw draw;
+        draw.width = width;
+        draw.height = height;
+        draw.homography = MirrorWholeView();
+        draw.focus = focus;
+        if (!mirror_) mirror_ = std::make_unique<D3D11Mirror>(device_.Get(), context_.Get(), context_states_);
+        const bool drawn = mirror_->Draw(found->second[view.image_index].Get(), view,
+                                         ClassifyFormat(SubmittedImageApi::kD3D11, view.format), composed_.Get(), draw,
+                                         error, focus_image);
+        if (!drawn) return 0;
+        D3D11_TEXTURE2D_DESC desc{};
+        composed_->GetDesc(&desc);
+        const D3D11_BOX box{0, 0, 0, width, height, 1};
+        return Copy(composed_.Get(), 0, box, ClassifyFormat(SubmittedImageApi::kD3D11, kComposedFormat),
+                    kComposedFormat, desc, error);
     }
 
     ReadbackState Poll(std::uint64_t id, SubmittedPixels& pixels, std::string& error) override {
@@ -249,11 +322,21 @@ class D3D11Images final : public SubmittedImageGpu {
         if (found == tickets_.end()) return;
         if (found->second.mapped) context_->Unmap(found->second.staging.Get(), 0);
         tickets_.erase(found);
+        // With no readback left, the image quad views eyes were drawn into
+        // for them goes too (the size of an eye, in video memory).
+        if (tickets_.empty()) {
+            composed_.Reset();
+            composed_width_ = 0;
+            composed_height_ = 0;
+        }
     }
 
     void Reset() override {
         if (mirror_) mirror_->Reset();
         mirror_.reset();
+        composed_.Reset();
+        composed_width_ = 0;
+        composed_height_ = 0;
         for (auto& [id, ticket] : tickets_) {
             if (ticket.mapped) context_->Unmap(ticket.staging.Get(), 0);
         }

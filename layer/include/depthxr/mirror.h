@@ -105,6 +105,38 @@ MirrorShaderConstants PackMirrorConstants(const MirrorHomography& h, std::int32_
                                           std::int32_t width, std::int32_t height, std::uint32_t target_width,
                                           std::uint32_t target_height, bool encode_srgb);
 
+// The whole view at its own shape: the window's corners are the view's.
+MirrorHomography MirrorWholeView();
+
+// A quad views eye that was not composed into one image (the runtime
+// composes its four views, or Frame Generation does): where the eye's focus
+// view lies in the eye's own view, and the band inside its edge over which
+// it is blended in, both in that view's uv (u right, v down, 0..1), as the
+// quad views compositor and Frame Generation place and blend it
+// (BuildFrameGenComposeEye).
+struct MirrorFocusPlace {
+    std::array<float, 4> rect{};    // left, top, right, bottom
+    std::array<float, 2> feather{}; // across, down
+};
+// What the focus pixel shader of shaders/mirror.hlsl reads after
+// MirrorShaderConstants (48 bytes; Direct3D 11's buffer holds both).
+struct MirrorFocusShaderConstants {
+    float rect[4];
+    std::int32_t offset[2]; // the focus view's rectangle in its image
+    std::int32_t size[2];
+    float feather[2];
+    float spread; // as MirrorShaderConstants::spread, for the focus view's texels
+    float unused;
+};
+struct MirrorFocusedShaderConstants {
+    MirrorShaderConstants eye;
+    MirrorFocusShaderConstants focus;
+};
+MirrorFocusShaderConstants PackMirrorFocusConstants(const MirrorHomography& h, const MirrorFocusPlace& place,
+                                                    std::int32_t offset_x, std::int32_t offset_y, std::int32_t width,
+                                                    std::int32_t height, std::uint32_t target_width,
+                                                    std::uint32_t target_height);
+
 // One frame's aim, from the frame's actual orientation.
 struct MirrorAim {
     MirrorHomography homography{};

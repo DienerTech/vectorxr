@@ -121,6 +121,17 @@ bool ConvertToRgba8(const SubmittedPixels& pixels, std::uint8_t* out);
 std::uint8_t LinearToSrgb8(float linear);
 float HalfToFloat(std::uint16_t half);
 
+// The focus view of a quad views eye that was not composed into one image
+// (the runtime composes the four views, or Frame Generation does): drawn
+// over the part of the eye's own view it covers, so the mirror window and
+// screenshots show the eye as the headset does and not its low-resolution
+// peripheral view alone. Without the compositor's focus sharpening.
+struct SubmittedFocus {
+    bool present{false};
+    SubmittedView view;     // the focus view's image
+    MirrorFocusPlace place; // where it lies in the eye's view
+};
+
 // One frame of the stabilized mirror window (mirror.h).
 struct MirrorDraw {
     // The desktop window (an HWND) whose swap chain is drawn into and
@@ -137,6 +148,8 @@ struct MirrorDraw {
     std::uint32_t width{0};
     std::uint32_t height{0};
     MirrorHomography homography{};
+    // Drawn over the eye's view where the backend can (SupportsFocus).
+    SubmittedFocus focus;
     // Runs a task on the window's own thread (MirrorWindow::Post), where the
     // window's swap chain is made: making one takes tens of milliseconds,
     // which the thread that ends the game's frames must not spend. Until it
@@ -218,6 +231,19 @@ class SubmittedImageGpu {
     // images resolved) to memory the CPU can read. Never waits for the GPU.
     // Returns a ticket, or 0 with `error`.
     virtual std::uint64_t Readback(const SubmittedView& view, std::string& error) = 0;
+    // Whether a focus view can be drawn over its eye (MirrorDraw::focus,
+    // ReadbackComposed): Direct3D 11.
+    virtual bool SupportsFocus() const { return false; }
+    // A readback of a quad views eye with its focus view drawn over it:
+    // `view` (the eye's own, peripheral view) and `focus` are drawn into an
+    // image of this object's own, `width` x `height` (8-bit, display-encoded
+    // as the mirror window's picture), and that is read back as Readback
+    // reads a view. One draw on the game's device; never waits for the GPU.
+    virtual std::uint64_t ReadbackComposed(const SubmittedView&, const SubmittedFocus&, std::uint32_t, std::uint32_t,
+                                           std::string& error) {
+        error = "Not supported";
+        return 0;
+    }
     // Never waits either. kReady fills `pixels`, which any thread may read
     // until Finish.
     virtual ReadbackState Poll(std::uint64_t ticket, SubmittedPixels& pixels, std::string& error) = 0;

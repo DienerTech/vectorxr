@@ -42,6 +42,14 @@ struct ScreenshotBindingEdge {
 struct ScreenshotEye {
     std::uint32_t view_index{0};
     char letter{'L'};
+    // A quad views eye that was not composed into one image (the runtime
+    // composes the four views, or Frame Generation does): saved as a picture
+    // of `width` x `height` with its focus view drawn over the eye's own
+    // view (SubmittedImageGpu::ReadbackComposed).
+    bool composed{false};
+    SubmittedFocus focus;
+    std::uint32_t width{0};
+    std::uint32_t height{0};
 };
 // The views of a frame's projection layer a press saves: view 0 as L and
 // view 1 as R (a quad views layer's first two views are its stereo views),

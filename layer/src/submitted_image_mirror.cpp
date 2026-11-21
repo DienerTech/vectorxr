@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstring>
 
+#include "mirror_focus_ps.h"
 #include "mirror_ps.h"
 #include "mirror_vs.h"
 
@@ -349,7 +350,8 @@ bool D3D11Mirror::Ensure(std::string& error) {
         return false;
     }
     D3D11_BUFFER_DESC buffer{};
-    buffer.ByteWidth = sizeof(MirrorShaderConstants);
+    // Both pixel shaders' constants: the plain one reads the first part.
+    buffer.ByteWidth = sizeof(MirrorFocusedShaderConstants);
     buffer.Usage = D3D11_USAGE_DEFAULT;
     buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     result = device_->CreateBuffer(&buffer, nullptr, &constants_);
@@ -515,8 +517,81 @@ void D3D11Mirror::EndDraw() {
     unpredicated_.reset();
 }
 
+ID3D11ShaderResourceView* D3D11Mirror::Readable(ID3D11Texture2D* source, const D3D11_TEXTURE2D_DESC& source_desc,
+                                                 const SubmittedView& view, DXGI_FORMAT source_view_format, Copy& copy,
+                                                 std::int32_t& offset_x, std::int32_t& offset_y, std::string& error) {
+    offset_x = view.rect.offset.x;
+    offset_y = view.rect.offset.y;
+    if (source_desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
+        const std::uint64_t key = (static_cast<std::uint64_t>(view.array_slice) << 32) |
+                                  static_cast<std::uint32_t>(source_view_format);
+        for (const Source& existing : sources_) {
+            if (existing.texture == source && existing.key == key) return existing.view.Get();
+        }
+        D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+        desc.Format = source_view_format;
+        desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        desc.Texture2DArray.MipLevels = 1;
+        desc.Texture2DArray.FirstArraySlice = view.array_slice;
+        desc.Texture2DArray.ArraySize = 1;
+        ComPtr<ID3D11ShaderResourceView> created;
+        const HRESULT result = device_->CreateShaderResourceView(source, &desc, &created);
+        if (FAILED(result)) {
+            error = Failure("Creating the source view", result);
+            return nullptr;
+        }
+        ID3D11ShaderResourceView* source_view = created.Get();
+        sources_.push_back(Source{source, key, std::move(created)});
+        return source_view;
+    }
+    // Not bindable for reading: the rectangle is copied to a texture that
+    // is, kept while the rectangle fits in it.
+    const auto rect_width = static_cast<std::uint32_t>(view.rect.extent.width);
+    const auto rect_height = static_cast<std::uint32_t>(view.rect.extent.height);
+    if (!copy.texture || copy.width < rect_width || copy.height < rect_height || copy.format != source_view_format) {
+        copy = {};
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = rect_width;
+        desc.Height = rect_height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = source_view_format;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        HRESULT result = device_->CreateTexture2D(&desc, nullptr, &copy.texture);
+        if (SUCCEEDED(result)) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC view_desc{};
+            view_desc.Format = source_view_format;
+            view_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+            view_desc.Texture2DArray.MipLevels = 1;
+            view_desc.Texture2DArray.ArraySize = 1;
+            result = device_->CreateShaderResourceView(copy.texture.Get(), &view_desc, &copy.view);
+        }
+        if (FAILED(result)) {
+            copy = {};
+            error = Failure("Creating the source copy", result);
+            return nullptr;
+        }
+        copy.width = rect_width;
+        copy.height = rect_height;
+        copy.format = source_view_format;
+    }
+    const D3D11_BOX box{static_cast<UINT>(view.rect.offset.x),
+                        static_cast<UINT>(view.rect.offset.y),
+                        0,
+                        static_cast<UINT>(view.rect.offset.x + view.rect.extent.width),
+                        static_cast<UINT>(view.rect.offset.y + view.rect.extent.height),
+                        1};
+    context_->CopySubresourceRegion(copy.texture.Get(), 0, 0, 0, 0, source,
+                                    D3D11CalcSubresource(0, view.array_slice, source_desc.MipLevels), &box);
+    offset_x = 0;
+    offset_y = 0;
+    return copy.view.Get();
+}
+
 bool D3D11Mirror::Draw(ID3D11Texture2D* source, const SubmittedView& view, const SubmittedFormat& source_format,
-                       ID3D11Texture2D* target, const MirrorDraw& draw, std::string& error) {
+                       ID3D11Texture2D* target, const MirrorDraw& draw, std::string& error, ID3D11Texture2D* focus) {
     if (!Ensure(error)) return false;
     struct DrawScope {
         D3D11Mirror& mirror;
@@ -531,79 +606,42 @@ bool D3D11Mirror::Draw(ID3D11Texture2D* source, const SubmittedView& view, const
         return false;
     }
     const auto source_view_format = static_cast<DXGI_FORMAT>(source_format.view_format);
+    std::int32_t offset_x = 0;
+    std::int32_t offset_y = 0;
+    ID3D11ShaderResourceView* source_view =
+        Readable(source, source_desc, view, source_view_format, copy_, offset_x, offset_y, error);
+    if (!source_view) return false;
 
-    ID3D11ShaderResourceView* source_view = nullptr;
-    std::int32_t offset_x = view.rect.offset.x;
-    std::int32_t offset_y = view.rect.offset.y;
-    if (source_desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
-        const std::uint64_t key = (static_cast<std::uint64_t>(view.array_slice) << 32) |
-                                  static_cast<std::uint32_t>(source_view_format);
-        for (const Source& existing : sources_) {
-            if (existing.texture == source && existing.key == key) source_view = existing.view.Get();
+    // The eye's focus view, drawn over it.
+    const bool focused = focus && draw.focus.present;
+    ID3D11ShaderResourceView* focus_view = nullptr;
+    std::int32_t focus_offset_x = 0;
+    std::int32_t focus_offset_y = 0;
+    if (focused) {
+        const SubmittedView& focus_image = draw.focus.view;
+        const SubmittedFormat focus_format = ClassifyFormat(SubmittedImageApi::kD3D11, focus_image.format);
+        D3D11_TEXTURE2D_DESC focus_desc{};
+        focus->GetDesc(&focus_desc);
+        if (!CheckDraw(focus_image, focus_format, focus_desc.Format, focus_desc.Width, focus_desc.Height,
+                       focus_desc.ArraySize, focus_desc.SampleDesc.Count, draw, error)) {
+            error = "the focus view: " + error;
+            return false;
         }
-        if (!source_view) {
-            D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
-            desc.Format = source_view_format;
-            desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-            desc.Texture2DArray.MipLevels = 1;
-            desc.Texture2DArray.FirstArraySlice = view.array_slice;
-            desc.Texture2DArray.ArraySize = 1;
-            ComPtr<ID3D11ShaderResourceView> created;
-            const HRESULT result = device_->CreateShaderResourceView(source, &desc, &created);
+        if (LinearTexels(focus_format) != LinearTexels(source_format)) {
+            error = "the focus view's texels are not encoded as the eye's";
+            return false;
+        }
+        if (!focus_pixel_shader_) {
+            const HRESULT result = device_->CreatePixelShader(kMirrorFocusPsDxbc, sizeof(kMirrorFocusPsDxbc), nullptr,
+                                                              &focus_pixel_shader_);
             if (FAILED(result)) {
-                error = Failure("Creating the source view", result);
+                error = Failure("Creating the mirror's focus shader", result);
                 return false;
             }
-            source_view = created.Get();
-            sources_.push_back(Source{source, key, std::move(created)});
         }
-    } else {
-        // Not bindable for reading: the rectangle is copied to a texture
-        // that is, kept while the rectangle fits in it.
-        const auto rect_width = static_cast<std::uint32_t>(view.rect.extent.width);
-        const auto rect_height = static_cast<std::uint32_t>(view.rect.extent.height);
-        if (!copy_ || copy_width_ < rect_width || copy_height_ < rect_height || copy_format_ != source_view_format) {
-            copy_.Reset();
-            copy_view_.Reset();
-            D3D11_TEXTURE2D_DESC desc{};
-            desc.Width = rect_width;
-            desc.Height = rect_height;
-            desc.MipLevels = 1;
-            desc.ArraySize = 1;
-            desc.Format = source_view_format;
-            desc.SampleDesc.Count = 1;
-            desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            HRESULT result = device_->CreateTexture2D(&desc, nullptr, &copy_);
-            if (SUCCEEDED(result)) {
-                D3D11_SHADER_RESOURCE_VIEW_DESC view_desc{};
-                view_desc.Format = source_view_format;
-                view_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-                view_desc.Texture2DArray.MipLevels = 1;
-                view_desc.Texture2DArray.ArraySize = 1;
-                result = device_->CreateShaderResourceView(copy_.Get(), &view_desc, &copy_view_);
-            }
-            if (FAILED(result)) {
-                copy_.Reset();
-                copy_view_.Reset();
-                error = Failure("Creating the source copy", result);
-                return false;
-            }
-            copy_width_ = rect_width;
-            copy_height_ = rect_height;
-            copy_format_ = source_view_format;
-        }
-        const D3D11_BOX box{static_cast<UINT>(view.rect.offset.x),
-                            static_cast<UINT>(view.rect.offset.y),
-                            0,
-                            static_cast<UINT>(view.rect.offset.x + view.rect.extent.width),
-                            static_cast<UINT>(view.rect.offset.y + view.rect.extent.height),
-                            1};
-        context_->CopySubresourceRegion(copy_.Get(), 0, 0, 0, 0, source,
-                                        D3D11CalcSubresource(0, view.array_slice, source_desc.MipLevels), &box);
-        source_view = copy_view_.Get();
-        offset_x = 0;
-        offset_y = 0;
+        focus_view = Readable(focus, focus_desc, focus_image, static_cast<DXGI_FORMAT>(focus_format.view_format),
+                              focus_copy_, focus_offset_x, focus_offset_y, error);
+        if (!focus_view) return false;
     }
 
     ComPtr<ID3D11RenderTargetView> target_view;
@@ -649,9 +687,14 @@ bool D3D11Mirror::Draw(ID3D11Texture2D* source, const SubmittedView& view, const
         target_view = back_buffer_;
     }
 
-    const MirrorShaderConstants packed =
-        PackMirrorConstants(draw.homography, offset_x, offset_y, view.rect.extent.width, view.rect.extent.height,
-                            draw.width, draw.height, LinearTexels(source_format));
+    MirrorFocusedShaderConstants packed{};
+    packed.eye = PackMirrorConstants(draw.homography, offset_x, offset_y, view.rect.extent.width,
+                                     view.rect.extent.height, draw.width, draw.height, LinearTexels(source_format));
+    if (focused) {
+        packed.focus = PackMirrorFocusConstants(draw.homography, draw.focus.place, focus_offset_x, focus_offset_y,
+                                                draw.focus.view.rect.extent.width, draw.focus.view.rect.extent.height,
+                                                draw.width, draw.height);
+    }
     context_->UpdateSubresource(constants_.Get(), 0, nullptr, &packed, 0, 0);
     ID3D11RenderTargetView* render_target = target_view.Get();
     context_->OMSetRenderTargets(1, &render_target, nullptr);
@@ -663,13 +706,23 @@ bool D3D11Mirror::Draw(ID3D11Texture2D* source, const SubmittedView& view, const
     context_->IASetInputLayout(nullptr);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
-    context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
-    context_->PSSetShaderResources(0, 1, &source_view);
+    context_->PSSetShader(focused ? focus_pixel_shader_.Get() : pixel_shader_.Get(), nullptr, 0);
+    // The state guard around this draw puts the game's first resource slot
+    // back where it saves and restores by hand; the second, which only a
+    // focus view uses, is put back here.
+    ComPtr<ID3D11ShaderResourceView> second_slot;
+    if (focused) context_->PSGetShaderResources(1, 1, &second_slot);
+    ID3D11ShaderResourceView* const read[2] = {source_view, focus_view};
+    context_->PSSetShaderResources(0, focused ? 2 : 1, read);
     ID3D11Buffer* buffer = constants_.Get();
     context_->PSSetConstantBuffers(0, 1, &buffer);
     context_->Draw(3, 0);
-    ID3D11ShaderResourceView* no_source = nullptr;
+    ID3D11ShaderResourceView* const no_source = nullptr;
     context_->PSSetShaderResources(0, 1, &no_source);
+    if (focused) {
+        ID3D11ShaderResourceView* const before = second_slot.Get();
+        context_->PSSetShaderResources(1, 1, &before);
+    }
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     return true;
 }
@@ -700,11 +753,8 @@ void D3D11Mirror::Close() {
 void D3D11Mirror::Reset() {
     Close();
     sources_.clear();
-    copy_.Reset();
-    copy_view_.Reset();
-    copy_width_ = 0;
-    copy_height_ = 0;
-    copy_format_ = DXGI_FORMAT_UNKNOWN;
+    copy_ = {};
+    focus_copy_ = {};
 }
 
 // ---------------------------------------------------------------- Direct3D 12
