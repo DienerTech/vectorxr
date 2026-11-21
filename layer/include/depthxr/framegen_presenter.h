@@ -132,6 +132,12 @@ struct FrameGenStatus {
     // ...and that own rate as measured, presenting from its own thread (0
     // until measured, or inline, where the game's waits say nothing of it).
     double auto_game_own_fps{0.0};
+    // Automatic: the session's frames left out of its cadence because they
+    // had no projection layer / were the first after a pause / were late
+    // around a swapchain being made or destroyed (FrameGenAutoRules).
+    std::uint64_t auto_left_no_projection{0};
+    std::uint64_t auto_left_pause{0};
+    std::uint64_t auto_left_swapchain{0};
     // Grid periods per real frame, measured frame by frame (smoothed; 0
     // until measured): what a fixed or Auto multiplier becomes for a slower
     // game.
@@ -313,6 +319,22 @@ struct FrameGenDynamicPolicy {
     double game_rate_share{0.75};    // (e) the game's own rate engaged, at least this share of its rate before
 };
 
+// Auto's rules beyond its late share (0.22; a user's Star Citizen and
+// Starfield sessions on Frame rate "Auto", 2026-11-21). Each is a research
+// switch read at Start, on unless its switch says 0, so a flight can turn
+// one off to compare (FrameGenPresenter::Start names them); with all of them
+// off Auto judges as it did before them. Tests set them and shorten the
+// times.
+struct FrameGenAutoRules {
+    // VECTORXR_FRAMEGEN_AUTO_CADENCE_FILTER: frames that say nothing about
+    // the game's load stay out of Auto's cadence (no projection layer, late
+    // around a swapchain being made or destroyed, the first after a pause).
+    bool cadence_filter{true};
+    // A late frame this soon after the game made or destroyed a swapchain
+    // carries that cost.
+    std::chrono::milliseconds swapchain_settle{500};
+};
+
 // Interpolate's hardware-flow fallback. Tests shorten these times; the
 // production thresholds leave room above the healthy 2026-10-24 flights
 // (1.5% stale motion and one unready frame per 30 seconds).
@@ -491,6 +513,8 @@ class FrameGenPresenter {
     // wait between probes (doubling after each failed probe).
     void SetAutoPolicy(std::chrono::milliseconds settle, std::chrono::milliseconds steady,
                        std::chrono::milliseconds probe_confirm, std::chrono::milliseconds probe_backoff);
+    // Auto's further rules (tests set them; Start reads their switches).
+    void SetAutoRules(const FrameGenAutoRules& rules);
     // When Dynamic engages, stands down and probes (tests shorten it).
     void SetDynamicPolicy(const FrameGenDynamicPolicy& policy);
     // When the lead steps back down (tests shorten it).
@@ -943,8 +967,9 @@ class FrameGenPresenter {
     std::uint32_t DynamicSlotsLocked() const;
     // Dynamic: generated frames (sets of output images) one real frame may use.
     std::uint32_t DynamicSetCapLocked() const;
+    // `renderable`: the frame ended with a projection layer.
     void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame,
-                          bool started_late = false);
+                          bool started_late = false, bool renderable = true);
     // Auto, presenting from its own thread: whether the game's own time per
     // frame (auto_busy_) is within reach of `slots` periods a frame (`period`:
     // the grid the game's frames are timed by, GameGridLocked).
@@ -1611,6 +1636,13 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point auto_end_held_to_{};
     std::uint64_t auto_end_held_frame_{0}; // the frame whose end was held then
     std::size_t auto_late_percent_{0}; // for the log
+    FrameGenAutoRules auto_rules_;
+    // The last frame Auto saw had no projection layer (cadence_filter): the
+    // next one with one starts its cadence afresh.
+    bool auto_no_projection_{false};
+    // When the game last made or destroyed a swapchain (TrackSwapchain,
+    // ForgetSwapchain).
+    std::chrono::steady_clock::time_point swapchain_changed_at_{};
     // Auto never steps above this again in the session once video memory
     // ran near its budget: each step up allocates more output images.
     std::uint32_t auto_memory_ceiling_{4};
@@ -1691,6 +1723,10 @@ class FrameGenPresenter {
         std::uint64_t unwritten_outputs{0}; // output images could not be made
         std::uint64_t unwritten_source{0};  // no real frame to write from
         std::uint64_t non_renderable{0};    // real frames without a projection
+        // Auto: frames left out of its cadence (FrameGenAutoRules).
+        std::uint64_t auto_left_no_projection{0};
+        std::uint64_t auto_left_pause{0};
+        std::uint64_t auto_left_swapchain{0};
         std::uint64_t restarts{0};          // presenter thread starts and synthesis mode switches
         std::uint64_t lead_ups{0};
         std::uint64_t lead_downs{0};
@@ -1735,6 +1771,9 @@ class FrameGenPresenter {
     // ", runtimeClock=..." for summaries (empty while the runtime's display
     // clock stayed steady over the window).
     std::string ClockSummaryLocked(const Totals& start) const;
+    // The 30 s summaries' share on Auto: frames left out of its cadence in
+    // the window, by reason.
+    std::string AutoSummaryLocked(const Totals& start) const;
     Totals totals_;
     Totals summary_totals_;            // at last_summary_
     double summary_standby_seconds_{0.0};

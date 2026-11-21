@@ -14094,6 +14094,151 @@ void TestAutoToggleStartsFresh() {
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
+// A game on Frame rate "Auto" against a paced runtime, presenting just in
+// time, with a log of its own.
+struct AutoGame {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    SessionLog log;
+    std::unique_ptr<App> owned;
+    App* app{nullptr};
+
+    AutoGame(const std::string& log_name, const FrameGenAutoRules& rules,
+             FrameGenSynthesisMode mode = FrameGenSynthesisMode::kInterpolate)
+        : log(log_name) {
+        runtime.paced = true;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned, log.logger.get());
+        presenter.SetAutoRules(rules);
+    }
+    std::uint32_t Multiplier() { return presenter.Status().multiplier; }
+};
+
+// As RunWork, ending each frame with its projection layer or with no layer
+// at all (a loading screen, a menu).
+int RunGame(App& app, std::chrono::milliseconds duration, const std::vector<std::chrono::microseconds>& work,
+            bool layers, const std::function<bool(const XrFrameState&)>& each = {}) {
+    const auto start = std::chrono::steady_clock::now();
+    int frames = 0;
+    while (std::chrono::steady_clock::now() - start < duration) {
+        const XrFrameState state = app.Wait();
+        app.Begin();
+        SleepPrecise(std::chrono::steady_clock::now() + work[static_cast<std::size_t>(frames) % work.size()]);
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime, layers)), "game: end");
+        ++frames;
+        if (each && each(state)) break;
+    }
+    return frames;
+}
+
+// Every rule off: Auto as it judged before them.
+FrameGenAutoRules AutoRulesOff() {
+    FrameGenAutoRules rules;
+    rules.cadence_filter = false;
+    return rules;
+}
+
+// Frames that say nothing about the game's load stay out of Auto's cadence
+// (Star Citizen, 2026-11-21: four switches to theater mode and back, quads
+// only for 5 to 25 s each, cost a step to 3x and 80 s at 24 fps each): a
+// stretch of frames without a projection layer, late at 2x, does not step
+// Auto up, and the game returning from it keeps the multiplier it had. Nor
+// do the first frame after a pause, or frames late while the game makes
+// swapchains. With the rule off each steps up as before.
+void TestAutoCadenceLeavesOutUnrelatedFrames() {
+    const XrSwapchain extra = reinterpret_cast<XrSwapchain>(0x7717);
+    struct Scenario {
+        const char* name;
+        std::vector<std::chrono::microseconds> work; // the stretch's frames
+        bool layers;
+        int swapchain_every; // frames between swapchains made (0: none)
+    };
+    const std::vector<Scenario> scenarios = {
+        // Over three refreshes of work a frame: late at 2x.
+        {"no projection layer", PeriodsOfWork(kPeriod, 3.4), false, 0},
+        // A pause is 250 ms or longer here; three a second, the frames
+        // between on time.
+        {"pauses", {256ms, 2ms, 2ms}, true, 0},
+        // Two frames of 150 ms (no pause) as each swapchain is made.
+        {"swapchains", {150ms, 150ms, 2ms, 2ms}, true, 4},
+    };
+    for (const Scenario& scenario : scenarios) {
+        for (const bool filter : {true, false}) {
+            const std::string name =
+                std::string("auto cadence, ") + scenario.name + (filter ? "" : ", rule off");
+            FrameGenAutoRules rules = AutoRulesOff();
+            rules.cadence_filter = filter;
+            AutoGame game("auto-cadence", rules);
+            // No probe down by itself within the test.
+            game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 30s);
+            game.presenter.SetSummaryInterval(500ms);
+            const auto holds_2x = PeriodsOfWork(kPeriod, 1.6);
+            RunWork(*game.app, 2500ms, holds_2x);
+            const std::uint32_t engaged = game.Multiplier();
+            std::uint32_t highest = engaged;
+            int frames = 0;
+            RunGame(*game.app, 3000ms, scenario.work, scenario.layers, [&](const XrFrameState&) {
+                highest = std::max(highest, game.Multiplier());
+                if (scenario.swapchain_every && ++frames % scenario.swapchain_every == 0) {
+                    game.presenter.TrackSwapchain(extra, kFormat, 1, kAppUsage);
+                }
+                return false;
+            });
+            // Back in the scene it left.
+            std::uint32_t highest_after = game.Multiplier();
+            RunWork(*game.app, 1500ms, holds_2x, [&](const XrFrameState&) {
+                highest_after = std::max(highest_after, game.Multiplier());
+                return false;
+            });
+            const FrameGenStatus status = game.presenter.Status();
+            game.presenter.Stop();
+            const std::string said = AutoLines(game.log);
+            const std::string left = std::to_string(status.auto_left_no_projection) + "/" +
+                                     std::to_string(status.auto_left_pause) + "/" +
+                                     std::to_string(status.auto_left_swapchain);
+            if (std::getenv("FG_TEST_STATS")) {
+                std::cerr << name << ": highest " << highest << "x, then " << highest_after << "x, left out " << left
+                          << said << "\n";
+            }
+            Check(engaged == 2, name + ": the game engages at 2x (" + std::to_string(engaged) + "x" + said + ")");
+            if (filter) {
+                Check(highest == 2 && highest_after == 2,
+                      name + ": the stretch does not step Auto up, and it resumes at the multiplier it had (" +
+                          std::to_string(highest) + "x, then " + std::to_string(highest_after) + "x" + said + ")");
+                const std::uint64_t counted = !scenario.layers          ? status.auto_left_no_projection
+                                              : scenario.swapchain_every ? status.auto_left_swapchain
+                                                                         : status.auto_left_pause;
+                Check(counted >= 5, name + ": its frames are counted as left out (" + left + ")");
+                // The 30 s line says how many, by reason.
+                bool summarized = false;
+                for (const std::string& line : game.log.Lines("Frame Generation: multiplier=")) {
+                    const std::size_t at = line.find(", autoLeftOut=");
+                    if (at == std::string::npos) continue;
+                    const std::string counts = line.substr(at + 14, line.find_first_of(",.", at + 14) - at - 14);
+                    summarized = summarized || counts != "0/0/0";
+                }
+                Check(summarized, name + ": the summary counts them");
+                if (!scenario.layers) {
+                    Check(!game.log.Lines(", noProjection=").empty() &&
+                              std::any_of(game.log.Lines(", noProjection=").begin(), game.log.Lines(", noProjection=").end(),
+                                          [](const std::string& line) {
+                                              return line.find(", noProjection=0,") == std::string::npos;
+                                          }),
+                          name + ": and the frames without a projection layer");
+                }
+            } else {
+                Check(highest >= 3,
+                      name + ": every frame counted, the stretch steps Auto up (" + std::to_string(highest) + "x" +
+                          said + ")");
+                Check(status.auto_left_no_projection + status.auto_left_pause + status.auto_left_swapchain == 0,
+                      name + ": nothing is left out (" + left + ")");
+            }
+            Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        }
+    }
+}
+
 // A probe's settle is 250 ms since b2ef6a8, tested with one late frame. A
 // switch to a lower multiplier that costs a few late frames in a row (a
 // game's frame time catching up with its new period, the runtime's
@@ -16943,6 +17088,7 @@ int main(int argc, char** argv) {
     // 2026-11-21): scenarios of several seconds each.
     GROUP("auto");
     RUN(TestAutoToggleStartsFresh);
+    RUN(TestAutoCadenceLeavesOutUnrelatedFrames);
     g_jit = false;
     // The lead against hitches and late frames.
     GROUP("lead");

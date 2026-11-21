@@ -4039,6 +4039,7 @@ std::optional<std::string> ReadResearchSwitch(const char* name) {
     const std::string_view wanted(name);
     if (wanted.rfind("VECTORXR_FRAMEGEN_ENGINE_", 0) != 0 && wanted.rfind("VECTORXR_FRAMEGEN_DEPTH_", 0) != 0 &&
         wanted.rfind("VECTORXR_FRAMEGEN_SYNTH_", 0) != 0 && wanted.rfind("VECTORXR_FRAMEGEN_FLOW_", 0) != 0 &&
+        wanted.rfind("VECTORXR_FRAMEGEN_AUTO_", 0) != 0 &&
         wanted != "VECTORXR_FRAMEGEN_WORLD") {
         return std::nullopt;
     }
