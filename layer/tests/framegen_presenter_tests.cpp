@@ -14046,6 +14046,12 @@ void TestAutoToggleStartsFresh() {
     StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kAuto, app, runtime, owned,
              log.logger.get());
     presenter.SetAutoPolicy(300ms, 500ms, 600ms, 300ms);
+    // Probes by the back-off alone, so the back-off's reset shows: with the
+    // game's measured work taken into account, full rate that failed is not
+    // probed again at the same work.
+    FrameGenAutoRules rules;
+    rules.reach = false;
+    presenter.SetAutoRules(rules);
     // 1.1 refreshes of work a frame: 2x, within reach of full rate (0.94),
     // where a paced runtime holds it to two refreshes a frame. Every probe
     // fails, and the back-off doubles to its longest (2.4 s).
@@ -14111,6 +14117,9 @@ struct AutoGame {
         runtime.paced = true;
         StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned, log.logger.get());
         presenter.SetAutoRules(rules);
+        // As in a session: Auto judges the game's frames once its swapchains
+        // have been there a while, not the frames right after they were made.
+        presenter.SetEngagementPolicy(3, 1500ms);
     }
     std::uint32_t Multiplier() { return presenter.Status().multiplier; }
 };
@@ -14138,6 +14147,7 @@ FrameGenAutoRules AutoRulesOff() {
     FrameGenAutoRules rules;
     rules.cadence_filter = false;
     rules.engage_below = false;
+    rules.reach = false;
     return rules;
 }
 
@@ -14176,7 +14186,7 @@ void TestAutoCadenceLeavesOutUnrelatedFrames() {
             game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 30s);
             game.presenter.SetSummaryInterval(500ms);
             const auto holds_2x = PeriodsOfWork(kPeriod, 1.6);
-            RunWork(*game.app, 2500ms, holds_2x);
+            RunWork(*game.app, 4000ms, holds_2x);
             const std::uint32_t engaged = game.Multiplier();
             std::uint32_t highest = engaged;
             int frames = 0;
@@ -14349,9 +14359,14 @@ int RunTicksAtFullRate(AutoGame& game, std::chrono::milliseconds duration, const
 // probe would hold through a 92% turn, the back-off would start over, and
 // the next 89% turn would engage again (Star Citizen, 2026-11-21, 07:57 to
 // 08:03: 2x for 10 to 80 s at a time with 6 to 21 s standing by between).
-void TestAutoHoversWithoutFlapping() {
-    const std::string name = "auto hovering at the threshold";
+//
+// With the game's measured work taken into account as well, the first
+// engagement already shows full rate does not hold at that work: it is not
+// probed at all while the work stays what it was.
+void AutoHovers(bool reach) {
+    const std::string name = std::string("auto hovering at the threshold") + (reach ? "" : ", by the margin alone");
     FrameGenAutoRules rules;
+    rules.reach = reach;
     AutoGame game("auto-hover", rules);
     game.presenter.SetAutoPolicy(300ms, 500ms, 1500ms, 1500ms);
     game.presenter.SetDynamicPolicy(QuickAutoRate());
@@ -14387,7 +14402,7 @@ void TestAutoHoversWithoutFlapping() {
         std::cerr << name << ": " << probes << " probes, " << full_rate_s << " s of " << ran
                   << " s at full rate after engaging" << said << "\n";
     }
-    Check(engaged && Seconds(*engaged - started) < 6.0 && ended == 2,
+    Check(engaged && Seconds(*engaged - started) < 7.0 && ended == 2,
           name + ": it engages at 2x (" + std::to_string(ended) + "x" + said + ")");
     // Every return to 2x after the first is a failed probe's (its line names
     // the longer wait): none held, so the back-off never started over.
@@ -14399,10 +14414,167 @@ void TestAutoHoversWithoutFlapping() {
               game.log.Lines("stays at full rate").empty(),
           name + ": no probe at full rate holds (" + std::to_string(ups.size()) + " engagements, " +
               std::to_string(failed) + " of them failed probes" + said + ")");
-    Check(probes >= 1 && probes <= 4 && full_rate_s < 0.3 * ran,
-          name + ": it stays engaged (" + std::to_string(probes) + " probes, " + std::to_string(full_rate_s) +
-              " s at full rate" + said + ")");
+    if (reach) {
+        Check(probes == 0 && game.log.Lines("stays at 2x: full rate did not hold").size() == 1,
+              name + ": full rate is not probed while the game's work is what it engaged at (" +
+                  std::to_string(probes) + " probes" + said + ")");
+    } else {
+        Check(probes >= 1 && probes <= 4 && full_rate_s < 0.3 * ran,
+              name + ": it stays engaged (" + std::to_string(probes) + " probes, " + std::to_string(full_rate_s) +
+                  " s at full rate" + said + ")");
+    }
     Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+void TestAutoHoversByMarginAlone() {
+    AutoHovers(false);
+}
+
+void TestAutoHoversWithoutFlapping() {
+    AutoHovers(true);
+}
+
+// A game its GPU holds to about 83% of the refresh rate (60 fps on a 72 Hz
+// headset), with 2 ms of its own time a frame: no frame takes 1.25
+// refreshes, and its own time is within reach of full rate. Auto engages at
+// 2x for its rate, and does not probe full rate, where the GPU still could
+// not keep up (Star Citizen, 2026-11-21: 36 of 42 probes failed, each a
+// presenter stop and start; GTAVXR: 22 of 22): the engagement showed full
+// rate does not hold at this work, and neither measure of it has come down.
+// A lighter scene is probed and held. Without the reach rule it probes at
+// every back-off; without the rate rule it never engages.
+void TestAutoGpuBoundNotProbedToFullRate() {
+    struct Scenario {
+        const char* name;
+        bool engage_below;
+        bool reach;
+    };
+    const std::vector<Scenario> scenarios = {
+        {"all rules", true, true},
+        {"reach rule off", true, false},
+        {"rate rule off", false, true},
+    };
+    for (const Scenario& scenario : scenarios) {
+        const std::string name = std::string("auto GPU-bound below refresh, ") + scenario.name;
+        FrameGenAutoRules rules;
+        rules.engage_below = scenario.engage_below;
+        rules.reach = scenario.reach;
+        AutoGame game("auto-gpu-bound", rules);
+        game.presenter.SetAutoPolicy(300ms, 500ms, 1500ms, 500ms);
+        game.presenter.SetDynamicPolicy(QuickAutoRate());
+        game.gpu.game_gpu = std::chrono::microseconds(static_cast<long long>(static_cast<double>(kPeriod) / 1e3 / 0.83));
+        game.gpu.frames_ahead = 2;
+        game.app->before_release = [&] { game.gpu.GameFrame(); };
+        std::uint32_t last = 1;
+        int probes = 0;
+        const auto count = [&](const XrFrameState&) {
+            const std::uint32_t multiplier = game.Multiplier();
+            probes += multiplier == 1 && last >= 2 ? 1 : 0;
+            last = multiplier;
+            return false;
+        };
+        RunWork(*game.app, 4000ms, {2ms}, count);
+        const std::uint32_t engaged = game.Multiplier();
+        RunWork(*game.app, 7000ms, {2ms}, count);
+        const int heavy_probes = probes;
+        // A lighter scene: its GPU work a third.
+        {
+            std::scoped_lock lock(game.gpu.timeline_mutex);
+            game.gpu.game_gpu = 4ms;
+        }
+        RunWork(*game.app, 5000ms, {2ms}, [&](const XrFrameState& state) {
+            count(state);
+            return false;
+        });
+        const std::uint32_t lighter = game.Multiplier();
+        game.presenter.Stop();
+        const std::string said = AutoLines(game.log);
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": " << heavy_probes << " probes, then " << lighter << "x" << said << "\n";
+            for (const std::string& line : game.log.Lines("stays at")) std::cerr << "  " << line << "\n";
+        }
+        if (!scenario.engage_below) {
+            Check(engaged == 1 && heavy_probes == 0,
+                  name + ": Auto stands by at 83% of the refresh rate as before (" + std::to_string(engaged) + "x" +
+                      said + ")");
+            continue;
+        }
+        Check(engaged == 2, name + ": Auto engages at 2x (" + std::to_string(engaged) + "x" + said + ")");
+        if (scenario.reach) {
+            Check(heavy_probes == 0,
+                  name + ": full rate is not probed while the GPU could not hold it (" +
+                      std::to_string(heavy_probes) + " probes" + said + ")");
+            Check(game.log.Lines("stays at 2x: full rate did not hold").size() == 1 &&
+                      game.log.Lines("GPU pending a frame").size() >= 1,
+                  name + ": the log says once why no probe comes, with both measures" + said);
+            Check(lighter == 1 && game.log.Lines("stays at full rate: the probe held").size() == 1,
+                  name + ": a lighter scene is probed and holds full rate (" + std::to_string(lighter) + "x" + said +
+                      ")");
+        } else {
+            Check(heavy_probes >= 2,
+                  name + ": full rate is probed at every back-off (" + std::to_string(heavy_probes) + " probes" +
+                      said + ")");
+        }
+        Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// Auto at 3x behind a long back-off, the game's work far inside 2x (Star
+// Citizen, 2026-11-21, 07:53:41: 80 s at 24 fps with 12 ms of own time a
+// frame and the GPU at 44%, after a step up for a hitch): once its frames
+// run steady it probes 2x without waiting the back-off out, and holds it.
+// Without the reach rule it stays at 3x for the back-off.
+void TestAutoProbesDownEarly() {
+    for (const bool reach : {true, false}) {
+        const std::string name = std::string("auto early probe") + (reach ? "" : ", rule off");
+        FrameGenAutoRules rules;
+        rules.reach = reach;
+        AutoGame game("auto-early", rules);
+        // A back-off far longer than the test.
+        game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 60s);
+        game.presenter.SetDynamicPolicy(QuickAutoRate());
+        game.gpu.game_gpu = 8ms;
+        game.gpu.frames_ahead = 4;
+        game.app->before_release = [&] { game.gpu.GameFrame(); };
+        // 2.6 refreshes of work a frame: late at 2x, held at 3x.
+        RunWork(*game.app, 6000ms, PeriodsOfWork(kPeriod, 2.6), [&](const XrFrameState&) {
+            return game.Multiplier() == 3 && game.presenter.Status().threaded;
+        });
+        const std::uint32_t climbed = game.Multiplier();
+        // The scene gets light: 6 ms of own time and 8 ms on the GPU a
+        // frame, where 2x allows 22.2 ms.
+        const auto lightened = std::chrono::steady_clock::now();
+        double down_after = -1.0;
+        std::uint32_t lowest = climbed, highest_after = 0;
+        RunWork(*game.app, 5000ms, {6ms}, [&](const XrFrameState&) {
+            const std::uint32_t multiplier = game.Multiplier();
+            if (down_after < 0.0 && multiplier < 3) {
+                down_after = Seconds(std::chrono::steady_clock::now() - lightened);
+            }
+            lowest = std::min(lowest, multiplier);
+            if (down_after >= 0.0) highest_after = std::max(highest_after, multiplier);
+            return false;
+        });
+        const std::uint32_t ended = game.Multiplier();
+        game.presenter.Stop();
+        const std::string said = AutoLines(game.log);
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": down after " << down_after << " s, lowest " << lowest << "x" << said << "\n";
+        }
+        Check(climbed == 3, name + ": a heavy scene takes it to 3x (" + std::to_string(climbed) + "x" + said + ")");
+        if (reach) {
+            Check(down_after > 0.0 && down_after < 3.0 && ended == 2 && highest_after == 2,
+                  name + ": with its work far inside 2x it probes 2x within seconds and holds it (" +
+                      std::to_string(down_after) + " s, " + std::to_string(ended) + "x" + said + ")");
+            Check(game.log.Lines("probing a lower multiplier early:").size() == 1 &&
+                      game.log.Lines("stays at 2x: the probe held").size() == 1,
+                  name + ": the log gives the estimate that allowed the probe" + said);
+        } else {
+            Check(lowest == 3 && ended == 3,
+                  name + ": it stays at 3x for the back-off (" + std::to_string(lowest) + "x" + said + ")");
+        }
+        Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
 }
 
 // A probe's settle is 250 ms since b2ef6a8, tested with one late frame. A
@@ -17256,7 +17428,10 @@ int main(int argc, char** argv) {
     RUN(TestAutoToggleStartsFresh);
     RUN(TestAutoCadenceLeavesOutUnrelatedFrames);
     RUN(TestAutoEngagesBelowRefresh);
+    RUN(TestAutoHoversByMarginAlone);
     RUN(TestAutoHoversWithoutFlapping);
+    RUN(TestAutoGpuBoundNotProbedToFullRate);
+    RUN(TestAutoProbesDownEarly);
     g_jit = false;
     // The lead against hitches and late frames.
     GROUP("lead");

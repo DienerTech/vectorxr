@@ -341,6 +341,30 @@ struct FrameGenAutoRules {
     // only once its frames take over 1.25 refreshes; a probe at full rate
     // holds only above Dynamic's stay_above.
     bool engage_below{true};
+    // VECTORXR_FRAMEGEN_AUTO_REACH: the game's measured work per frame (its
+    // own time, and how long its GPU work was still pending when a frame
+    // ended: FrameGenPresenter::AutoLoadLocked) decides two things. Full
+    // rate is not probed while neither measure has come down since full rate
+    // last failed; and from 3x or more a probe comes without waiting out the
+    // back-off once both are well inside the lower step.
+    bool reach{true};
+    // Full rate that failed is not probed again while both measures stay at
+    // or above this share of what they were then...
+    double reach_drop{0.90};
+    // ...for at most this long, doubling with each further failure up to
+    // reach_memory_max: then a probe tells again.
+    std::chrono::milliseconds reach_memory{300000};
+    std::chrono::milliseconds reach_memory_max{1200000};
+    // The early probe: the larger measure within this share of the lower
+    // step's frame time (and the two together within a probe's reach).
+    double early_inside{0.65};
+    // A step up's cause, for its log line and its back-off: transient or a
+    // mode switch when a hitch (a pause, or a frame of over long_frame times
+    // its expected time), a frame late around a swapchain change, or a frame
+    // without a projection layer ended within transient_window before it;
+    // sustained otherwise.
+    std::chrono::milliseconds transient_window{1000};
+    double long_frame{4.0};
 };
 
 // Interpolate's hardware-flow fallback. Tests shorten these times; the
@@ -982,6 +1006,21 @@ class FrameGenPresenter {
     // frame (auto_busy_) is within reach of `slots` periods a frame (`period`:
     // the grid the game's frames are timed by, GameGridLocked).
     bool AutoProbeInReachLocked(std::uint32_t slots, XrDuration period) const;
+    // Auto, presenting from its own thread: the game's work per frame as
+    // measured while it is held at the multiplier (medians; a measure is
+    // absent until `samples` of it exist).
+    struct AutoLoad {
+        bool busy{false};       // own_ms is measured
+        bool pending{false};    // pending_ms is measured
+        double own_ms{0.0};     // from one wait to the next, the cadence's holds left out
+        double pending_ms{0.0}; // from a frame's end to its views' capture having run on the GPU
+    };
+    AutoLoad AutoLoadLocked(std::size_t samples = 8) const;
+    // Full rate did not hold at `load` (FrameGenAutoRules::reach).
+    void NoteFullRateFailureLocked(const AutoLoad& load, std::chrono::steady_clock::time_point now);
+    // Whether full rate is not to be probed at `load`: it failed at a load
+    // no heavier in either measure, within the memory. `text`: for the log.
+    bool AutoFullRateVetoLocked(const AutoLoad& load, std::chrono::steady_clock::time_point now, std::string* text);
     // Dynamic: standing by, engages once the game runs below the refresh
     // rate; engaged, the game keeps its own rate (generated frames fill the
     // refreshes it misses) and Dynamic stands down when Frame Generation
@@ -1648,6 +1687,29 @@ class FrameGenPresenter {
     // Auto at full rate (engage_below): since when the game has run below
     // the share of the refresh rate it engages under, without a break.
     std::optional<std::chrono::steady_clock::time_point> auto_below_since_;
+    // What last disturbed the game's frames (FrameGenAutoRules::
+    // transient_window): when, what, and for a hitch its length.
+    enum class AutoCause { kSustained, kTransient, kModeSwitch };
+    std::chrono::steady_clock::time_point auto_disturbed_at_{};
+    AutoCause auto_disturbance_{AutoCause::kSustained};
+    std::string auto_disturbance_text_;
+    // The loads full rate failed at (a few, the newest last), how many
+    // failures since a probe at full rate last held, and a failure whose
+    // load is still to be measured (a step up from full rate: measured once
+    // the game is held at the multiplier).
+    struct AutoFailure {
+        AutoLoad load;
+        std::chrono::steady_clock::time_point at{};
+    };
+    std::vector<AutoFailure> auto_full_rate_failures_;
+    std::uint32_t auto_full_rate_failed_{0};
+    std::optional<std::chrono::steady_clock::time_point> auto_full_rate_unmeasured_;
+    bool auto_veto_logged_{false}; // this stretch of refused probes is in the log
+    // The probe under way: the load it started from, and whether it came
+    // early; an early probe that failed, none again until a probe holds.
+    AutoLoad probe_load_;
+    bool probe_early_{false};
+    bool auto_early_blocked_{false};
     // The last frame Auto saw had no projection layer (cadence_filter): the
     // next one with one starts its cadence afresh.
     bool auto_no_projection_{false};
