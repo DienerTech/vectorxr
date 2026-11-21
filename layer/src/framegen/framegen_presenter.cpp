@@ -3928,7 +3928,9 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         const double refresh = 1e9 / static_cast<double>(cadence_period);
         const double limit = (probing_ ? dynamic_policy_.stay_above : dynamic_policy_.engage_below) * refresh;
         const double rate = RateSince(app_frames_, now, multiplier_changed_at_ + settle);
-        if (!(rate > 0.0 && rate < limit)) {
+        if (!judged || !(rate > 0.0 && rate < limit)) {
+            // (A probe's first frames carry its switch: its rate counts from
+            // where its late share is judged.)
             auto_below_since_.reset();
         } else if (!auto_below_since_) {
             auto_below_since_ = now;

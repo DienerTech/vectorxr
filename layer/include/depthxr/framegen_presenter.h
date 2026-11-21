@@ -333,8 +333,9 @@ struct FrameGenAutoRules {
     // around a swapchain being made or destroyed, the first after a pause).
     bool cadence_filter{true};
     // A late frame this soon after the game made or destroyed a swapchain
-    // carries that cost.
-    std::chrono::milliseconds swapchain_settle{500};
+    // carries that cost. Two seconds: Star Citizen makes its theater mode's
+    // two swapchains two seconds apart, and its VR mode's six over three.
+    std::chrono::milliseconds swapchain_settle{2000};
     // VECTORXR_FRAMEGEN_AUTO_ENGAGE_BELOW: at full rate Auto also engages
     // once the game runs below Dynamic's share of the refresh rate for
     // Dynamic's time (FrameGenDynamicPolicy::engage_below, engage_after), not

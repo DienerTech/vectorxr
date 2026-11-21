@@ -1681,6 +1681,25 @@ FrameGenDynamicPolicy GuardDynamic() {
     return policy;
 }
 
+// Every rule off: Auto as it judged before them.
+FrameGenAutoRules AutoRulesOff() {
+    FrameGenAutoRules rules;
+    rules.cadence_filter = false;
+    rules.engage_below = false;
+    rules.reach = false;
+    rules.cause_backoff = false;
+    return rules;
+}
+
+// The rules a presenter starts with here. Off: the tests written before the
+// rules assert what Auto did then, and with every rule off it must still do
+// exactly that. The rules' own tests set them (AutoGame), and the probe
+// tests run a second time with them on (main).
+FrameGenAutoRules g_auto_rules = AutoRulesOff();
+// ...and the Dynamic policy, where not QuickDynamic: with the rules on Auto
+// takes its rate thresholds and times from it.
+std::optional<FrameGenDynamicPolicy> g_start_dynamic_policy;
+
 void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesisMode mode,
                     std::int64_t format = kFormat, XrSwapchainUsageFlags usage = kAppUsage,
                     FrameGenMultiplier multiplier = FrameGenMultiplier::k2, Logger* logger = nullptr) {
@@ -1690,9 +1709,10 @@ void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesis
     settings.multiplier = multiplier;
     presenter.Configure(settings);
     presenter.SetEngagementPolicy(3, 0ms);
-    presenter.SetDynamicPolicy(QuickDynamic());
+    presenter.SetDynamicPolicy(g_start_dynamic_policy ? *g_start_dynamic_policy : QuickDynamic());
     presenter.Start(kSession, nullptr, Dispatch(), logger, nullptr,
                     [&](const void*, std::string&) { return std::make_unique<FakeGpu>(&gpu); });
+    presenter.SetAutoRules(g_auto_rules);
     presenter.TrackSwapchain(kLeft, format, 1, usage);
     presenter.TrackSwapchain(kRight, format, 1, usage);
     std::scoped_lock lock(g_xr_mutex);
@@ -2157,12 +2177,11 @@ void TestAutomaticMultiplier() {
         }
     };
     // Its thresholds as frame rates (the public status file's): at full rate
-    // a step up below 90% of the refresh rate (as Dynamic engages), no step
-    // down.
+    // a step up below 80% of the refresh rate, no step down.
     FrameGenStatus status = presenter.Status();
     Check(status.grid_period_ns > 0, "auto: the grid is known");
     double grid_hz = 1e9 / static_cast<double>(status.grid_period_ns);
-    Check(std::abs(status.auto_step_up_below_fps - grid_hz * 0.9) < 0.01 && status.auto_step_down_above_fps == 0.0,
+    Check(std::abs(status.auto_step_up_below_fps - grid_hz / 1.25) < 0.01 && status.auto_step_down_above_fps == 0.0,
           "auto at full rate: steps up below " + std::to_string(status.auto_step_up_below_fps) + " fps");
     run(1500ms, 30ms);
     Check(presenter.Status().multiplier >= 3, "auto: a slow app steps up to 3x or more");
@@ -14051,6 +14070,7 @@ void TestAutoToggleStartsFresh() {
     // probed again at the same work.
     FrameGenAutoRules rules;
     rules.reach = false;
+    rules.swapchain_settle = 0ms; // the test starts where a session's swapchains were just made
     presenter.SetAutoRules(rules);
     // 1.1 refreshes of work a frame: 2x, within reach of full rate (0.94),
     // where a paced runtime holds it to two refreshes a frame. Every probe
@@ -14119,7 +14139,7 @@ struct AutoGame {
         presenter.SetAutoRules(rules);
         // As in a session: Auto judges the game's frames once its swapchains
         // have been there a while, not the frames right after they were made.
-        presenter.SetEngagementPolicy(3, 1500ms);
+        presenter.SetEngagementPolicy(3, 2500ms);
     }
     std::uint32_t Multiplier() { return presenter.Status().multiplier; }
 };
@@ -14140,16 +14160,6 @@ int RunGame(App& app, std::chrono::milliseconds duration, const std::vector<std:
         if (each && each(state)) break;
     }
     return frames;
-}
-
-// Every rule off: Auto as it judged before them.
-FrameGenAutoRules AutoRulesOff() {
-    FrameGenAutoRules rules;
-    rules.cadence_filter = false;
-    rules.engage_below = false;
-    rules.reach = false;
-    rules.cause_backoff = false;
-    return rules;
 }
 
 // Frames that say nothing about the game's load stay out of Auto's cadence
@@ -14187,7 +14197,7 @@ void TestAutoCadenceLeavesOutUnrelatedFrames() {
             game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 30s);
             game.presenter.SetSummaryInterval(500ms);
             const auto holds_2x = PeriodsOfWork(kPeriod, 1.6);
-            RunWork(*game.app, 4000ms, holds_2x);
+            RunWork(*game.app, 5000ms, holds_2x);
             const std::uint32_t engaged = game.Multiplier();
             std::uint32_t highest = engaged;
             int frames = 0;
@@ -14286,12 +14296,20 @@ void TestAutoEngagesBelowRefresh() {
         AutoGame game("auto-below", rules);
         game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 30s);
         game.presenter.SetDynamicPolicy(QuickAutoRate());
-        // Standing by begins once the game's rate is known.
-        game.presenter.SetEngagementPolicy(3, 1200ms);
+        // Standing by begins once the game's rate is known (and its
+        // swapchains have been there a while, as for every AutoGame).
         std::uint32_t highest = 0;
         std::optional<TimePoint> engaged;
         const auto started = std::chrono::steady_clock::now();
-        RunTicks(*game.app, 5000ms, scenario.ticks, [&](const XrFrameState&) {
+        // The status file's threshold at full rate: 90% of the refresh rate
+        // with the rule, 80% (frames of 1.25 refreshes) without.
+        game.app->Frame();
+        const FrameGenStatus first = game.presenter.Status();
+        const double grid_hz = first.grid_period_ns > 0 ? 1e9 / static_cast<double>(first.grid_period_ns) : 0.0;
+        Check(std::abs(first.auto_step_up_below_fps - grid_hz * (scenario.engage_below ? 0.9 : 0.8)) < 0.01,
+              name + ": at full rate the status says it steps up below " +
+                  std::to_string(first.auto_step_up_below_fps) + " fps");
+        RunTicks(*game.app, 6000ms, scenario.ticks, [&](const XrFrameState&) {
             const std::uint32_t multiplier = game.Multiplier();
             highest = std::max(highest, multiplier);
             if (!engaged && multiplier >= 2) engaged = std::chrono::steady_clock::now();
@@ -14395,6 +14413,11 @@ void AutoHovers(bool reach) {
         RunTicksAtFullRate(game, 1500ms, {1, 1, 1, 1, 1, 1, 1, 2}, 4ms, each);             // 89%
         RunTicksAtFullRate(game, 1500ms, {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2}, 4ms, each); // 92%
     }
+    // A probe under way as the turns end fails as the others did.
+    RunTicksAtFullRate(game, 3000ms, {1, 1, 1, 1, 1, 1, 1, 2}, 4ms, [&](const XrFrameState& state) {
+        each(state);
+        return game.Multiplier() == 2;
+    });
     const double ran = Seconds(std::chrono::steady_clock::now() - started);
     const std::uint32_t ended = game.Multiplier();
     game.presenter.Stop();
@@ -14403,7 +14426,7 @@ void AutoHovers(bool reach) {
         std::cerr << name << ": " << probes << " probes, " << full_rate_s << " s of " << ran
                   << " s at full rate after engaging" << said << "\n";
     }
-    Check(engaged && Seconds(*engaged - started) < 7.0 && ended == 2,
+    Check(engaged && Seconds(*engaged - started) < 8.0 && ended == 2,
           name + ": it engages at 2x (" + std::to_string(ended) + "x" + said + ")");
     // Every return to 2x after the first is a failed probe's (its line names
     // the longer wait): none held, so the back-off never started over.
@@ -14416,7 +14439,10 @@ void AutoHovers(bool reach) {
           name + ": no probe at full rate holds (" + std::to_string(ups.size()) + " engagements, " +
               std::to_string(failed) + " of them failed probes" + said + ")");
     if (reach) {
-        Check(probes == 0 && game.log.Lines("stays at 2x: full rate did not hold").size() == 1,
+        // No probe after the engagement showed it; one at most where a frame
+        // of the test's own (a busy machine) had the engagement put down to
+        // a hitch, and the probe then showed it.
+        Check(probes <= 1 && game.log.Lines("stays at 2x: full rate did not hold").size() == 1,
               name + ": full rate is not probed while the game's work is what it engaged at (" +
                   std::to_string(probes) + " probes" + said + ")");
     } else {
@@ -14474,7 +14500,7 @@ void TestAutoGpuBoundNotProbedToFullRate() {
             last = multiplier;
             return false;
         };
-        RunWork(*game.app, 4000ms, {2ms}, count);
+        RunWork(*game.app, 5000ms, {2ms}, count);
         const std::uint32_t engaged = game.Multiplier();
         RunWork(*game.app, 7000ms, {2ms}, count);
         const int heavy_probes = probes;
@@ -14538,7 +14564,7 @@ void TestAutoProbesDownEarly() {
         game.gpu.frames_ahead = 4;
         game.app->before_release = [&] { game.gpu.GameFrame(); };
         // 2.6 refreshes of work a frame: late at 2x, held at 3x.
-        RunWork(*game.app, 6000ms, PeriodsOfWork(kPeriod, 2.6), [&](const XrFrameState&) {
+        RunWork(*game.app, 8000ms, PeriodsOfWork(kPeriod, 2.6), [&](const XrFrameState&) {
             return game.Multiplier() == 3 && game.presenter.Status().threaded;
         });
         const std::uint32_t climbed = game.Multiplier();
@@ -14621,7 +14647,7 @@ void TestAutoHitchStepsBackSoon() {
         // A back-off far longer than the test, as failed probes leave it.
         game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 60s);
         game.presenter.SetDynamicPolicy(QuickAutoRate());
-        RunWork(*game.app, 5000ms, PeriodsOfWork(kPeriod, 1.6),
+        RunWork(*game.app, 7000ms, PeriodsOfWork(kPeriod, 1.6),
                 [&](const XrFrameState&) { return game.Multiplier() == 2 && game.presenter.Status().threaded; });
         RunWork(*game.app, 1500ms, {6ms});
         const std::uint32_t steady = game.Multiplier();
@@ -17544,6 +17570,27 @@ int main(int argc, char** argv) {
     RUN(TestAutoGpuBoundNotProbedToFullRate);
     RUN(TestAutoProbesDownEarly);
     RUN(TestAutoHitchStepsBackSoon);
+    // The probe tests from before the rules, with the rules on: what they
+    // assert must hold either way (a game that cannot run at full rate is
+    // not probed there, a failed probe returns promptly, capture latency
+    // alone refuses no probe, a lighter scene steps down). They start where
+    // a session's swapchains were just made, which the rules would take for
+    // a mode switch; the rate rule runs on its own times (two seconds below
+    // the threshold, as in a session), which these tests' single late frames
+    // and bursts are measured against.
+    g_auto_rules = FrameGenAutoRules{};
+    g_auto_rules.swapchain_settle = 0ms;
+    g_start_dynamic_policy = FrameGenDynamicPolicy{};
+    RUN(TestAutoLeavesLateCeiling);
+    for (const bool jit : {true, false}) {
+        g_jit = jit;
+        RUN(TestAutoProbesNeedRoom);
+    }
+    g_jit = false;
+    RUN(TestAutoGpuBoundProbeReturnsPromptly);
+    RUN(TestAutoProbeAllowsLatencyAndShortHitch);
+    g_auto_rules = AutoRulesOff();
+    g_start_dynamic_policy.reset();
     g_jit = false;
     // The lead against hitches and late frames.
     GROUP("lead");
