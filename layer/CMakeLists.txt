@@ -713,6 +713,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_executable(depthxr_framegen_presenter_tests tests/framegen_presenter_tests.cpp)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        # A map beside the exe: its terminate handler prints frame offsets, and the map names them.
+        target_link_options(depthxr_framegen_presenter_tests PRIVATE /MAP)
         # Paced by the wall clock, mostly waiting: about 680 s on a fast desktop (0.20.1) in one process beside its
         # policy tests (no argument). CTest runs its groups (--group, GROUP in the test) as tests of their own, side by
         # side under ctest -j: 45-160 s each on a desktop, about 18 minutes in all. -R depthxr_framegen_presenter_tests_

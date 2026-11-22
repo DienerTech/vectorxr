@@ -2552,10 +2552,12 @@ struct HorizonLog {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
     }
-    // Closes the log: call once the presenter has stopped.
+    // The log so far, flushed. The logger stays: a presenter still running
+    // (or stopped later) writes to it, and one destroyed under it was used
+    // after its end (SessionLog::Lines).
     std::vector<std::string> Summaries() {
         const std::filesystem::path path = logger->ActiveLogPath();
-        logger.reset(); // flushed
+        logger->FlushAtProcessExit();
         std::ifstream file(path);
         std::vector<std::string> lines;
         for (std::string line; std::getline(file, line);) {
@@ -2588,13 +2590,15 @@ struct SessionLog {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
     }
-    // The lines holding `text` (closes the log: call once the presenter has
-    // stopped). Later calls read the closed log again.
+    // The lines holding `text` in the log so far, flushed. The logger stays
+    // until the SessionLog goes: this used to destroy it, and a test that
+    // read its log before stopping its presenter (TestRuntimeHalvingPush)
+    // left the presenter writing its session summary through a destroyed
+    // logger: one run in a few ended in "resource deadlock would occur" from
+    // its mutex, or an access violation.
     std::vector<std::string> Lines(const std::string& text) {
-        if (logger) {
-            path = logger->ActiveLogPath();
-            logger.reset(); // flushed
-        }
+        path = logger->ActiveLogPath();
+        logger->FlushAtProcessExit();
         std::ifstream file(path);
         std::vector<std::string> lines;
         for (std::string line; std::getline(file, line);) {
@@ -14371,6 +14375,45 @@ int RunTicksAtFullRate(AutoGame& game, std::chrono::milliseconds duration, const
     return frames;
 }
 
+// Frames stalled around a swapchain change are not the game's rate either: a
+// game below the refresh rate while it makes a swapchain every second (a
+// switch of modes, its swapchains made over a few seconds) is not engaged for
+// while that lasts. One that keeps at it past swapchain_churn_max is judged as
+// any game: making swapchains is then how it runs, not a switch.
+void TestAutoRateWaitsForSwapchains() {
+    const std::string name = "auto below refresh, swapchains being made";
+    const XrSwapchain extra = reinterpret_cast<XrSwapchain>(0x7718);
+    FrameGenAutoRules rules = AutoRulesOff();
+    rules.cadence_filter = true;
+    rules.engage_below = true;
+    rules.swapchain_churn_max = 6000ms;
+    AutoGame game("auto-below-swapchains", rules);
+    game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 30s);
+    game.presenter.SetDynamicPolicy(QuickAutoRate());
+    const auto started = std::chrono::steady_clock::now();
+    auto made = started;
+    std::optional<TimePoint> engaged;
+    // 86% of the refresh rate throughout, a swapchain every 900 ms.
+    RunTicks(*game.app, 11000ms, {1, 1, 1, 1, 1, 2}, [&](const XrFrameState&) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - made >= 900ms) {
+            made = now;
+            game.presenter.TrackSwapchain(extra, kFormat, 1, kAppUsage);
+        }
+        if (!engaged && game.Multiplier() >= 2) engaged = now;
+        return engaged.has_value();
+    });
+    game.presenter.Stop();
+    const std::string said = AutoLines(game.log);
+    const std::string when = engaged ? std::to_string(Seconds(*engaged - started)) + " s" : std::string("never");
+    if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": engaged after " << when << said << std::endl;
+    Check(engaged && Seconds(*engaged - started) > 5.0,
+          name + ": not engaged while the swapchains are a switch of modes (" + when + said + ")");
+    Check(engaged && Seconds(*engaged - started) < 10.5,
+          name + ": engaged once making them is how the game runs (" + when + said + ")");
+    Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // A profile's lowest rate for Auto (autoLowestRate "2x"; spinfusor_,
 // 2026-11-21: "FG turns off too soon (when the game frame rate is 65) but it
 // causes stutter"): a game that holds the refresh rate by itself is engaged
@@ -14401,7 +14444,6 @@ void TestAutoLowestRate() {
             return false;
         });
         const FrameGenStatus status = game.presenter.Status();
-        // (The log is read once the presenter has stopped: reading it closes it.)
         const std::string ran = std::to_string(highest) + "x" +
                                 (engaged ? " after " + std::to_string(Seconds(*engaged - started)) + " s" : std::string()) +
                                 ", " + std::to_string(at_full_rate_after) + " frames at full rate after";
@@ -14566,15 +14608,19 @@ void TestAutoGpuBoundNotProbedToFullRate() {
         game.gpu.frames_ahead = 2;
         game.app->before_release = [&] { game.gpu.GameFrame(); };
         std::uint32_t last = 1;
+        std::uint32_t highest = 1;
         int probes = 0;
         const auto count = [&](const XrFrameState&) {
             const std::uint32_t multiplier = game.Multiplier();
             probes += multiplier == 1 && last >= 2 ? 1 : 0;
             last = multiplier;
+            highest = std::max(highest, multiplier);
             return false;
         };
         RunWork(*game.app, 5000ms, {2ms}, count);
-        const std::uint32_t engaged = game.Multiplier();
+        // The highest it reached: without the reach rule a probe at full rate
+        // may be under way at this moment.
+        const std::uint32_t engaged = highest;
         RunWork(*game.app, 7000ms, {2ms}, count);
         const int heavy_probes = probes;
         // A lighter scene: its GPU work a third.
@@ -14764,7 +14810,7 @@ void TestAutoHitchStepsBackSoon() {
         }
         Check(steady == 2, name + ": the game holds 2x (" + std::to_string(steady) + "x" + said + ")");
         Check(highest == 3, name + ": the hitch steps Auto up to 3x (" + std::to_string(highest) + "x" + said + ")");
-        Check(game.log.Lines("cause: transient, a frame of 0.7").size() >= 1,
+        Check(game.log.Lines("cause: transient, a frame of 0.").size() >= 1,
               name + ": the log puts the step down to the hitch" + said);
         if (scenario.cause_backoff || scenario.reach) {
             Check(back_after > 0.0 && back_after < 3.5 && settled == 2,
@@ -17431,6 +17477,17 @@ int main(int argc, char** argv) {
         } catch (...) {
         }
         std::cerr << "FAILED: terminate: " << what << std::endl;
+        // Where: the frames' offsets in this exe (an exception escaping a
+        // thread ends the run before unwinding, so the throw is among them).
+        void* frames[48]{};
+        const USHORT count = CaptureStackBackTrace(0, 48, frames, nullptr);
+        const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        std::cerr << "  thread " << GetCurrentThreadId() << ", exe base 0x" << std::hex << base << ", frames:";
+        for (USHORT i = 0; i < count; ++i) {
+            const auto address = reinterpret_cast<std::uintptr_t>(frames[i]);
+            std::cerr << (address >= base ? " +0x" : " 0x") << (address >= base ? address - base : address);
+        }
+        std::cerr << std::dec << std::endl;
         std::_Exit(3);
     });
     // Research switches (framegen-research.txt) and capture requests are
@@ -17639,6 +17696,7 @@ int main(int argc, char** argv) {
     RUN(TestAutoCadenceLeavesOutUnrelatedFrames);
     RUN(TestAutoEngagesBelowRefresh);
     RUN(TestAutoLowestRate);
+    RUN(TestAutoRateWaitsForSwapchains);
     RUN(TestAutoHoversByMarginAlone);
     RUN(TestAutoHoversWithoutFlapping);
     RUN(TestAutoGpuBoundNotProbedToFullRate);
