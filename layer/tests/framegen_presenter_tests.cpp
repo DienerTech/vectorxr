@@ -14371,6 +14371,79 @@ int RunTicksAtFullRate(AutoGame& game, std::chrono::milliseconds duration, const
     return frames;
 }
 
+// A profile's lowest rate for Auto (autoLowestRate "2x"; spinfusor_,
+// 2026-11-21: "FG turns off too soon (when the game frame rate is 65) but it
+// causes stutter"): a game that holds the refresh rate by itself is engaged
+// at 2x all the same, at once, and never probed back to full rate, with every
+// rule on and probes due within the second. Without it the same game stands
+// by. Turned off while it runs, Auto probes full rate as before and holds.
+void TestAutoLowestRate() {
+    for (const bool lowest : {true, false}) {
+        const std::string name = std::string("auto lowest rate") + (lowest ? "" : ", off");
+        AutoGame game("auto-lowest", FrameGenAutoRules{});
+        game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 800ms);
+        game.presenter.SetDynamicPolicy(QuickAutoRate());
+        FrameGenResolvedSettings settings;
+        settings.enabled = true;
+        settings.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+        settings.multiplier = FrameGenMultiplier::kAuto;
+        settings.auto_lowest_multiplier = lowest ? 2 : 1;
+        game.presenter.Configure(settings);
+        std::uint32_t highest = 0;
+        std::optional<TimePoint> engaged;
+        int at_full_rate_after = 0;
+        const auto started = std::chrono::steady_clock::now();
+        RunTicksAtFullRate(game, 7000ms, {1}, 4ms, [&](const XrFrameState&) {
+            const std::uint32_t multiplier = game.Multiplier();
+            highest = std::max(highest, multiplier);
+            if (!engaged && multiplier >= 2) engaged = std::chrono::steady_clock::now();
+            if (engaged && multiplier < 2) ++at_full_rate_after;
+            return false;
+        });
+        const FrameGenStatus status = game.presenter.Status();
+        // (The log is read once the presenter has stopped: reading it closes it.)
+        const std::string ran = std::to_string(highest) + "x" +
+                                (engaged ? " after " + std::to_string(Seconds(*engaged - started)) + " s" : std::string()) +
+                                ", " + std::to_string(at_full_rate_after) + " frames at full rate after";
+        if (!lowest) {
+            game.presenter.Stop();
+            if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": " << ran << AutoLines(game.log) << std::endl;
+            Check(highest == 1, name + ": a game holding the refresh rate stands by (" + ran + AutoLines(game.log) + ")");
+            continue;
+        }
+        // Turned off in the app while the game runs: full rate is probed, and
+        // holds (a second and a half there is past a probe's confirmation).
+        settings.auto_lowest_multiplier = 1;
+        game.presenter.Configure(settings);
+        std::optional<TimePoint> at_full_rate;
+        bool full_rate = false;
+        RunTicksAtFullRate(game, 12000ms, {1}, 4ms, [&](const XrFrameState&) {
+            const auto now = std::chrono::steady_clock::now();
+            if (game.Multiplier() >= 2) {
+                at_full_rate.reset();
+            } else if (!at_full_rate) {
+                at_full_rate = now;
+            }
+            full_rate = at_full_rate && Seconds(now - *at_full_rate) >= 1.5;
+            return full_rate;
+        });
+        game.presenter.Stop();
+        const std::string said = AutoLines(game.log);
+        if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": " << ran << said << std::endl;
+        Check(engaged && Seconds(*engaged - started) < 5.0 && highest == 2 && status.multiplier == 2,
+              name + ": a game holding the refresh rate is engaged at 2x (" + ran + said + ")");
+        Check(at_full_rate_after == 0, name + ": and never goes back to full rate (" + ran + said + ")");
+        Check(game.log.Lines("(the profile's lowest rate)").size() == 1, name + ": the log says why" + said);
+        Check(status.auto_step_down_above_fps == 0.0,
+              name + ": the status gives no rate to step down above (" +
+                  std::to_string(status.auto_step_down_above_fps) + ")");
+        Check(full_rate && !game.log.Lines("stays at full rate: the probe held").empty(),
+              name + ": turned off, Auto probes full rate and stays" + said);
+        Check(!game.log.Lines("lowest rate off").empty(), name + ": and the log says it was turned off" + said);
+        Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // A game hovering at the threshold (89% and 92% of the refresh rate by
 // turns at full rate; held at 2x it has room to spare and runs evenly)
 // engages once and stays engaged: a probe at full rate holds only
@@ -17565,6 +17638,7 @@ int main(int argc, char** argv) {
     RUN(TestAutoToggleStartsFresh);
     RUN(TestAutoCadenceLeavesOutUnrelatedFrames);
     RUN(TestAutoEngagesBelowRefresh);
+    RUN(TestAutoLowestRate);
     RUN(TestAutoHoversByMarginAlone);
     RUN(TestAutoHoversWithoutFlapping);
     RUN(TestAutoGpuBoundNotProbedToFullRate);

@@ -51,6 +51,7 @@
     "flowQuality": "{field} должно иметь значение performance, balanced или quality",
     "motionEstimation": "{field} должно иметь значение shader или hardware",
     "frameMultiplier": "{field} должно иметь значение auto, dynamic, 2x, 3x или 4x",
+    "autoLowestRate": "{field} должно быть off или 2x",
     "diagnosticView": "{field} должно иметь значение off, flow, confidence или tint",
     "interpolateFlow": "{field} должно быть auto, hardware или shader"
   },

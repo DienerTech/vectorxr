@@ -125,6 +125,7 @@
     "format": "{mode} · {rate} · {motion}",
     "dynamic": "Dynamique",
     "fixedAuto": "Fixe Auto",
+    "fixedAutoLowest": "Fixe Auto, 2x ou plus",
     "fixed": "Fixe {multiplier}"
   },
   "howItWorks": {
@@ -179,8 +180,10 @@
         "description": "Maintient le jeu à une fraction fixe de la fréquence de rafraîchissement pour un cadencement régulier, et complète le reste avec des images générées."
       },
       "fixedRate": "Taux fixe",
+      "lowestRate": "Taux minimal",
       "rates": {
         "auto": "Choisit 2x, 3x ou 4x selon les besoins du jeu, et ne génère rien tant que le jeu suit seul.",
+        "autoLowest": "Choisit 2x, 3x ou 4x selon les besoins du jeu, et continue de générer à 2x même quand le jeu pourrait suivre seul.",
         "x2": "Le jeu tourne jusqu'à 1/2 de la fréquence de rafraîchissement, par exemple 45 fps à 90 Hz. En dessous, le cadencement est moins régulier.",
         "x3": "Le jeu tourne jusqu'à 1/3 de la fréquence de rafraîchissement, par exemple 30 fps à 90 Hz. En dessous, le cadencement est moins régulier.",
         "x4": "Le jeu tourne jusqu'à 1/4 de la fréquence de rafraîchissement, par exemple 22,5 fps à 90 Hz. Le plus d'artefacts ; pour les jeux les plus lourds."

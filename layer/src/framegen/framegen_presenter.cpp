@@ -1395,6 +1395,12 @@ void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
                       ").");
     }
     edge_fill_degrees_ = edge_fill_degrees;
+    if (started_ && logger_ && settings.auto_lowest_multiplier != settings_.auto_lowest_multiplier) {
+        logger_->Info(std::string("Frame Generation automatic multiplier's lowest rate ") +
+                      (settings.auto_lowest_multiplier >= 2 ? "2x: frames are generated even where the game holds the "
+                                                              "refresh rate."
+                                                            : "off: nothing is generated while the game keeps up."));
+    }
     // Just in time, the presenter thread keeps the mode it started with
     // (StayThreadedLocked): another one starts it again, after a fresh run of
     // steady frames, as turning Frame Generation off and on does. Frames
@@ -3806,6 +3812,35 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         auto_below_since_.reset();
         return;
     }
+    // A profile's lowest rate (autoLowestRate): Auto never stands by for a
+    // game that keeps up, and never probes below it (spinfusor_, 2026-11-21:
+    // "FG turns off too soon (when the game frame rate is 65) but it causes
+    // stutter", on a 72 Hz headset). At once, without the settle or a late
+    // share: there is nothing to judge. The two holds at full rate stay (a
+    // runtime at half rate, inline cycles that start late): generating gains
+    // nothing in either, and each ends by itself. Not for Dynamic run as Auto.
+    const std::uint32_t lowest =
+        settings_.multiplier == FrameGenMultiplier::kAuto && settings_.auto_lowest_multiplier >= 2
+            ? std::min<std::uint32_t>(static_cast<std::uint32_t>(settings_.auto_lowest_multiplier),
+                                      std::max<std::uint32_t>(auto_memory_ceiling_, 2u))
+            : 1u;
+    if (auto_multiplier_ < lowest && !(inline_hold_until_ && now < *inline_hold_until_) &&
+        !(runtime_halving_ && auto_halving_hold_until_ && now < *auto_halving_hold_until_)) {
+        const std::uint32_t from = auto_multiplier_;
+        auto_multiplier_ = lowest;
+        probing_ = false;
+        multiplier_changed_at_ = now;
+        last_app_end_ = now;
+        cadence_.clear();
+        auto_below_since_.reset();
+        late_at_ceiling_since_.reset();
+        if (logger_) {
+            logger_->Info("Frame Generation automatic multiplier " +
+                          (from == 1 ? std::string("full rate") : MultiplierText(from)) + " -> " +
+                          MultiplierText(auto_multiplier_) + " (the profile's lowest rate).");
+        }
+        return;
+    }
     // Frames right after a change (a new multiplier, engaging, new output
     // images) carry its one-off cost and say nothing about the app. Probes
     // start from an already steady game: after a shorter transition, eight
@@ -3982,7 +4017,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             if (!late_at_ceiling_since_ || *late_at_ceiling_since_ < multiplier_changed_at_) {
                 late_at_ceiling_since_ = now;
             } else if (now - *late_at_ceiling_since_ >= probe_backoff_ && compositor_running_ &&
-                       auto_busy_count_ >= 8 && AutoProbeInReachLocked(auto_multiplier_ - 1, GameGridLocked())) {
+                       auto_multiplier_ > lowest && auto_busy_count_ >= 8 && AutoProbeInReachLocked(auto_multiplier_ - 1, GameGridLocked())) {
                 const AutoLoad load = AutoLoadLocked();
                 if (!(auto_rules_.reach && auto_multiplier_ == 2 && AutoFullRateVetoLocked(load, now, nullptr))) {
                     left_ceiling_after = now - *late_at_ceiling_since_;
@@ -4016,7 +4051,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
                           Number(std::chrono::duration<double>(now - multiplier_changed_at_).count(), 0) + " s" +
                           (rate > 0.0 ? ", the game at " + Number(rate, 1) + " fps." : "."));
         }
-    } else if (!probing_ && auto_multiplier_ > 1 && (now >= probe_not_before_ || auto_rules_.reach) &&
+    } else if (!probing_ && auto_multiplier_ > lowest && (now >= probe_not_before_ || auto_rules_.reach) &&
                !cadence_.empty() && now - cadence_.front().time >= auto_steady_ && steady >= 8 &&
                steady_late * 50 <= steady && AutoProbeInReachLocked(auto_multiplier_ - 1, GameGridLocked())) {
         // Five steady seconds with at most 2% of frames late, and a game
@@ -11467,7 +11502,8 @@ FrameGenStatus FrameGenPresenter::Status() const {
                     ? dynamic_policy_.engage_below * judged_hz
                     : judged_hz / (kAutoLateFactor * auto_multiplier_);
         }
-        if (auto_multiplier_ > 1) {
+        if (auto_multiplier_ > 1 && !(settings_.multiplier == FrameGenMultiplier::kAuto &&
+                                      static_cast<int>(auto_multiplier_) <= settings_.auto_lowest_multiplier)) {
             status.auto_step_down_above_fps =
                 compositor_running_ ? (dynamic_policy_.stay_above - kProbeReach) * grid_hz / (auto_multiplier_ - 1)
                                     : grid_hz / auto_multiplier_;

@@ -1583,6 +1583,20 @@ void TestFrameGenProfileResolution() {
            "A profile's edgeFill was not read: " + filled.error);
     Expect(!depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "edgeFill": "yes" } })json")).ok,
            "A non-boolean edgeFill was accepted");
+    // Auto's lowest rate: off unless a profile sets it to 2x.
+    const depthxr::ParseResult lowest = depthxr::ParseConfig(
+        FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "frameMultiplier": "auto", "autoLowestRate": "2x" } })json"));
+    Expect(lowest.ok && lowest.document.framegen.defaults.auto_lowest_multiplier == 2 &&
+               depthxr::ResolveFrameGenSettings(lowest.document, "DCS.exe").auto_lowest_multiplier == 2 &&
+               inherited.document.framegen.defaults.auto_lowest_multiplier == 1,
+           "autoLowestRate was not read, or is not off by default: " + lowest.error);
+    const depthxr::ParseResult lowest_off = depthxr::ParseConfig(
+        FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "autoLowestRate": "off" } })json"));
+    Expect(lowest_off.ok && lowest_off.document.framegen.defaults.auto_lowest_multiplier == 1,
+           "autoLowestRate off was not read: " + lowest_off.error);
+    Expect(!depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "autoLowestRate": "3x" } })json")).ok &&
+               !depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "autoLowestRate": 2 } })json")).ok,
+           "An autoLowestRate other than off or 2x was accepted");
     // The game's depth is used unless a profile (or the defaults) turns it off.
     Expect(inherited.document.framegen.defaults.use_game_depth &&
                depthxr::ResolveFrameGenSettings(inherited.document, "DCS.exe").use_game_depth,

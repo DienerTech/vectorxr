@@ -51,6 +51,7 @@
     "flowQuality": "{field} musi mieć wartość performance, balanced lub quality",
     "motionEstimation": "{field} musi mieć wartość shader lub hardware",
     "frameMultiplier": "{field} musi mieć wartość auto, dynamic, 2x, 3x lub 4x",
+    "autoLowestRate": "{field} musi mieć wartość off lub 2x",
     "diagnosticView": "{field} musi mieć wartość off, flow, confidence lub tint",
     "interpolateFlow": "{field} musi mieć wartość auto, hardware lub shader"
   },

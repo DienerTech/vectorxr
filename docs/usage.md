@@ -885,6 +885,12 @@ through and the status reads **Standby**. When it cannot, Auto steps up to 2x, 3
 steps back down when it can, checking now and then whether a lower rate holds. Output images,
 once allocated, are kept for the session, so changing rate never stalls the game.
 
+With Auto selected, **Lowest rate** chooses where Auto starts. **Off** (default) is as above.
+**2x** keeps Frame Generation on: the game is held at half the refresh rate even where it could
+hold the full rate, and Auto still steps to 3x or 4x when it needs to. Use it when a game runs
+just under the refresh rate and stutters each time Frame Generation stands by. In
+`settings.json` it is `"autoLowestRate": "2x"`.
+
 Higher rates rescue very heavy games, but each generated frame moves content further, so
 artifacts grow; 4x shows the most. Each generated frame can also need its own set of
 headset-resolution output images, so video memory use grows with the rate. The log reports the

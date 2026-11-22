@@ -2649,6 +2649,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
         "motionLimitPercent",
         "extendHeadPrediction",
         "edgeFill",
+        "autoLowestRate",
         "useGameDepth",
     };
     NoteUnknownKeys(object, allowed);
@@ -2718,6 +2719,17 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
     }
     if (edge_fill) {
         out.edge_fill = *edge_fill;
+    }
+    std::optional<std::string> auto_lowest_rate;
+    if (!ReadOptionalString(object, "autoLowestRate", auto_lowest_rate, error)) {
+        return false;
+    }
+    if (auto_lowest_rate) {
+        if (*auto_lowest_rate != "off" && *auto_lowest_rate != "2x") {
+            error = std::string(field) + ".autoLowestRate must be off or 2x";
+            return false;
+        }
+        out.auto_lowest_multiplier = *auto_lowest_rate == "2x" ? 2 : 1;
     }
     std::optional<bool> use_game_depth;
     if (!ReadOptionalBool(object, "useGameDepth", use_game_depth, error)) {

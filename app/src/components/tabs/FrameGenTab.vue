@@ -149,7 +149,7 @@ function settingsSummary(settings: FrameGenSettings) {
   const mode = settings.synthesisMode === 'extrapolate' ? t('framegen.settings.mode.extrapolate.label') : t('framegen.settings.mode.interpolate.label')
   const rate = settings.frameMultiplier === 'dynamic'
     ? t('framegen.summary.dynamic')
-    : settings.frameMultiplier === 'auto' ? t('framegen.summary.fixedAuto') : t('framegen.summary.fixed', { multiplier: settings.frameMultiplier })
+    : settings.frameMultiplier === 'auto' ? t(settings.autoLowestRate === '2x' ? 'framegen.summary.fixedAutoLowest' : 'framegen.summary.fixedAuto') : t('framegen.summary.fixed', { multiplier: settings.frameMultiplier })
   // The source in use: Shader while interpolating in Dynamic, or with no card that has the hardware.
   const motion = motionSourceState(settings, gpuCapabilities.value).effective === 'hardware'
     ? t('framegen.settings.motionSource.hardware.label')

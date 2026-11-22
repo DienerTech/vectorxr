@@ -51,6 +51,7 @@
     "flowQuality": "{field} must be performance, balanced, or quality",
     "motionEstimation": "{field} must be shader or hardware",
     "frameMultiplier": "{field} must be auto, dynamic, 2x, 3x, or 4x",
+    "autoLowestRate": "{field} must be off or 2x",
     "diagnosticView": "{field} must be off, flow, confidence, or tint",
     "interpolateFlow": "{field} must be auto, hardware, or shader"
   },

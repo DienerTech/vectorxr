@@ -1759,6 +1759,12 @@
           "default": false,
           "description": "Frames Frame Generation writes reach a few degrees past the game's field of view (3 degrees left and right, 1.5 up and down), the extra margin repeating the frame's edge. On a fast head turn the runtime then shows a smeared edge on the side you turn toward instead of a black band. Costs some GPU time and video memory for the wider images. Direct3D 12 games and Direct3D 11 or Vulkan games through the bridge; it can be changed while the game runs."
         },
+        "autoLowestRate": {
+          "type": "string",
+          "enum": ["off", "2x"],
+          "default": "off",
+          "description": "The lowest rate Fixed Auto uses. With 2x, Auto keeps generating at 2x even while the game could hold the refresh rate by itself, and steps to 3x or 4x as the game needs. Read only while frameMultiplier is auto."
+        },
         "useGameDepth": {
           "type": "boolean",
           "default": true,

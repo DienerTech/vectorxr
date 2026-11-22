@@ -78,7 +78,25 @@ const frameRate = computed<FrameRate>({
     props.settings.frameMultiplier = value === 'dynamic' ? 'dynamic' : lastFixedRate.value
   },
 })
-const fixedRateDescription = computed(() => fixedRates.value.find((rate) => rate.value === props.settings.frameMultiplier)?.description ?? '')
+// Auto's lowest rate: Off lets Auto stand by while the game keeps up; 2x keeps
+// it generating. Stored only when set, like the layer reads it (absent means
+// off), and kept while another rate is selected so Auto finds it again.
+type AutoLowestRate = 'off' | '2x'
+const autoLowestRates = computed<{ value: AutoLowestRate; label: string }[]>(() => [
+  { value: 'off', label: t('common.off') },
+  { value: '2x', label: '2x' },
+])
+const autoLowestRate = computed<AutoLowestRate>({
+  get: () => props.settings.autoLowestRate === '2x' ? '2x' : 'off',
+  set: (value) => {
+    if (value === '2x') props.settings.autoLowestRate = '2x'
+    else delete props.settings.autoLowestRate
+  },
+})
+const fixedRateDescription = computed(() =>
+  props.settings.frameMultiplier === 'auto' && autoLowestRate.value === '2x'
+    ? t('framegen.settings.frameRate.rates.autoLowest')
+    : fixedRates.value.find((rate) => rate.value === props.settings.frameMultiplier)?.description ?? '')
 
 // NVIDIA hardware needs a card that has it. Interpolate can fall back to
 // shader flow while running; this editor preserves the saved hardware choice.
@@ -180,6 +198,23 @@ function resetAdvanced() {
               :aria-checked="settings.frameMultiplier === rate.value"
               :title="rate.description"
               @click="settings.frameMultiplier = rate.value"
+            >
+              {{ rate.label }}
+            </button>
+          </div>
+        </div>
+        <div v-if="settings.frameMultiplier === 'auto'" class="mt-3 flex flex-wrap items-center justify-between gap-3">
+          <span class="text-sm font-medium">{{ t('framegen.settings.frameRate.lowestRate') }}</span>
+          <div class="segmented flex w-full sm:w-auto" role="radiogroup" :aria-label="t('framegen.settings.frameRate.lowestRate')">
+            <button
+              v-for="rate in autoLowestRates"
+              :key="rate.value"
+              type="button"
+              role="radio"
+              class="segmented-option flex-1 sm:min-w-[4rem]"
+              :class="{ 'segmented-option-active': autoLowestRate === rate.value }"
+              :aria-checked="autoLowestRate === rate.value"
+              @click="autoLowestRate = rate.value"
             >
               {{ rate.label }}
             </button>

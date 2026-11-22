@@ -1891,6 +1891,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.framegen.motion_limit_percent == rhs.framegen.motion_limit_percent &&
            lhs.framegen.extend_head_prediction == rhs.framegen.extend_head_prediction &&
            lhs.framegen.edge_fill == rhs.framegen.edge_fill &&
+           lhs.framegen.auto_lowest_multiplier == rhs.framegen.auto_lowest_multiplier &&
            lhs.framegen.use_game_depth == rhs.framegen.use_game_depth &&
            lhs.framegen.diagnostic_view == rhs.framegen.diagnostic_view &&
            lhs.mirror.enabled == rhs.mirror.enabled && lhs.mirror.profile_name == rhs.mirror.profile_name &&
@@ -16209,6 +16210,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", framegenMotionLimitPercent=" << settings.framegen.motion_limit_percent
            << ", framegenExtendHeadPrediction=" << settings.framegen.extend_head_prediction
            << ", framegenEdgeFill=" << settings.framegen.edge_fill
+           << ", framegenAutoLowestMultiplier=" << settings.framegen.auto_lowest_multiplier
            << ", framegenUseGameDepth=" << settings.framegen.use_game_depth
            << ", framegenDiagnosticView=" << ToString(settings.framegen.diagnostic_view)
            << ", framegenToggleBindings=" << BindingListLabel(settings.framegen.toggle_bindings)

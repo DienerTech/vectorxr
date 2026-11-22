@@ -420,6 +420,9 @@ function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): s
   if (settings.edgeFill !== undefined && typeof settings.edgeFill !== 'boolean') {
     errors.push(t('validation.field.trueOrFalse', { field: prefix + 'edgeFill' }))
   }
+  if (settings.autoLowestRate !== undefined && settings.autoLowestRate !== '2x' && (settings.autoLowestRate as string) !== 'off') {
+    errors.push(t('validation.framegen.autoLowestRate', { field: prefix + 'autoLowestRate' }))
+  }
   if (settings.useGameDepth !== undefined && typeof settings.useGameDepth !== 'boolean') {
     errors.push(t('validation.field.trueOrFalse', { field: prefix + 'useGameDepth' }))
   }

@@ -606,6 +606,14 @@ struct FrameGenSettings {
     // head turn shows a smeared edge instead of black on its leading side
     // (FrameGenEdgeMargins). Direct3D 12 and the bridges only. Off by default.
     bool edge_fill{false};
+    // Auto's lowest rate (autoLowestRate: "2x"; 1 = off, the default): with
+    // frameMultiplier auto, the multiplier never goes below this, so frames
+    // are generated even where the game could hold the refresh rate by
+    // itself: no engaging and standing by around the threshold, for a game
+    // held at half the refresh rate throughout. Only a runtime at half rate,
+    // or inline cycles that keep starting late, still pass frames through
+    // for their hold.
+    int auto_lowest_multiplier{1};
     // Use the game's depth (on by default). Off, Frame Generation works
     // without it and the bridges keep a bridged game's depth to itself, as
     // before 0.20.1: no copy, and no multithread protection turned on for it.

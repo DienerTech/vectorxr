@@ -733,6 +733,10 @@ export interface FrameGenSettings {
   // when on, like extendHeadPrediction; not in the app's pages until it has
   // flown (set in settings.json), but kept when the app saves.
   edgeFill?: boolean
+  // Fixed Auto's lowest rate (stored only when set): with '2x' Auto keeps
+  // generating even while the game could hold the refresh rate by itself.
+  // Read by the layer only while frameMultiplier is 'auto'.
+  autoLowestRate?: '2x'
   // Use the game's depth. Present only when off (absent means on, here and
   // in the layer). Off, Frame Generation works without depth and the bridges
   // keep a Direct3D 11 or Vulkan game's depth to themselves; the bridges read
@@ -796,6 +800,7 @@ const frameGenSettingKeys = [
   'motionLimitPercent',
   'extendHeadPrediction',
   'edgeFill',
+  'autoLowestRate',
   'useGameDepth',
 ] as const satisfies readonly (keyof FrameGenSettings)[]
 
@@ -824,6 +829,7 @@ export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSett
     // the defaults (new profiles copy the defaults' value when created).
     ...(source.extendHeadPrediction === true ? { extendHeadPrediction: true } : {}),
     ...(source.edgeFill === true ? { edgeFill: true } : {}),
+    ...(source.autoLowestRate === '2x' ? { autoLowestRate: '2x' as const } : {}),
     ...(source.useGameDepth === false ? { useGameDepth: false } : {}),
   }
 }

@@ -125,6 +125,7 @@
     "format": "{mode} · {rate} · {motion}",
     "dynamic": "Dinâmico",
     "fixedAuto": "Fixo automático",
+    "fixedAutoLowest": "Fixo automático, 2x ou mais",
     "fixed": "Fixo {multiplier}"
   },
   "howItWorks": {
@@ -179,8 +180,10 @@
         "description": "Mantém o jogo em uma fração definida da taxa de atualização para um ritmo uniforme e preenche o resto com quadros gerados."
       },
       "fixedRate": "Taxa fixa",
+      "lowestRate": "Taxa mínima",
       "rates": {
         "auto": "Escolhe 2x, 3x ou 4x conforme o jogo precisa e não gera nada enquanto o jogo acompanha sozinho.",
+        "autoLowest": "Escolhe 2x, 3x ou 4x conforme o jogo precisa e continua gerando em 2x mesmo quando o jogo acompanharia sozinho.",
         "x2": "O jogo roda a até 1/2 da taxa de atualização, como 45 fps em 90 Hz. Abaixo disso, o ritmo fica menos uniforme.",
         "x3": "O jogo roda a até 1/3 da taxa de atualização, como 30 fps em 90 Hz. Abaixo disso, o ritmo fica menos uniforme.",
         "x4": "O jogo roda a até 1/4 da taxa de atualização, como 22,5 fps em 90 Hz. O que tem mais artefatos; para os jogos mais pesados."
