@@ -336,6 +336,11 @@ struct FrameGenAutoRules {
     // carries that cost. Two seconds: Star Citizen makes its theater mode's
     // two swapchains two seconds apart, and its VR mode's six over three.
     std::chrono::milliseconds swapchain_settle{2000};
+    // ...and only while the game has been making or destroying them for no
+    // longer than this without a break of swapchain_settle: one that does so
+    // every second or two (an overlay's quad, a resize) would otherwise have
+    // its late frames left out for as long as it does.
+    std::chrono::milliseconds swapchain_churn_max{8000};
     // VECTORXR_FRAMEGEN_AUTO_ENGAGE_BELOW: at full rate Auto also engages
     // once the game runs below Dynamic's share of the refresh rate for
     // Dynamic's time (FrameGenDynamicPolicy::engage_below, engage_after), not
@@ -356,6 +361,11 @@ struct FrameGenAutoRules {
     // reach_memory_max: then a probe tells again.
     std::chrono::milliseconds reach_memory{300000};
     std::chrono::milliseconds reach_memory_max{1200000};
+    // Full rate that failed as Auto engaged is remembered at the load
+    // measured once the game is held: with both measures, or after this long
+    // with the game's own time alone (a backend that reports no capture
+    // times).
+    std::chrono::milliseconds reach_measure_wait{3000};
     // The early probe: the larger measure within this share of the lower
     // step's frame time (and the two together within a probe's reach).
     double early_inside{0.65};
@@ -1727,6 +1737,9 @@ class FrameGenPresenter {
     // When the game last made or destroyed a swapchain (TrackSwapchain,
     // ForgetSwapchain).
     std::chrono::steady_clock::time_point swapchain_changed_at_{};
+    // ...and since when it has done so without a break of
+    // FrameGenAutoRules::swapchain_settle (swapchain_churn_max).
+    std::chrono::steady_clock::time_point swapchain_churn_since_{};
     // Auto never steps above this again in the session once video memory
     // ran near its budget: each step up allocates more output images.
     std::uint32_t auto_memory_ceiling_{4};

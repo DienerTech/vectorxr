@@ -652,14 +652,21 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thre
             uint index : SV_GroupIndex) {
     const int2 extent = MatchExtent();
     const int2 origin = int2(group.xy) * 8 - FG_SEARCH_APRON;
+    const int radius = min(int(g.options.x), FG_SEARCH_MAX_RADIUS);
+    // Only as far as this radius reaches: the tile is sized for the research
+    // radius (FG_SEARCH_MAX_RADIUS), and loading all of it at the default one
+    // read 36x36 texels a group where 24x24 are used.
+    const int unused = FG_SEARCH_MAX_RADIUS - max(radius, 0);
     for (uint t = index; t < FG_SEARCH_TILE * FG_SEARCH_TILE; t += 64 * FG_SEARCH_SLICES) {
-        g_tile[t] = PreviousLuma(origin + int2(t % FG_SEARCH_TILE, t / FG_SEARCH_TILE), extent);
+        const int2 p = int2(t % FG_SEARCH_TILE, t / FG_SEARCH_TILE);
+        if (all(p >= unused) && all(p < FG_SEARCH_TILE - unused)) {
+            g_tile[t] = PreviousLuma(origin + p, extent);
+        }
     }
     GroupMemoryBarrierWithGroupSync();
     const bool active = all(id.xy < g.size.xy);
     const int2 cell = int2(id.xy);
     const int slice = int(thread.z);
-    const int radius = min(int(g.options.x), FG_SEARCH_MAX_RADIUS);
     const int side = 2 * radius + 1;
     const int candidates = radius >= 0 ? side * side : 0;
     float best_cost = 0.0;

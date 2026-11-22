@@ -1213,6 +1213,7 @@ void FrameGenPresenter::Stop() {
     probe_early_ = false;
     auto_early_blocked_ = false;
     swapchain_changed_at_ = {};
+    swapchain_churn_since_ = {};
     runtime_formats_.clear();
     frames_.clear();
     capture_targets_.clear();
@@ -2263,6 +2264,10 @@ void FrameGenPresenter::TrackSwapchain(XrSwapchain swapchain, std::int64_t forma
     // A game's vectors settle after it made a swapchain (G8).
     swapchain_created_at_ = Clock::now();
     swapchain_created_frame_ = totals_.app_frames;
+    if (swapchain_changed_at_ == Clock::time_point{} ||
+        *swapchain_created_at_ - swapchain_changed_at_ > auto_rules_.swapchain_settle) {
+        swapchain_churn_since_ = *swapchain_created_at_;
+    }
     swapchain_changed_at_ = *swapchain_created_at_;
 }
 
@@ -2277,7 +2282,12 @@ bool FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
     {
         std::scoped_lock lock(mutex_);
         if (swapchains_.erase(swapchain)) {
-            swapchain_changed_at_ = Clock::now();
+            const auto now = Clock::now();
+            if (swapchain_changed_at_ == Clock::time_point{} ||
+                now - swapchain_changed_at_ > auto_rules_.swapchain_settle) {
+                swapchain_churn_since_ = now;
+            }
+            swapchain_changed_at_ = now;
         }
         capture_targets_.erase(std::remove_if(capture_targets_.begin(), capture_targets_.end(),
                                               [&](const CaptureTarget& target) { return target.swapchain == swapchain; }),
@@ -3824,11 +3834,17 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             ? std::min<std::uint32_t>(static_cast<std::uint32_t>(settings_.auto_lowest_multiplier),
                                       std::max<std::uint32_t>(auto_memory_ceiling_, 2u))
             : 1u;
-    if (auto_multiplier_ < lowest && !(inline_hold_until_ && now < *inline_hold_until_) &&
+    // Nor near the video memory budget, where Auto does not engage either:
+    // generating needs output images.
+    if (auto_multiplier_ < lowest && !memory_pressure && !(inline_hold_until_ && now < *inline_hold_until_) &&
         !(runtime_halving_ && auto_halving_hold_until_ && now < *auto_halving_hold_until_)) {
         const std::uint32_t from = auto_multiplier_;
         auto_multiplier_ = lowest;
         probing_ = false;
+        // What full rate's probes kept (a probe under way, a failure not yet
+        // measured, a refusal logged) is not this engagement's.
+        auto_full_rate_unmeasured_.reset();
+        auto_veto_logged_ = false;
         multiplier_changed_at_ = now;
         last_app_end_ = now;
         cadence_.clear();
@@ -3863,6 +3879,10 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
                                                                                 : period;
     // A gap that is not the game's pace (as the lead and Dynamic take it).
     const bool after_pause = last_app_end_ && now - *last_app_end_ > std::chrono::nanoseconds(PauseLimitLocked());
+    // The game made or destroyed a swapchain, and has not been doing so for
+    // longer than a mode switch takes (swapchain_churn_max).
+    const bool swapchain_fresh = swapchain_changed_at_ != Clock::time_point{} && swapchain_changed_at_ <= now &&
+                                 now - swapchain_churn_since_ <= auto_rules_.swapchain_churn_max;
     if (last_app_end_ && now - multiplier_changed_at_ >= settle) {
         const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
         const auto expected =
@@ -3873,8 +3893,7 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         // late while the game made or destroyed a swapchain: a hitch's one
         // long frame among the few a second holds after it reads as a large
         // late share, and a mode switch's stall is not load.
-        const bool swapchain = swapchain_changed_at_ != Clock::time_point{} && swapchain_changed_at_ <= now &&
-                               swapchain_changed_at_ + auto_rules_.swapchain_settle >= *last_app_end_;
+        const bool swapchain = swapchain_fresh && swapchain_changed_at_ + auto_rules_.swapchain_settle >= *last_app_end_;
         // What a step up soon after is put down to (its cause).
         if (late && swapchain) {
             auto_disturbed_at_ = now;
@@ -3923,9 +3942,16 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     const std::uint32_t before = auto_multiplier_;
     // Full rate failed with the presenter thread stopped: the load it failed
     // at is the game's once it is held again and settled.
-    if (auto_full_rate_unmeasured_ && auto_multiplier_ >= 2 && compositor_running_) {
+    // With both measures: remembered on the game's own time alone, a failure
+    // would refuse probes whatever its GPU work did since. Only where none
+    // comes (reach_measure_wait) is the own time enough. Back at full rate
+    // before it was measured (a hold, a probe), there is nothing to measure:
+    // a later engagement is not this failure.
+    if (auto_full_rate_unmeasured_ && auto_multiplier_ < 2) {
+        auto_full_rate_unmeasured_.reset();
+    } else if (auto_full_rate_unmeasured_ && compositor_running_) {
         const AutoLoad load = AutoLoadLocked(16);
-        if (load.busy) {
+        if (load.busy && (load.pending || now - *auto_full_rate_unmeasured_ >= auto_rules_.reach_measure_wait)) {
             NoteFullRateFailureLocked(load, *auto_full_rate_unmeasured_);
             auto_full_rate_unmeasured_.reset();
         }
@@ -3963,7 +3989,14 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         const double refresh = 1e9 / static_cast<double>(cadence_period);
         const double limit = (probing_ ? dynamic_policy_.stay_above : dynamic_policy_.engage_below) * refresh;
         const double rate = RateSince(app_frames_, now, multiplier_changed_at_ + settle);
-        if (!judged || !(rate > 0.0 && rate < limit)) {
+        // Frames stalled around a swapchain change are left out of the late
+        // share (cadence_filter) and are not the game's rate either: it is
+        // judged again once they have left the second the rate is taken
+        // over. Without this a switch of modes at full rate read as a game
+        // below the refresh rate and engaged 2x.
+        const bool switching = auto_rules_.cadence_filter && swapchain_fresh &&
+                               now - swapchain_changed_at_ <= auto_rules_.swapchain_settle + std::chrono::seconds(1);
+        if (!judged || switching || !(rate > 0.0 && rate < limit)) {
             // (A probe's first frames carry its switch: its rate counts from
             // where its late share is judged.)
             auto_below_since_.reset();
@@ -4135,11 +4168,13 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
                 recheck = true;
                 probe_backoff_ = backoff_before;
                 probe_not_before_ = now + auto_rules_.transient_recheck;
+                // From the step that got the early check, not from every
+                // one: a game hitching every 25 s got it once and never again.
+                auto_transient_step_at_ = now;
             } else {
                 cause_text += " (the second within " +
                               Number(std::chrono::duration<double>(auto_rules_.transient_spacing).count(), 0) + " s)";
             }
-            auto_transient_step_at_ = now;
         }
         if (stepped_up && before == 1 && cause == AutoCause::kSustained && auto_rules_.reach) {
             // Full rate did not hold, engaged for or probed: at the load the
@@ -4284,13 +4319,21 @@ bool FrameGenPresenter::AutoFullRateVetoLocked(const AutoLoad& load, Clock::time
         // then cannot now. Lighter by the share, and by more than the
         // measures' own noise (a pending time of hundredths of a millisecond
         // halves and doubles from one second to the next).
-        const auto same = [&](double now_ms, double then_ms) {
-            return then_ms - now_ms <= std::max((1.0 - auto_rules_.reach_drop) * then_ms, kAutoLoadNoiseMs);
+        // Lighter: one measure down by that, and the other (where both have
+        // it) not up by as much. One down while the other rose is the load
+        // moving between the game's threads and its GPU, not coming down.
+        const auto margin = [&](double then_ms) {
+            return std::max((1.0 - auto_rules_.reach_drop) * then_ms, kAutoLoadNoiseMs);
         };
-        const bool own = same(load.own_ms, failure.load.own_ms);
-        const bool pending =
-            !(load.pending && failure.load.pending) || same(load.pending_ms, failure.load.pending_ms);
-        if (!(own && pending)) {
+        const double own_down = failure.load.own_ms - load.own_ms;
+        bool lighter = own_down > margin(failure.load.own_ms);
+        if (load.pending && failure.load.pending) {
+            const double pending_down = failure.load.pending_ms - load.pending_ms;
+            const bool own_up = -own_down > margin(failure.load.own_ms);
+            const bool pending_up = -pending_down > margin(failure.load.pending_ms);
+            lighter = (lighter && !pending_up) || (pending_down > margin(failure.load.pending_ms) && !own_up);
+        }
+        if (lighter) {
             continue;
         }
         if (text) {
@@ -4298,7 +4341,7 @@ bool FrameGenPresenter::AutoFullRateVetoLocked(const AutoLoad& load, Clock::time
                     Number(std::chrono::duration<double>(now - failure.at).count(), 0) + " s ago at " +
                     AutoLoadText(failure.load.busy, failure.load.own_ms, failure.load.pending, failure.load.pending_ms) + ", and it is " + AutoLoadText(load.busy, load.own_ms, load.pending, load.pending_ms) +
                     " now. No probe to full rate until either is below " +
-                    Number(auto_rules_.reach_drop * 100.0, 0) + "% of that (and 0.5 ms less), or for another " +
+                    Number(auto_rules_.reach_drop * 100.0, 0) + "% of that (and 0.5 ms less) with the other no higher, or for another " +
                     Number(std::chrono::duration<double>(memory - (now - failure.at)).count(), 0) + " s.";
         }
         return true;
