@@ -5,6 +5,7 @@ import GuideLink from '../GuideLink.vue'
 import BindingConflictWarnings from '../BindingConflictWarnings.vue'
 import BindingListEditor from '../BindingListEditor.vue'
 import OptionCards from '../OptionCards.vue'
+import SetupGuide from '../SetupGuide.vue'
 import { t } from '../../i18n/index.ts'
 import { defaultScreenshotFolder, openScreenshotFolder, pickFolder } from '../../lib/commands'
 import { errorText } from '../../lib/errors'
@@ -115,16 +116,15 @@ async function openFolder() {
         </div>
       </div>
 
-      <div class="rounded-[1rem] border p-4 text-sm leading-6 surface-panel-soft">
-        <p class="font-semibold tracking-tight" style="color: var(--app-text)">{{ t('utilities.screenshots.notes.title') }}</p>
-        <ul class="mt-2 list-disc space-y-1 pl-5 text-muted">
+      <SetupGuide :title="t('utilities.screenshots.notes.title')">
+        <ul class="list-disc space-y-1 pl-5 text-sm leading-6 text-muted">
           <li>{{ t('utilities.screenshots.notes.names') }}</li>
           <li>{{ t('utilities.screenshots.notes.api') }}</li>
           <li>{{ t('utilities.screenshots.notes.quadviews') }}</li>
           <li>{{ t('utilities.screenshots.notes.framegen') }}</li>
           <li>{{ t('utilities.screenshots.notes.feedback') }}</li>
         </ul>
-      </div>
+      </SetupGuide>
     </div>
   </article>
 </template>

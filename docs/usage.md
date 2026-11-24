@@ -37,8 +37,8 @@ The **Home** tab is a status dashboard:
   **OpenXR Utilities** holds On-Screen Display, OpenXR Layers, and **Capture & Mirror**.
   Expand Capture & Mirror for the **Screenshots** and **Stabilized Mirror** pages. Its dot turns green
   when a screenshot binding is assigned or a mirror profile is enabled.
-- **OpenXR Enhancements** has three groups. **Performance** holds Quadviews, Turbo, and Frame
-  Generation. **Look and Feel** holds Depth. **Control** holds Pivot. Select a group heading to
+- **OpenXR Enhancements** has two groups. **Performance** holds Quadviews, Turbo, and Frame
+  Generation. **Look and Feel** holds Depth and Pivot. Select a group heading to
   collapse or expand it; the sidebar remembers your choice. A green dot marks an enhancement with an
   enabled profile.
 - The bar at the bottom is the **save bar**. Changes you make are staged until you click **Save

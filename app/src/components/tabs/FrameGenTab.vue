@@ -40,8 +40,6 @@ const howItWorksOpen = ref(false)
 const bindingSubPageOpen = ref(false)
 let savedScrollTop = 0
 
-// Open the setup guide for first-time setup; returning users with an enabled profile start with it closed.
-const setupGuideOpen = !(props.config.modules.framegen.enabled || props.config.modules.framegen.profiles.some((profile) => profile.enabled))
 const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, framegen.value.toggleBindings))
 const turboWarnings = computed(() => configWarnings(props.config))
 
@@ -203,7 +201,7 @@ function settingsSummary(settings: FrameGenSettings) {
         {{ warning }}
       </div>
 
-      <SetupGuide class="mb-3" :title="t('framegen.setupGuide.title')" :summary="t('framegen.setupGuide.summary')" :open="setupGuideOpen">
+      <SetupGuide class="mb-3" :title="t('framegen.setupGuide.title')" :summary="t('framegen.setupGuide.summary')">
         <ol class="list-decimal space-y-1 pl-5 text-sm leading-6">
           <I18nText keypath="framegen.setupGuide.smoothing.body" tag="li">
             <template #label><strong>{{ t('framegen.setupGuide.smoothing.label') }}</strong></template>

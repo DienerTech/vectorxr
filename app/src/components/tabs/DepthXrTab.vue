@@ -27,8 +27,6 @@ defineEmits<{
 }>()
 
 const depthInfoOpen = ref(false)
-// Open the tuning guide for first-time setup; returning users with an enabled profile start with it closed.
-const setupGuideOpen = !(props.config.modules.depthxr.enabled || props.config.modules.depthxr.profiles.some((profile) => profile.enabled))
 const bindingsPageOpen = ref(false)
 const stereoDepthDisplayLimits = reactive(new WeakMap<DepthXRSettings, number>())
 const convergenceDisplayLimits = reactive(new WeakMap<DepthXRSettings, number>())
@@ -130,7 +128,7 @@ const profileWarnings = computed(() => {
         </button>
       </div>
 
-      <SetupGuide class="mb-3" :title="t('depth.tuningGuide.title')" :summary="t('depth.tuningGuide.summary')" :open="setupGuideOpen">
+      <SetupGuide class="mb-3" :title="t('depth.tuningGuide.title')" :summary="t('depth.tuningGuide.summary')">
       <div class="grid gap-3 lg:grid-cols-3" role="note" :aria-label="t('depth.tuningGuide.ariaLabel')">
         <div class="rounded-[1rem] border p-4 surface-panel-strong">
           <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">{{ t('depth.tuningGuide.scale.step') }}</p>

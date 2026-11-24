@@ -53,8 +53,7 @@ const sections: { label: MessageKey; groups: SidebarGroup[] }[] = [
     label: 'app.sidebar.enhancements',
     groups: [
       { id: 'performance', label: 'app.sidebar.performance', tabs: ['quadviews', 'turbo', 'framegen'] },
-      { id: 'look-and-feel', label: 'app.sidebar.lookAndFeel', tabs: ['depthxr'] },
-      { id: 'control', label: 'app.sidebar.control', tabs: ['pivotxr'] },
+      { id: 'look-and-feel', label: 'app.sidebar.lookAndFeel', tabs: ['depthxr', 'pivotxr'] },
     ],
   },
 ]

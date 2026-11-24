@@ -32,8 +32,6 @@ const mirror = computed(() => props.config.modules.mirror)
 const warnings = computed(() => savedBindingConflictWarnings(props.config, mirror.value.bindings))
 // Fill a monitor on with no monitor chosen: advice, never blocks Save.
 const fillWarnings = computed(() => mirrorWarnings(props.config))
-// Open the notes until the window is in use.
-const notesOpen = !(props.config.modules.mirror.enabled || props.config.modules.mirror.profiles.some((profile) => profile.enabled))
 const notes: Array<{ label: MessageKey; body: MessageKey }> = [
   { label: 'utilities.mirror.notes.obs.label', body: 'utilities.mirror.notes.obs.body' },
   { label: 'utilities.mirror.notes.separate.label', body: 'utilities.mirror.notes.separate.body' },
@@ -149,7 +147,7 @@ function settingsSummary(settings: MirrorSettings) {
     </div>
 
     <GuideLink guide="mirror" class="mb-3" />
-    <SetupGuide class="mb-3" :title="t('utilities.mirror.notes.title')" :summary="t('utilities.mirror.notes.summary')" :open="notesOpen">
+    <SetupGuide class="mb-3" :title="t('utilities.mirror.notes.title')" :summary="t('utilities.mirror.notes.summary')">
       <ul class="list-disc space-y-1 pl-5 text-sm leading-6">
         <I18nText v-for="note in notes" :key="note.body" :keypath="note.body" tag="li">
           <template #label><strong>{{ t(note.label) }}</strong></template>

@@ -1,7 +1,6 @@
 <script setup lang="ts">
-// Collapsible first-run guidance for a module page. Pages open it while the
-// module is unused and close it once a profile is enabled, keeping the
-// controls near the top for returning users.
+// Collapsible guidance for a page (setup steps, "Good to know" notes). It
+// starts collapsed so the controls stay near the top; `open` expands it.
 import { t } from '../i18n/index.ts'
 
 defineProps<{ title?: string; summary?: string; open?: boolean }>()
