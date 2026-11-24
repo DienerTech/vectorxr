@@ -12741,8 +12741,9 @@ void TestAutoHalvingHoldRunsOut() {
     });
     const auto stood_down = std::chrono::steady_clock::now();
     FrameGenStatus status = presenter.Status();
-    Check(status.runtime_halving && status.full_rate && status.multiplier == 1,
-          name + ": reported, Auto goes back to full rate (" + std::to_string(status.multiplier) + "x)");
+    Check(status.runtime_halving && status.full_rate && status.multiplier == 1 && status.halving_retry_s > 0.0,
+          name + ": reported, Auto goes back to full rate with retry countdown (" +
+              std::to_string(status.multiplier) + "x, retry=" + std::to_string(status.halving_retry_s) + "s)");
     runtime.throttled = false;
     bool engaged = false;
     bool cleared = false;

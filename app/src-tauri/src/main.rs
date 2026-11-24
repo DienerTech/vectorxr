@@ -1835,6 +1835,15 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
                 .unwrap_or_else(|| "New Profile".into());
         }
     }
+    // Numeric Frame Generation fields are clamped so hand-edited values do not
+    // cause the layer to reject the whole config file.
+    let framegen = &mut config.modules.framegen;
+    framegen.defaults.artifact_suppression = framegen.defaults.artifact_suppression.clamp(0, 100);
+    framegen.defaults.motion_limit_percent = framegen.defaults.motion_limit_percent.clamp(2, 25);
+    for profile in &mut framegen.profiles {
+        profile.settings.artifact_suppression = profile.settings.artifact_suppression.clamp(0, 100);
+        profile.settings.motion_limit_percent = profile.settings.motion_limit_percent.clamp(2, 25);
+    }
     normalize_mirror_settings(&mut config.modules.mirror.defaults);
     for profile in &mut config.modules.mirror.profiles {
         normalize_mirror_settings(&mut profile.settings);
@@ -4084,6 +4093,26 @@ mod tests {
         assert!(super::prepare_screenshot_folder(&file).is_err());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn framegen_numbers_are_clamped_on_save() {
+        let config: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
+            "applications": [{ "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }],
+            "modules": {
+                "framegen": {
+                    "defaults": { "artifactSuppression": 150, "motionLimitPercent": 50 },
+                    "profiles": [{ "name": "DCS", "applicationIds": ["dcs"], "settings": { "artifactSuppression": -10, "motionLimitPercent": 0 } }]
+                }
+            }
+        }))
+        .unwrap();
+        let saved = serde_json::to_value(super::normalize_config(config)).unwrap();
+        let framegen = &saved["modules"]["framegen"];
+        assert_eq!(framegen["defaults"]["artifactSuppression"], 100);
+        assert_eq!(framegen["defaults"]["motionLimitPercent"], 25);
+        assert_eq!(framegen["profiles"][0]["settings"]["artifactSuppression"], 0);
+        assert_eq!(framegen["profiles"][0]["settings"]["motionLimitPercent"], 2);
     }
 
     #[test]

@@ -4554,6 +4554,18 @@ bool ValidationCanary(Game& game) {
 } // namespace
 
 int main(int argc, char** argv) {
+    // Isolate LOCALAPPDATA so device-lost engine motion tests never write into
+    // the developer's or user's real %LOCALAPPDATA%\VectorXR folder.
+    {
+        wchar_t exe_path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+        const std::filesystem::path app_data =
+            std::filesystem::path(exe_path).parent_path() / "vulkan_bridge_tests_appdata";
+        std::error_code ignored;
+        std::filesystem::create_directories(app_data, ignored);
+        _wputenv_s(L"LOCALAPPDATA", app_data.c_str());
+        SetEnvironmentVariableW(L"LOCALAPPDATA", app_data.c_str());
+    }
     const char* no_stall = std::getenv("FG_TEST_NO_STALL");
     const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
     // `binary`: the cases run in both semaphore modes run in binary mode only.

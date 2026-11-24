@@ -11580,6 +11580,10 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.runtime_name = runtime_name_;
     if (status.standby && runtime_halving_ && dynamic_reason_ == kHalvingStandDown && now < dynamic_hold_until_) {
         status.halving_retry_s = std::chrono::duration<double>(dynamic_hold_until_ - now).count();
+    } else if (status.full_rate && !status.standby && runtime_halving_ && auto_halving_hold_until_ &&
+               now < *auto_halving_hold_until_) {
+        // Auto held at full rate for the same reason tries again when its hold runs out.
+        status.halving_retry_s = std::chrono::duration<double>(*auto_halving_hold_until_ - now).count();
     }
     status.runtime_clock_displaced = clock_displaced_;
     status.runtime_clock_displacements = totals_.clock_displacements;
