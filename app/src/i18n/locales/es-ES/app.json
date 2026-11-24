@@ -35,6 +35,10 @@
       "label": "Guías",
       "subtitle": "Cómo funciona cada función y cómo activarla y desactivarla"
     },
+    "supporters": {
+      "label": "Mecenas",
+      "subtitle": "Agradecimientos a los miembros de Patreon"
+    },
     "about": {
       "label": "Acerca de",
       "subtitle": "Información del proyecto, notas de la versión y soporte"
@@ -84,6 +88,15 @@
     "checkFailed": "No se pueden buscar actualizaciones en este momento.",
     "httpFailed": "La búsqueda de actualizaciones en GitHub falló con HTTP {status}",
     "invalidRelease": "GitHub no devolvió una versión válida"
+  },
+  "supporters": {
+    "communityTitle": "Gracias a nuestra comunidad",
+    "communityThanks": "Gracias a quienes han donado a través de Ko-fi, han señalado fallos, han enviado informes o han propuesto mejoras.",
+    "forumsThanks": "Un agradecimiento especial a la comunidad de DCS en los foros de Eagle Dynamics por la cálida acogida que dio a una versión preliminar de VectorXR 0.11.",
+    "thanks": "Gracias a quienes nos apoyan en Patreon y hacen posible que sigamos mejorando VectorXR.",
+    "empty": "Todavía no se ha publicado ningún nombre.",
+    "unavailable": "La lista de mecenas no está disponible. Prueba a actualizarla dentro de un momento.",
+    "cached": "La lista actual no está disponible. Se muestra la última lista guardada."
   },
   "sidebar": {
     "appSettings": "Configuración de la aplicación",

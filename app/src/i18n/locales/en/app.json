@@ -35,6 +35,10 @@
       "label": "Guides",
       "subtitle": "How each feature works, and how to turn it on and off"
     },
+    "supporters": {
+      "label": "Supporters",
+      "subtitle": "Patreon acknowledgements"
+    },
     "about": {
       "label": "About",
       "subtitle": "Project info, patch notes, and support"
@@ -84,6 +88,15 @@
     "checkFailed": "Unable to check for updates right now.",
     "httpFailed": "GitHub update check failed with HTTP {status}",
     "invalidRelease": "GitHub did not return a valid release"
+  },
+  "supporters": {
+    "thanks": "Thank you to the Patreon members who make it possible to keep improving VectorXR.",
+    "communityTitle": "Thank you to our community",
+    "communityThanks": "Thank you to everyone who donated through Ko-fi, flagged bugs, sent in reports, or suggested improvements.",
+    "forumsThanks": "A special thank you to the DCS community on the Eagle Dynamics forums for giving an early build of VectorXR 0.11 such a warm welcome.",
+    "empty": "No supporter names have been published yet.",
+    "unavailable": "The supporter list is unavailable. Try refreshing in a moment.",
+    "cached": "The latest list is unavailable. Showing the last saved list."
   },
   "sidebar": {
     "appSettings": "App Settings",

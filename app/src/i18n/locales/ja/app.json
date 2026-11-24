@@ -34,6 +34,10 @@
       "label": "ガイド",
       "subtitle": "各機能のしくみと、オンとオフの切り替え方"
     },
+    "supporters": {
+      "label": "サポーター",
+      "subtitle": "Patreon メンバーへの謝辞"
+    },
     "about": {
       "label": "バージョン情報",
       "subtitle": "プロジェクト情報、パッチ ノート、サポート"
@@ -83,6 +87,15 @@
     "checkFailed": "現在、更新を確認できません。",
     "httpFailed": "GitHub の更新確認が HTTP {status} で失敗しました",
     "invalidRelease": "GitHub から有効なリリースが返されませんでした"
+  },
+  "supporters": {
+    "thanks": "Patreon でのご支援のおかげで、VectorXR の改善を続けることができます。ありがとうございます。",
+    "communityTitle": "コミュニティの皆さまに感謝を込めて",
+    "communityThanks": "Ko-fi を通じてご寄付くださった方、バグを知らせてくださった方、レポートや改善案をお寄せくださった方、皆さまに感謝します。",
+    "forumsThanks": "とりわけ、Eagle Dynamics のフォーラムで VectorXR 0.11 の初期ビルドを温かく迎えてくださった DCS コミュニティの皆さまに、心より感謝します。",
+    "empty": "サポーターのお名前はまだ公開されていません。",
+    "unavailable": "サポーター一覧を読み込めません。しばらくしてから更新してください。",
+    "cached": "最新の一覧を読み込めないため、前回保存した一覧を表示しています。"
   },
   "sidebar": {
     "appSettings": "アプリの設定",

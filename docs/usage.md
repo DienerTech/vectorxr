@@ -32,7 +32,7 @@ The **Home** tab is a status dashboard:
   Use **View Health** for details or **Export Debug** to collect a support ZIP.
 - The **Active overview** lists each enhancement's default profile and enabled custom profiles.
   An Active badge describes the saved configuration, not whether a VR application is running.
-- In the sidebar, **App Settings** holds Home, Guides, Settings, **Applications**, and About.
+- In the sidebar, **App Settings** holds Home, Guides, Settings, **Applications**, Supporters, and About.
   Expand **Applications** for **Registry** and **Discovery**.
   **OpenXR Utilities** holds On-Screen Display, OpenXR Layers, and **Capture & Mirror**.
   Expand Capture & Mirror for the **Screenshots** and **Stabilized Mirror** pages. Its dot turns green
@@ -1452,6 +1452,10 @@ slices are already unlocked and changes apply without an extra prompt.
 Quad-Views-Foveated with VectorXR Pivot instead, keep the VectorXR Quadviews profile off and order
 Quad-Views-Foveated **above VectorXR**. Official release builds are signed by **DienerTech LLC**;
 local source builds may be unsigned. Signature status is shown after requesting verification.
+
+## Supporters
+
+Open **Supporters** in the sidebar to see the Patreon members credited for helping fund VectorXR, under their Patreon tier and with the name they chose to share, followed by a thank-you to the wider community. Select **Refresh** for the latest published names. Offline, the app can show its last saved list for up to seven days.
 
 ## Updates
 

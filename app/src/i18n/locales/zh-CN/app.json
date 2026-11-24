@@ -34,6 +34,10 @@
       "label": "指南",
       "subtitle": "每项功能如何运作，以及如何开启和关闭"
     },
+    "supporters": {
+      "label": "支持者",
+      "subtitle": "致谢 Patreon 会员"
+    },
     "about": {
       "label": "关于",
       "subtitle": "项目信息、补丁说明和支持"
@@ -83,6 +87,15 @@
     "checkFailed": "目前无法检查更新。",
     "httpFailed": "GitHub 更新检查失败，HTTP {status}",
     "invalidRelease": "GitHub 未返回有效的版本"
+  },
+  "supporters": {
+    "thanks": "感谢 Patreon 会员的支持，让我们能够持续改进 VectorXR。",
+    "communityTitle": "感谢社区的每一位成员",
+    "communityThanks": "感谢每一位通过 Ko-fi 捐款、指出程序错误、提交报告或提出改进建议的朋友。",
+    "forumsThanks": "特别感谢 Eagle Dynamics 论坛上的 DCS 社区。VectorXR 0.11 的早期版本在那里受到了大家的热烈欢迎。",
+    "empty": "尚未公布支持者姓名。",
+    "unavailable": "暂时无法获取支持者名单，请稍后刷新。",
+    "cached": "暂时无法获取最新名单，以下为上次保存的名单。"
   },
   "sidebar": {
     "appSettings": "应用设置",

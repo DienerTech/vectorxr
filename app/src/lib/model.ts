@@ -9,7 +9,7 @@ import { formatList, t } from '../i18n/index.ts'
 import { isLocaleCode, type LocaleCode } from '../i18n/locales.ts'
 import { en } from '../i18n/locales/en/index.ts'
 
-export type AppTab = 'osd' | 'home' | 'core' | 'registry' | 'discovery' | 'layers' | 'guides' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo' | 'framegen' | 'screenshots' | 'mirror'
+export type AppTab = 'osd' | 'home' | 'core' | 'registry' | 'discovery' | 'layers' | 'guides' | 'supporters' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo' | 'framegen' | 'screenshots' | 'mirror'
 // Option values are key names saved in chords; labels are read when shown, so
 // a change of language applies.
 export const keyboardBindingKeyGroups = [

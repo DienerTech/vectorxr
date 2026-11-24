@@ -11,6 +11,7 @@ import PatchNotesModal from './components/PatchNotesModal.vue'
 import SidebarNav from './components/SidebarNav.vue'
 import StickySaveBar from './components/StickySaveBar.vue'
 import AboutTab from './components/tabs/AboutTab.vue'
+import SupportersTab from './components/tabs/SupportersTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import OsdTab from './components/tabs/OsdTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
@@ -192,6 +193,12 @@ const tabs = computed(() => [
     id: 'guides' as const,
     label: t('app.tabs.guides.label'),
     subtitle: t('app.tabs.guides.subtitle'),
+    status: '',
+  },
+  {
+    id: 'supporters' as const,
+    label: t('app.tabs.supporters.label'),
+    subtitle: t('app.tabs.supporters.subtitle'),
     status: '',
   },
   {
@@ -660,6 +667,7 @@ async function confirmResetConfig() {
           @status="store.state.status = $event"
         />
         <GuidesTab v-else-if="store.state.activeTab === 'guides'" @navigate="store.setActiveTab" />
+        <SupportersTab v-else-if="store.state.activeTab === 'supporters'" />
         <AboutTab
           v-else-if="store.state.activeTab === 'about'"
           :latest-patch="latestPatch"

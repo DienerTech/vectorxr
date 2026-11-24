@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "feed": {
+    "repository": "DienerTech/vectorxr",
+    "branch": "supporters",
+    "path": "supporters.json"
+  },
+  "sections": ["Sponsors", "Backers"],
+  "tiers": [
+    { "title": "Supporter", "section": null },
+    { "title": "Backer", "section": "Backers" },
+    { "title": "Sponsor", "section": "Sponsors" },
+    { "title": "Ultra Sponsor", "section": "Sponsors" }
+  ]
+}

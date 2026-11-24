@@ -39,7 +39,7 @@ const sections: { label: MessageKey; groups: SidebarGroup[] }[] = [
     groups: [
       { id: 'app-settings', tabs: ['home', 'guides', 'core'] },
       { id: 'applications', label: 'app.sidebar.applications', tabs: ['registry', 'discovery'] },
-      { id: 'app-info', tabs: ['about'] },
+      { id: 'app-info', tabs: ['supporters', 'about'] },
     ],
   },
   {
