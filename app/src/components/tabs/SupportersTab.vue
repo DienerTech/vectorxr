@@ -16,7 +16,7 @@ onMounted(() => { void supporters.load() })
     <div class="flex flex-wrap items-start justify-between gap-4">
       <div>
         <h2 id="supporters-title" class="text-2xl font-semibold tracking-tight">{{ t('app.tabs.supporters.label') }}</h2>
-        <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">{{ t('app.supporters.thanks') }}</p>
+        <p v-if="supporters.state.status !== 'unpublished'" class="mt-2 max-w-3xl text-sm leading-6 text-muted">{{ t('app.supporters.thanks') }}</p>
       </div>
       <button
         class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-sm font-medium"
