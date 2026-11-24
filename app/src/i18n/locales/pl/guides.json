@@ -7,6 +7,8 @@
     "tools": "Wyświetlanie i narzędzia"
   },
   "badges": {
+    "new": "Nowość",
+    "beta": "Beta",
     "experimental": "Eksperymentalne"
   },
   "back": "Wszystkie poradniki",

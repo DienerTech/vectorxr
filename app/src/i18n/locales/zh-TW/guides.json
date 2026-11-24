@@ -7,6 +7,8 @@
     "tools": "顯示與工具"
   },
   "badges": {
+    "new": "新",
+    "beta": "測試版",
     "experimental": "實驗性"
   },
   "back": "所有指南",

@@ -16,6 +16,17 @@ test('every guide has its text, and every text its guide', () => {
   }
 })
 
+test('every badge a guide shows has its text in every language', () => {
+  const locales = readdirSync(new URL('../src/i18n/locales/', import.meta.url), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+  for (const locale of locales) {
+    const badges = JSON.parse(readFileSync(new URL(`../src/i18n/locales/${locale}/guides.json`, import.meta.url), 'utf8')).badges ?? {}
+    for (const guide of guides) {
+      for (const badge of guide.badges) assert.ok(badges[badge]?.trim(), `${locale}: guides.badges.${badge} (${guide.id})`)
+    }
+  }
+})
+
 // The timing table in walkthroughs.ts, read from its source (the module itself needs the bundler).
 const timing = Object.fromEntries(
   [...walkthroughsSource.matchAll(/^\s*(\w+): \{ bpm: (\d+), bars: \[([\d, ]+)\] \},$/gm)].map((match) => [match[1], { bpm: Number(match[2]), bars: match[3].split(',').map(Number) }]),

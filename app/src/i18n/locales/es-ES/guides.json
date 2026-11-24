@@ -7,6 +7,8 @@
     "tools": "Pantalla y herramientas"
   },
   "badges": {
+    "new": "Nuevo",
+    "beta": "Beta",
     "experimental": "Experimental"
   },
   "back": "Todas las guías",
