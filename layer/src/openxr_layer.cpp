@@ -9,6 +9,7 @@
 #include <deque>
 #include <cstdint>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -22,6 +23,7 @@
 
 #include "depthxr/config_path.h"
 #include "depthxr/crt_failure_report.h"
+#include "depthxr/d3d11_predication.h"
 #include "depthxr/effects.h"
 #include "depthxr/framegen_plan.h"
 #include "depthxr/game_context_lock.h"
@@ -6140,6 +6142,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 
     ID3D11DeviceContext* context = d3d11_quadviews_compositor_.context;
     ID3DDeviceContextState* application_context_state = nullptr;
+    std::optional<ScopedD3D11Unpredicated> unpredicated;
     const bool use_context_state = d3d11_quadviews_compositor_.context1 &&
                                    d3d11_quadviews_compositor_.layer_context_state;
     if (use_context_state) {
@@ -6147,6 +6150,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             d3d11_quadviews_compositor_.layer_context_state, &application_context_state);
         context->ClearState();
     } else {
+        unpredicated.emplace(context);
         context->OMGetRenderTargets(
             D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, saved.render_targets, &saved.depth_stencil);
         context->VSGetShader(&saved.vertex_shader, nullptr, nullptr);
@@ -6165,6 +6169,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             SafeRelease(application_context_state);
             return;
         }
+        unpredicated.reset();
         context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, saved.render_targets, saved.depth_stencil);
         context->VSSetShader(saved.vertex_shader, nullptr, 0);
         context->PSSetShader(saved.pixel_shader, nullptr, 0);
@@ -18179,6 +18184,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         D3D11_PRIMITIVE_TOPOLOGY topology{D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED};
     } saved;
     ID3DDeviceContextState* application_context_state = nullptr;
+    std::optional<ScopedD3D11Unpredicated> unpredicated;
     const bool use_context_state = d3d11_quadviews_compositor_.context1 &&
                                    d3d11_quadviews_compositor_.layer_context_state;
     if (use_context_state) {
@@ -18186,6 +18192,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
             d3d11_quadviews_compositor_.layer_context_state, &application_context_state);
         context->ClearState();
     } else {
+        unpredicated.emplace(context);
         context->OMGetRenderTargets(
             D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, saved.render_targets, &saved.depth_stencil);
         context->VSGetShader(&saved.vertex_shader, nullptr, nullptr);
@@ -18325,6 +18332,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         d3d11_quadviews_compositor_.context1->SwapDeviceContextState(application_context_state, nullptr);
         SafeRelease(application_context_state);
     } else {
+        unpredicated.reset();
         context->OMSetRenderTargets(
             D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, saved.render_targets, saved.depth_stencil);
         context->VSSetShader(saved.vertex_shader, nullptr, 0);

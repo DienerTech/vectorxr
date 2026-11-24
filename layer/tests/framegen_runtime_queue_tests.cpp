@@ -498,6 +498,63 @@ void ShownLayerPipelinedWaitTest(ID3D12Device* device) {
     std::cout << "Shown layer waits pipelined behind unfinished releases passed\n";
 }
 
+// While a shown layer's Wait has unlocked `calls` to wait on the CPU for the
+// oldest held-back release, a concurrent Acquire on the same full swapchain
+// enters its own bounded CPU wait. Each waiter takes its own event handle so
+// neither races on lazy handle creation nor steals the other's wake-up.
+void ShownLayerConcurrentWaitAcquireTest(ID3D12Device* device) {
+    Harness h(device);
+    h.Frame(kUi, false);
+    h.Submit({kUi}, true);
+    h.HoldGame(1);
+    h.Frame(kUi, false);
+    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    std::uint32_t image = 0;
+    Check(h.substitution.Acquire(kUi, 3, kCalls, &acquire, &image) == XR_SUCCESS && image == 2,
+          "concurrent test: third acquire");
+    Check(h.substitution.Wait(kUi, false, kCalls, &wait) == XR_SUCCESS, "concurrent test: third wait");
+    Check(h.substitution.Release(kUi, false, kCalls, &release) == XR_SUCCESS, "concurrent test: third release");
+    Check(h.substitution.Acquire(kUi, 3, kCalls, &acquire, &image) == XR_SUCCESS && image == 0,
+          "concurrent test: fourth acquire");
+    std::atomic<bool> waiter_done{false};
+    std::chrono::nanoseconds waiter_elapsed{};
+    std::thread waiter([&] {
+        const auto t0 = std::chrono::steady_clock::now();
+        Check(h.substitution.Wait(kUi, false, kCalls, &wait) == XR_SUCCESS, "concurrent test: unlocked shown wait");
+        waiter_elapsed = std::chrono::steady_clock::now() - t0;
+        waiter_done.store(true);
+    });
+    for (int i = 0; i < 2000 && h.substitution.ShownLayers().cpu_waits == 0; ++i) {
+        Sleep(1);
+    }
+    Check(h.substitution.ShownLayers().cpu_waits == 1, "concurrent test: shown wait entered CPU wait");
+    std::chrono::nanoseconds acquirer_elapsed{};
+    std::thread acquirer([&] {
+        std::uint32_t next_image = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        Check(h.substitution.Acquire(kUi, 3, kCalls, &acquire, &next_image) == XR_SUCCESS,
+              "concurrent test: overlapping acquire on full swapchain");
+        acquirer_elapsed = std::chrono::steady_clock::now() - t0;
+    });
+    Sleep(15);
+    h.FinishGame(1);
+    waiter.join();
+    acquirer.join();
+    Check(waiter_elapsed < std::chrono::milliseconds(85) && acquirer_elapsed < std::chrono::milliseconds(85),
+          "concurrent waits both wake on fence signal without stealing each other's event (" +
+              std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(waiter_elapsed).count()) + " ms, " +
+              std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(acquirer_elapsed).count()) + " ms)");
+    Check(h.substitution.Release(kUi, false, kCalls, &release) == XR_SUCCESS &&
+              h.substitution.Wait(kUi, false, kCalls, &wait) == XR_SUCCESS &&
+              h.substitution.Release(kUi, false, kCalls, &release) == XR_SUCCESS,
+          "concurrent test: remaining acquisitions drain cleanly");
+    h.Submit({kUi}, true);
+    Check(h.runtime_marker.Reaches(h.runtime_queue), "concurrent test: runtime queue advances cleanly");
+    std::cout << "Concurrent shown-layer wait and acquire event isolation passed\n";
+}
+
 // The game's queue waits for the runtime's after an image wait only where
 // the runtime may have queued work for the image. On PimaxXR and Virtual
 // Desktop's runtime that is only before each image's first wait (barriers at
@@ -655,6 +712,7 @@ int main(int argc, char** argv) {
         PassThroughUnderLoadTest(device.Get());
         FirstShownImageTest(device.Get());
         ShownLayerPipelinedWaitTest(device.Get());
+        ShownLayerConcurrentWaitAcquireTest(device.Get());
         AcquireExhaustionTest(device.Get());
         AcquireStaleEventTest(device.Get());
         DeferredCallRetryTest(device.Get());

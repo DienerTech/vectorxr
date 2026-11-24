@@ -572,10 +572,6 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     gpu_stalled_ = false; // the last session's stalled work went with its swapchains
     started_at_ = Clock::now();
     interpolate_flow_env_.reset();
-    if (const char* hardware = std::getenv("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE");
-        hardware && std::string(hardware) == "1") {
-        interpolate_flow_env_ = FrameGenInterpolateFlow::kHardware;
-    }
     interpolate_flow_selected_.reset();
     interpolate_flow_hardware_selected_ = false;
     interpolate_flow_hardware_ = true;
@@ -605,16 +601,16 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // (0) or one or two game frames before it, or always (from the start).
     gpu_gate_enabled_ = true;
     gpu_gate_armed_ = false;
-    {
-        const char* stale = std::getenv("VECTORXR_FRAMEGEN_STALE_MOTION");
-        stale_motion_enabled_ = !(stale && std::string(stale) == "0");
-    }
     // Engine motion vectors (research, stage 0): their census while the
     // space-warp probe takes the game's structures over. The research
     // switches may come from framegen-research.txt too (ReadResearchSwitch),
     // the backend's among them: this session's are told from here.
     ResetResearchFileSwitches();
     const std::uint64_t research_reads = ResearchFileReads();
+    if (ReadResearchSwitch("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE") == "1") {
+        interpolate_flow_env_ = FrameGenInterpolateFlow::kHardware;
+    }
+    stale_motion_enabled_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_STALE_MOTION") != "0";
     // A positive-control experiment: accept completed hardware vectors late
     // for a finite period, then normally again. GPU work and its fences run
     // unchanged. Inert unless explicitly set; never a GPU stall experiment.
@@ -825,8 +821,8 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // VECTORXR_FRAMEGEN_LEAD=events: the lead steps by hitch events
     // (FrameGenLeadPolicy::hitch_events), for comparisons in flight; off by
     // default until flown.
-    const char* lead_setting = std::getenv("VECTORXR_FRAMEGEN_LEAD");
-    const bool event_lead = lead_setting && std::string(lead_setting) == "events";
+    const std::optional<std::string> lead_setting = ReadResearchSwitch("VECTORXR_FRAMEGEN_LEAD");
+    const bool event_lead = lead_setting == "events";
     if (event_lead) {
         lead_policy_.hitch_events = true;
     }
@@ -834,21 +830,20 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // follows the history ring or not (FrameGenLeadPolicy::ring_ceiling,
     // whose default this outranks), for comparisons in flight.
     ring_ceiling_env_.reset();
-    if (const char* ceiling = std::getenv("VECTORXR_FRAMEGEN_LEAD_CEILING"); ceiling) {
-        const std::string setting = ceiling;
-        if (setting == "ring" || setting == "on") {
+    if (const std::optional<std::string> ceiling = ReadResearchSwitch("VECTORXR_FRAMEGEN_LEAD_CEILING")) {
+        if (*ceiling == "ring" || *ceiling == "on") {
             ring_ceiling_env_ = true;
-        } else if (setting == "off") {
+        } else if (*ceiling == "off") {
             ring_ceiling_env_ = false;
         }
     }
     // VECTORXR_FRAMEGEN_END_HOLD=off: frames go to a runtime that holds them
     // in xrEndFrame as soon as they are written (RuntimeEnd).
-    const char* end_hold = std::getenv("VECTORXR_FRAMEGEN_END_HOLD");
-    runtime_end_hold_ = !(end_hold && std::string(end_hold) == "off");
+    runtime_end_hold_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_END_HOLD") != "off";
     std::string gpu_gate_setting;
-    if (const char* ahead = std::getenv("VECTORXR_FRAMEGEN_GPU_AHEAD"); ahead && *ahead) {
-        gpu_gate_setting = ahead;
+    if (const std::optional<std::string> ahead = ReadResearchSwitch("VECTORXR_FRAMEGEN_GPU_AHEAD");
+        ahead && !ahead->empty()) {
+        gpu_gate_setting = *ahead;
         if (gpu_gate_setting == "off") {
             gpu_gate_enabled_ = false;
         } else if (gpu_gate_setting == "always") {
@@ -11257,6 +11252,7 @@ void FrameGenPresenter::CompositorLoop() {
                 content = kept->copy;
                 jit_started_ = true;
                 jit_content_ = content;
+                jit_content_time_ = kept->time;
                 jit_views_ = std::move(written_views);
                 jit_exact_ = write.exact;
                 jit_shown_as_is_ = false;
@@ -11273,6 +11269,7 @@ void FrameGenPresenter::CompositorLoop() {
                 // layers shown around it.
                 path = 4;
                 content = jit_content_;
+                jit_content_time_ = source->time;
                 jit_views_ = std::move(written_views);
                 jit_exact_ = false;
                 jit_shown_as_is_ = false;

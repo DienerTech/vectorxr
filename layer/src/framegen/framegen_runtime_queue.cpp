@@ -85,12 +85,52 @@ struct FrameGenQueueSubstitution::Impl {
         std::vector<std::uint64_t> released_as;
         // Images whose first wait ordered the game's queue (AfterWait; under `mutex`).
         std::vector<bool> ordered;
-        HANDLE event{nullptr};
-        ~Swapchain() {
-            if (event) CloseHandle(event);
-        }
     };
     std::unordered_map<XrSwapchain, std::shared_ptr<Swapchain>> swapchains;
+    std::vector<HANDLE> events; // reusable auto-reset fence wait events (under `mutex`)
+
+    ~Impl() {
+        for (const HANDLE event : events) {
+            if (event) CloseHandle(event);
+        }
+    }
+
+    HANDLE TakeEvent() {
+        {
+            std::scoped_lock lock(mutex);
+            if (!events.empty()) {
+                const HANDLE event = events.back();
+                events.pop_back();
+                ResetEvent(event);
+                return event;
+            }
+        }
+        return CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    }
+
+    void ReturnEvent(HANDLE event) {
+        if (!event) return;
+        std::scoped_lock lock(mutex);
+        events.push_back(event);
+    }
+
+    // Bounded CPU wait on `released` reaching `value`, using a dedicated event
+    // so concurrent unlocked waits cannot race on or steal an auto-reset signal.
+    // An event returned after a timeout may still fire for its earlier value;
+    // the completion-value loop ignores stale wake-ups.
+    void WaitForRelease(UINT64 value) {
+        const HANDLE event = TakeEvent();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kReleaseWaitMs);
+        if (event && SUCCEEDED(released->SetEventOnCompletion(value, event))) {
+            for (auto now = std::chrono::steady_clock::now();
+                 released->GetCompletedValue() < value && now < deadline;
+                 now = std::chrono::steady_clock::now()) {
+                const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+                WaitForSingleObject(event, static_cast<DWORD>(left.count()));
+            }
+        }
+        ReturnEvent(event);
+    }
 
     std::shared_ptr<Swapchain> Find(XrSwapchain swapchain, bool create) {
         std::scoped_lock lock(mutex);
@@ -166,18 +206,7 @@ struct FrameGenQueueSubstitution::Impl {
                 if (until == Until::kAcquire) {
                     // The ring is full. Give the oldest release a bounded
                     // chance to finish before ordering the runtime queue.
-                    // The event may still be set for an earlier value:
-                    // waited for until this one has passed.
-                    if (!state.event) state.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kReleaseWaitMs);
-                    if (state.event && SUCCEEDED(released->SetEventOnCompletion(call.value, state.event))) {
-                        for (auto now = std::chrono::steady_clock::now();
-                             released->GetCompletedValue() < call.value && now < deadline;
-                             now = std::chrono::steady_clock::now()) {
-                            const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
-                            WaitForSingleObject(state.event, static_cast<DWORD>(left.count()));
-                        }
-                    }
+                    WaitForRelease(call.value);
                     done = released->GetCompletedValue();
                 }
                 if (call.value > done && FAILED(runtime->Wait(released.Get(), call.value))) {
@@ -425,19 +454,8 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
             const UINT64 value = image == Impl::kUnknownImage ? newest->value : oldest->value;
             if (Impl::NewestShown(*state, image) && value > impl_->released->GetCompletedValue()) {
                 ++impl_->shown_cpu_waits;
-                if (!state->event) state->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
                 calls.unlock();
-                // The event may still be set for an earlier value: waited
-                // for until this one has passed.
-                const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kReleaseWaitMs);
-                if (state->event && SUCCEEDED(impl_->released->SetEventOnCompletion(value, state->event))) {
-                    for (auto now = std::chrono::steady_clock::now();
-                         impl_->released->GetCompletedValue() < value && now < until;
-                         now = std::chrono::steady_clock::now()) {
-                        const auto left = std::chrono::ceil<std::chrono::milliseconds>(until - now);
-                        WaitForSingleObject(state->event, static_cast<DWORD>(left.count()));
-                    }
-                }
+                impl_->WaitForRelease(value);
                 calls.lock();
                 impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
             }
