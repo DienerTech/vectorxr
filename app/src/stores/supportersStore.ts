@@ -19,7 +19,9 @@ export interface SupporterTier {
   names: string[]
 }
 
-type Status = 'idle' | 'loading' | 'ready' | 'cached' | 'unavailable'
+// 'unpublished': GitHub answered, but no supporter list is published at the
+// feed's address (HTTP 404 or 410): nothing to credit yet, not a failure.
+type Status = 'idle' | 'loading' | 'ready' | 'cached' | 'unavailable' | 'unpublished'
 type CacheStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 
 function publicLabel(value: unknown): string | null {
@@ -120,6 +122,7 @@ export function createSupportersStore(
         if (controller.signal.aborted) throw new Error('Request timed out')
         if (response.status === 404 || response.status === 410) {
           discard()
+          state.status = 'unpublished'
           nextAttempt = Date.now() + retryInterval
           return
         }

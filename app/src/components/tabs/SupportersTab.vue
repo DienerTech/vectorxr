@@ -29,8 +29,9 @@ onMounted(() => { void supporters.load() })
     <div role="status" class="text-sm leading-6 text-muted">
       <p v-if="loading" class="mt-4">{{ t('common.loading') }}</p>
       <p v-else-if="supporters.state.status === 'unavailable'" class="mt-4">{{ t('app.supporters.unavailable') }}</p>
+      <p v-else-if="supporters.state.status === 'unpublished'" class="mt-4">{{ t('app.supporters.comingSoon') }}</p>
       <p v-else-if="supporters.state.status === 'cached'" class="mt-4">{{ t('app.supporters.cached') }}</p>
-      <p v-if="!loading && supporters.state.status !== 'unavailable' && !tiers.length" class="mt-4">{{ t('app.supporters.empty') }}</p>
+      <p v-if="!loading && supporters.state.status !== 'unavailable' && supporters.state.status !== 'unpublished' && !tiers.length" class="mt-4">{{ t('app.supporters.empty') }}</p>
     </div>
 
     <section

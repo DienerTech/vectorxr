@@ -61,5 +61,7 @@ agreed to publish, in this shape:
 
 The app fetches it when **Supporters** is opened or **Refresh** is selected, reuses a successful fetch
 for an hour, and can show the last list for up to seven days offline. An empty list replaces the
-previous credits at once; a deleted file (HTTP 404 or 410) clears the saved list. Names are shown as
+previous credits at once. While no file is published (HTTP 404 or 410, including before the
+`supporters` branch exists), the page says the Patreon is coming soon and clears any saved list;
+only a failed request says the list is unavailable. Names are shown as
 text only, up to 80 characters, with control and direction-override characters refused.

@@ -126,7 +126,8 @@ test('temporary HTTP errors keep credits while a removed feed clears even the on
     assert.equal(store.state.status, 'cached')
     status = removed
     await store.load(true)
-    assert.equal(store.state.status, 'unavailable')
+    // GitHub answered: nothing is published there, which is not a failure.
+    assert.equal(store.state.status, 'unpublished')
     assert.deepEqual(store.state.tiers, [])
     assert.equal(records.size, 0)
     const restart = createSupportersStore(offline, storage)
