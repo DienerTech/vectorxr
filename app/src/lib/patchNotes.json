@@ -3,7 +3,7 @@
     "version": "0.21.0",
     "date": "2026-11-19",
     "title": "Screenshots, Stabilized Mirror, and App Navigation",
-    "summary": "Capture full-resolution screenshots, open a stabilized desktop mirror, and find settings faster in the reorganized sidebar. This release also improves Frame Generation's Auto rate, shader flow, and Turbo recovery.",
+    "summary": "Capture full-resolution screenshots, open a stabilized desktop mirror, find settings faster in the reorganized sidebar, and meet the new Supporters page. This release also improves Frame Generation's Auto rate and shader flow, and fixes several stability issues.",
     "items": [
       {
         "html": "<strong>Capture & Mirror</strong>",
@@ -18,7 +18,9 @@
         "html": "<strong>App</strong>",
         "items": [
           "<strong>Grouped sidebar.</strong> Capture & Mirror has separate pages for each utility. Registry and Discovery have their own pages under Applications. The sidebar remembers which groups you collapse.",
-          "<strong>Guides.</strong> Both capture utilities include walkthroughs with optional music."
+          "<strong>Guides.</strong> Both capture utilities include walkthroughs with optional music.",
+          "<strong>Supporters.</strong> A new page thanks the Patreon members who help fund VectorXR, by tier and with the names they chose to share, and the wider community for its donations, reports and ideas.",
+          "Turbo's experimental \"Sample prediction timing at wait entry\" option is removed: it had no effect. Profiles that set it still load."
         ]
       },
       {
@@ -33,11 +35,14 @@
       {
         "html": "<strong>Fixes</strong>",
         "items": [
-          "Frame Generation retries output images that the runtime is slow to return and presents complete image sets. Deferred swapchain work is bounded during game image acquisition.",
-          "Turbo preserves timing across mode handoffs. The Quadviews overlay stays off when the game began the session in stereo.",
+          "Leaving and re-entering VR (for example in MSFS 2024) no longer hangs when the runtime is still holding a frame wait.",
+          "Frame Generation uses less video memory in games that send no depth, such as DCS. It retries output images the runtime is slow to return and presents complete image sets. On SteamVR with Pimax headsets, Auto now engages for games running between refresh steps (for example 51 fps at 90 Hz).",
+          "Fixed rare device losses and stalls in the Direct3D 11 and Vulkan bridges and a race between waits on the Direct3D 12 queue. On AMD and Intel GPUs the bridges check that images can be shared before they are used.",
+          "VectorXR no longer breaks other OpenXR layers (such as DLSS mods) that look up functions before an instance exists.",
+          "Turbo preserves timing across mode handoffs, and the experimental frame cap now averages its target. The Quadviews overlay stays off when the game began the session in stereo.",
+          "Quadviews focus sharpening no longer clips HDR highlights. Extend head prediction now gives the same head position to every request for one display time.",
           "Direct3D 11 rendering and copies run independently of the game’s conditional rendering state. Imported network paths for screenshots and binding sounds are cleared and listed in the preview.",
-          "Settings the app does not recognize, such as those a newer version wrote, are kept when you save. The log names the VectorXR edition and version at the top.",
-          "Fixed a race between waits on the Direct3D 12 queue, and the app keeps Artifact suppression and Motion limit in range when it saves, so a hand-edited value cannot make the layer reject the settings file."
+          "Settings the app does not recognize, such as those a newer version wrote, are kept when you save, and the app keeps Artifact suppression and Motion limit in range so a hand-edited value cannot make the layer reject the settings file. The log names the VectorXR edition and version at the top."
         ]
       }
     ]
