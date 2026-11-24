@@ -96,6 +96,7 @@
     "forumsThanks": "A special thank you to the DCS community on the Eagle Dynamics forums for giving an early build of VectorXR 0.11 such a warm welcome.",
     "empty": "No supporter names have been published yet.",
     "comingSoon": "VectorXR's Patreon is coming Soon™. Members who join will be thanked here.",
+    "joinFirst": "No supporters are credited yet. Join on Patreon to be among the first thanked here.",
     "unavailable": "The supporter list is unavailable. Try refreshing in a moment.",
     "cached": "The latest list is unavailable. Showing the last saved list."
   },
@@ -107,7 +108,6 @@
     "enhancements": "OpenXR Enhancements",
     "performance": "Performance",
     "lookAndFeel": "Look and Feel",
-    "control": "Control",
     "suiteOff": "VectorXR runtime effects are off",
     "moduleTitle": "{subtitle}. {status}",
     "saveHint": "Save Changes to apply settings. Each enhancement notes which changes need a VR application restart.",

@@ -95,6 +95,7 @@
     "forumsThanks": "特別感謝 Eagle Dynamics 論壇上的 DCS 社群。VectorXR 0.11 的早期版本在那裡受到大家的熱烈歡迎。",
     "empty": "尚未公布支持者姓名。",
     "comingSoon": "VectorXR 的 Patreon 即將推出（Soon™）。加入的成員將在此獲得致謝。",
+    "joinFirst": "目前還沒有致謝名單。加入 Patreon，成為第一批在此獲得致謝的支持者。",
     "unavailable": "暫時無法取得支持者名單，請稍後重新整理。",
     "cached": "暫時無法取得最新名單，以下顯示上次儲存的名單。"
   },
@@ -106,7 +107,6 @@
     "enhancements": "OpenXR 增強功能",
     "performance": "效能",
     "lookAndFeel": "視覺效果",
-    "control": "操控",
     "suiteOff": "VectorXR 執行階段效果已關閉",
     "moduleTitle": "{subtitle}。{status}",
     "saveHint": "按「儲存變更」以套用設定。每項增強功能都會註明哪些變更需要重新啟動 VR 應用程式。",

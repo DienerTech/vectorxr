@@ -96,6 +96,7 @@
     "thanks": "Merci aux membres Patreon qui nous permettent de continuer à améliorer VectorXR.",
     "empty": "Aucun nom n’a encore été publié.",
     "comingSoon": "Le Patreon de VectorXR arrive Soon™. Les membres qui le rejoindront seront remerciés ici.",
+    "joinFirst": "Aucun soutien n'est encore crédité. Rejoignez-nous sur Patreon pour être parmi les premiers remerciés ici.",
     "unavailable": "La liste des soutiens est indisponible. Réessayez de l’actualiser dans un instant.",
     "cached": "La liste actuelle est indisponible. La dernière version enregistrée est affichée."
   },
@@ -107,7 +108,6 @@
     "enhancements": "Améliorations OpenXR",
     "performance": "Performances",
     "lookAndFeel": "Rendu visuel",
-    "control": "Commandes",
     "suiteOff": "Les effets d'exécution de VectorXR sont désactivés",
     "moduleTitle": "{subtitle}. {status}",
     "saveHint": "Enregistrez les modifications pour appliquer les paramètres. Chaque amélioration indique quelles modifications nécessitent un redémarrage de l'application VR.",

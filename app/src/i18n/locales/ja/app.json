@@ -95,6 +95,7 @@
     "forumsThanks": "とりわけ、Eagle Dynamics のフォーラムで VectorXR 0.11 の初期ビルドを温かく迎えてくださった DCS コミュニティの皆さまに、心より感謝します。",
     "empty": "サポーターのお名前はまだ公開されていません。",
     "comingSoon": "VectorXR の Patreon は Soon™ 公開予定です。参加してくださった方々のお名前をここに掲載します。",
+    "joinFirst": "まだ掲載されているサポーターはいません。Patreon に参加して、ここで最初に感謝される一人になってください。",
     "unavailable": "サポーター一覧を読み込めません。しばらくしてから更新してください。",
     "cached": "最新の一覧を読み込めないため、前回保存した一覧を表示しています。"
   },
@@ -106,7 +107,6 @@
     "enhancements": "OpenXR 拡張機能",
     "performance": "パフォーマンス",
     "lookAndFeel": "見え方",
-    "control": "操作",
     "suiteOff": "VectorXR のランタイム効果はオフです",
     "moduleTitle": "{subtitle}。{status}",
     "saveHint": "設定を適用するには [変更を保存] をクリックしてください。VR アプリケーションの再起動が必要な変更は、各拡張機能に記載されています。",

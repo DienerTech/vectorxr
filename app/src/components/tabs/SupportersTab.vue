@@ -2,13 +2,22 @@
 import { computed, onMounted } from 'vue'
 
 import { t } from '../../i18n/index.ts'
+import { useCommunityStore } from '../../stores/communityStore'
 import { useSupportersStore } from '../../stores/supportersStore.ts'
+import PatreonPromo from '../PatreonPromo.vue'
 
 const supporters = useSupportersStore()
+// The Patreon promotion's switch (community.json): while it is on, no
+// published list means no one is credited yet, not that the Patreon is coming.
+const community = useCommunityStore()
+const patreonLive = computed(() => community.state.patreon !== null)
 const tiers = computed(() => supporters.state.tiers.filter((tier) => tier.names.length > 0))
 const loading = computed(() => supporters.state.status === 'idle' || supporters.state.status === 'loading')
 
-onMounted(() => { void supporters.load() })
+onMounted(() => {
+  void supporters.load()
+  void community.load()
+})
 </script>
 
 <template>
@@ -29,10 +38,13 @@ onMounted(() => { void supporters.load() })
     <div role="status" class="text-sm leading-6 text-muted">
       <p v-if="loading" class="mt-4">{{ t('common.loading') }}</p>
       <p v-else-if="supporters.state.status === 'unavailable'" class="mt-4">{{ t('app.supporters.unavailable') }}</p>
-      <p v-else-if="supporters.state.status === 'unpublished'" class="mt-4">{{ t('app.supporters.comingSoon') }}</p>
+      <p v-else-if="supporters.state.status === 'unpublished'" class="mt-4">
+        {{ patreonLive ? t('app.supporters.joinFirst') : t('app.supporters.comingSoon') }}
+      </p>
       <p v-else-if="supporters.state.status === 'cached'" class="mt-4">{{ t('app.supporters.cached') }}</p>
       <p v-if="!loading && supporters.state.status !== 'unavailable' && supporters.state.status !== 'unpublished' && !tiers.length" class="mt-4">{{ t('app.supporters.empty') }}</p>
     </div>
+    <PatreonPromo v-if="supporters.state.status === 'unpublished'" class="mt-1" />
 
     <section
       v-for="(tier, index) in tiers"
