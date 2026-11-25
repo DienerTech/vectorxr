@@ -38,7 +38,7 @@
       "api": "Działa w grach korzystających z D3D11 i D3D12. Gry korzystające z Vulkan nie są jeszcze obsługiwane.",
       "quadviews": "Z Quadviews zrzut ekranu to pełny obraz, który VectorXR składa dla każdego oka.",
       "framegen": "Z Frame Generation zrzut ekranu to zawsze klatka wyrenderowana przez grę, nigdy klatka wygenerowana.",
-      "feedback": "Jeśli dźwięk przypisania jest włączony, zostanie odtworzony po zapisaniu zrzutu. W dzienniku znajdzie się nazwa każdego pliku."
+      "feedback": "Jeśli dźwięk przypisania jest włączony, zostanie odtworzony po zapisaniu zrzutu. Jeśli zrzutu nie da się wykonać, zamiast niego zabrzmi dźwięk wyłączenia, a dziennik poda przyczynę. W dzienniku znajdzie się nazwa każdego pliku."
     }
   },
   "mirror": {
@@ -51,6 +51,10 @@
       "obs": {
         "label": "Transmisja i nagrywanie.",
         "body": "{label} W OBS dodaj źródło „Przechwytywanie okna” i wybierz okno, którego nazwa zaczyna się od „VectorXR Mirror”, a po niej następuje nazwa gry."
+      },
+      "hdr": {
+        "label": "Monitory HDR.",
+        "body": "{label} Jeśli lustro jest na monitorze HDR, a gra działa w SDR, obraz nagrywany przez OBS może wyglądać na wyblakły lub zbyt jasny. Zaznacz „Wymuś SDR” (Force SDR) we właściwościach źródła „Przechwytywanie okna”."
       },
       "separate": {
         "label": "Dlaczego osobne okno.",

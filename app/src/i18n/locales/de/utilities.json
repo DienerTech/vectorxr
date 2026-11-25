@@ -38,7 +38,7 @@
       "api": "Funktioniert in Spielen mit D3D11 und D3D12. Spiele mit Vulkan werden noch nicht unterstützt.",
       "quadviews": "Mit Quadviews zeigt der Screenshot das vollständige Bild, das VectorXR für jedes Auge zusammensetzt.",
       "framegen": "Mit Frame Generation ist der Screenshot immer ein vom Spiel gerendertes Bild, nie ein generiertes.",
-      "feedback": "Ist der Ton einer Belegung eingeschaltet, erklingt er, sobald der Screenshot gespeichert ist. Das Protokoll nennt jede Datei."
+      "feedback": "Ist der Ton einer Belegung eingeschaltet, erklingt er, sobald der Screenshot gespeichert ist. Kann kein Screenshot aufgenommen werden, erklingt stattdessen der Aus-Ton und das Protokoll nennt den Grund. Das Protokoll nennt jede Datei."
     }
   },
   "mirror": {
@@ -51,6 +51,10 @@
       "obs": {
         "label": "Streamen und Aufnehmen.",
         "body": "{label} Füge in OBS eine Quelle „Fensteraufnahme“ hinzu und wähle das Fenster, dessen Name mit „VectorXR Mirror“ beginnt, gefolgt vom Namen des Spiels."
+      },
+      "hdr": {
+        "label": "HDR-Monitore.",
+        "body": "{label} Liegt der Spiegel auf einem HDR-Monitor und das Spiel ist SDR, kann das Bild in der OBS-Aufnahme blass oder zu hell wirken. Aktiviere in den Eigenschaften der Quelle „Fensteraufnahme“ die Option „SDR erzwingen“ (Force SDR)."
       },
       "separate": {
         "label": "Warum ein eigenes Fenster.",

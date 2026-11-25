@@ -1386,8 +1386,10 @@ profile, and a **custom profile** sets it for the games you assign to it.
   while a game runs. Its sounds play as for other bindings.
 
 In OBS, add a **Window Capture** source and choose the window whose name starts with
-`VectorXR Mirror`, followed by the game's program name. Changes to the settings apply to a
-running game as soon as you save.
+`VectorXR Mirror`, followed by the game's program name. If the mirror is on an HDR monitor
+and the game is SDR, the recording can look washed out or too bright: tick **Force SDR** in
+the Window Capture source's properties. Changes to the settings apply to a running game as
+soon as you save.
 
 Good to know:
 

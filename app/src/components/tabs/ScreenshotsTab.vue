@@ -68,6 +68,15 @@ async function openFolder() {
     <h2 class="text-2xl font-semibold tracking-tight">{{ t('utilities.screenshots.heading') }}</h2>
     <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">{{ t('utilities.screenshots.intro') }}</p>
     <GuideLink guide="screenshots" class="mt-2" />
+    <SetupGuide class="mt-3" :title="t('utilities.screenshots.notes.title')">
+      <ul class="list-disc space-y-1 pl-5 text-sm leading-6 text-muted">
+        <li>{{ t('utilities.screenshots.notes.names') }}</li>
+        <li>{{ t('utilities.screenshots.notes.api') }}</li>
+        <li>{{ t('utilities.screenshots.notes.quadviews') }}</li>
+        <li>{{ t('utilities.screenshots.notes.framegen') }}</li>
+        <li>{{ t('utilities.screenshots.notes.feedback') }}</li>
+      </ul>
+    </SetupGuide>
 
     <div class="mt-4 space-y-4">
       <BindingConflictWarnings :warnings="warnings" />
@@ -115,16 +124,6 @@ async function openFolder() {
           </div>
         </div>
       </div>
-
-      <SetupGuide :title="t('utilities.screenshots.notes.title')">
-        <ul class="list-disc space-y-1 pl-5 text-sm leading-6 text-muted">
-          <li>{{ t('utilities.screenshots.notes.names') }}</li>
-          <li>{{ t('utilities.screenshots.notes.api') }}</li>
-          <li>{{ t('utilities.screenshots.notes.quadviews') }}</li>
-          <li>{{ t('utilities.screenshots.notes.framegen') }}</li>
-          <li>{{ t('utilities.screenshots.notes.feedback') }}</li>
-        </ul>
-      </SetupGuide>
     </div>
   </article>
 </template>

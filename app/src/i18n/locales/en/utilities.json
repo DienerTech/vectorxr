@@ -38,7 +38,7 @@
       "api": "Works in D3D11 and D3D12 games. Vulkan games are not supported yet.",
       "quadviews": "With Quadviews, the screenshot is the complete image VectorXR puts together for each eye.",
       "framegen": "With Frame Generation, the screenshot is always a frame the game rendered, never a generated one.",
-      "feedback": "When a binding's sound is on, it plays as the screenshot is saved. The log names each file."
+      "feedback": "When a binding's sound is on, it plays as the screenshot is saved. If no screenshot can be taken, the off sound plays instead and the log says why. The log names each file."
     }
   },
   "mirror": {
@@ -51,6 +51,10 @@
       "obs": {
         "label": "Streaming and recording.",
         "body": "{label} In OBS, add a Window Capture source and pick the window whose name starts with \"VectorXR Mirror\", followed by the game's name."
+      },
+      "hdr": {
+        "label": "HDR monitors.",
+        "body": "{label} If the mirror is on an HDR monitor and the game is SDR, the picture OBS records can look washed out or too bright. Tick Force SDR in the Window Capture source's properties."
       },
       "separate": {
         "label": "Why a separate window.",

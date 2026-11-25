@@ -34,6 +34,7 @@ const warnings = computed(() => savedBindingConflictWarnings(props.config, mirro
 const fillWarnings = computed(() => mirrorWarnings(props.config))
 const notes: Array<{ label: MessageKey; body: MessageKey }> = [
   { label: 'utilities.mirror.notes.obs.label', body: 'utilities.mirror.notes.obs.body' },
+  { label: 'utilities.mirror.notes.hdr.label', body: 'utilities.mirror.notes.hdr.body' },
   { label: 'utilities.mirror.notes.separate.label', body: 'utilities.mirror.notes.separate.body' },
   { label: 'utilities.mirror.notes.support.label', body: 'utilities.mirror.notes.support.body' },
   { label: 'utilities.mirror.notes.smoothing.label', body: 'utilities.mirror.notes.smoothing.body' },

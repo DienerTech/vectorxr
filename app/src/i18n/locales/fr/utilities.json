@@ -38,7 +38,7 @@
       "api": "Fonctionne dans les jeux D3D11 et D3D12. Les jeux Vulkan ne sont pas encore pris en charge.",
       "quadviews": "Avec Quadviews, la capture est l'image complète que VectorXR assemble pour chaque œil.",
       "framegen": "Avec Frame Generation, la capture est toujours une image rendue par le jeu, jamais une image générée.",
-      "feedback": "Si le son d'une affectation est activé, il est joué quand la capture est enregistrée. Le journal indique le nom de chaque fichier."
+      "feedback": "Si le son d'une affectation est activé, il est joué quand la capture est enregistrée. Si aucune capture ne peut être prise, c'est le son de désactivation qui est joué et le journal en indique la raison. Le journal indique le nom de chaque fichier."
     }
   },
   "mirror": {
@@ -51,6 +51,10 @@
       "obs": {
         "label": "Diffusion et enregistrement.",
         "body": "{label} Dans OBS, ajoutez une source « Capture de fenêtre » et choisissez la fenêtre dont le nom commence par « VectorXR Mirror », suivi du nom du jeu."
+      },
+      "hdr": {
+        "label": "Écrans HDR.",
+        "body": "{label} Si le miroir est sur un écran HDR et que le jeu est en SDR, l'image enregistrée par OBS peut paraître délavée ou trop claire. Cochez « Forcer le SDR » (Force SDR) dans les propriétés de la source « Capture de fenêtre »."
       },
       "separate": {
         "label": "Pourquoi une fenêtre à part.",

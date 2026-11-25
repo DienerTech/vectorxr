@@ -38,7 +38,7 @@
       "api": "适用于 D3D11 和 D3D12 游戏。暂不支持 Vulkan 游戏。",
       "quadviews": "使用 Quadviews 时，截图是 VectorXR 为每只眼睛合成的完整图像。",
       "framegen": "使用 Frame Generation 时，截图始终是游戏渲染的帧，而不是生成的帧。",
-      "feedback": "如果绑定的声音已开启，保存截图时会播放该声音。日志会记录每个文件的名称。"
+      "feedback": "如果绑定的声音已开启，保存截图时会播放该声音。如果无法截图，则会改为播放关闭声音，日志会说明原因。日志会记录每个文件的名称。"
     }
   },
   "mirror": {
@@ -51,6 +51,10 @@
       "obs": {
         "label": "直播和录制。",
         "body": "{label} 在 OBS 中添加“窗口采集”来源，然后选择名称以“VectorXR Mirror”开头、后面跟着游戏名称的窗口。"
+      },
+      "hdr": {
+        "label": "HDR 显示器。",
+        "body": "{label} 如果镜像窗口位于 HDR 显示器上而游戏是 SDR，OBS 录制的画面可能显得发白或过亮。请在“窗口采集”来源的属性中勾选“强制 SDR”（Force SDR）。"
       },
       "separate": {
         "label": "为什么是单独的窗口。",
