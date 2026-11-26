@@ -1162,6 +1162,9 @@ void TestFillsAMonitor() {
     depthxr::MirrorSettings settings;
     settings.smoothing = 0.0;
     settings.fill_monitor = true;
+    // A window smaller than any desktop it runs on: Windows keeps a window to
+    // about the screen's size, and CI runners have a 1024x768 one.
+    settings.width = 960;
     settings.monitor = name;
     FakeGpu* gpu = Peer::Start(settings);
     const HWND foreground = GetForegroundWindow();
@@ -1191,12 +1194,12 @@ void TestFillsAMonitor() {
     std::uint32_t width = 0, height = 0;
     Expect(WaitFor([&] {
                Peer::PictureSize(width, height);
-               return width == 1280 && height == 720;
+               return width == 960 && height == 540;
            }),
            "A monitor that is not connected leaves the mirror a window");
     gpu->mirror_draws.clear();
     Frames(game, 5, false);
-    Expect(Peer::Window() == window && !gpu->mirror_draws.empty() && gpu->mirror_draws.back().draw.width == 1280 &&
+    Expect(Peer::Window() == window && !gpu->mirror_draws.empty() && gpu->mirror_draws.back().draw.width == 960 &&
                gpu->mirror_draws.back().draw.homography == PlainCrop(game.views[0].fov, settings),
            "The same window goes on at the settings' size and aspect");
     Expect(Peer::Reason().find("in a window (monitor ") != std::string::npos &&
@@ -1217,11 +1220,11 @@ void TestFillsAMonitor() {
     Frames(game, 1, false);
     Expect(WaitFor([&] {
                Peer::PictureSize(width, height);
-               return width == 1280 && height == 720;
+               return width == 960 && height == 540;
            }),
            "With no monitor chosen the mirror is a window");
     Frames(game, 3, false);
-    Expect(Peer::Reason() == "showing the left eye at 1280x720 in a window (no monitor is chosen to fill)",
+    Expect(Peer::Reason() == "showing the left eye at 960x540 in a window (no monitor is chosen to fill)",
            "The status says no monitor is chosen: " + Peer::Reason());
 }
 
