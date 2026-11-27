@@ -6545,13 +6545,19 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     // The layer logged no error of its own (the test's reads of the log are logged as errors). In
     // software, the GPU-bound frames above can outlast Frame Generation's wait for its own work of
     // three frames before (100 ms): it skips that frame, as after a GPU stall (a hosted CI runner's
-    // WARP, 2026-10-13). On a GPU that is an error here too.
+    // WARP, 2026-10-13). The first generated frames' work, which the stand-in's xrEndFrame reads
+    // back on the runtime's queue, can also keep the presenter thread in that xrEndFrame past its
+    // 2 s watchdog (a hosted runner's WARP, 2026-11-26: 2 s for the first, 260-350 ms for the next).
+    // Only there: a presenter held in the layer's own code is still an error. On a GPU each is an
+    // error here too.
     const std::size_t software_waits =
         SoftwareAdapter(game)
             ? Count(log, "[error] Frame Generation could not generate a frame: D3D12 Frame Generation GPU work did "
                          "not finish in time") +
                   Count(log, "[error] Frame Generation could not generate a frame: D3D12 Frame Generation synthesis "
-                             "did not finish in time")
+                             "did not finish in time") +
+                  Count(log, "[error] Frame Generation: the presenter thread has published no refresh for 2 s "
+                             "(presenter thread submitting a generated frame, in the runtime's xrEndFrame")
             : 0;
     Check(Count(log, "[error]") == Count(log, "[error] D3D11 bridge layer tests: log read") + software_waits,
           "the layer logged no error" + LayerErrors(log));

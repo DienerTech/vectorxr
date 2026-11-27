@@ -14314,7 +14314,19 @@ void TestAutoEngagesBelowRefresh() {
         Check(std::abs(first.auto_step_up_below_fps - grid_hz * (scenario.engage_below ? 0.9 : 0.8)) < 0.01,
               name + ": at full rate the status says it steps up below " +
                   std::to_string(first.auto_step_up_below_fps) + " fps");
-        RunTicks(*game.app, 6000ms, scenario.ticks, [&](const XrFrameState&) {
+        // A frame of one refresh does 4 ms of work, not the refresh less
+        // 3 ms (RunTicks): on a loaded machine (a CI runner) those came in
+        // late too, over 30% of frames in all, and Auto engaged for lateness
+        // before the game's rate was judged. Only the frame of two refreshes
+        // is late.
+        std::vector<std::chrono::microseconds> work;
+        for (const int tick : scenario.ticks) {
+            work.push_back(tick == 1 ? std::chrono::microseconds(4ms)
+                                     : std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::nanoseconds(tick * game.app->runtime.period)) -
+                                           3ms);
+        }
+        RunWork(*game.app, 6000ms, work, [&](const XrFrameState&) {
             const std::uint32_t multiplier = game.Multiplier();
             highest = std::max(highest, multiplier);
             if (!engaged && multiplier >= 2) engaged = std::chrono::steady_clock::now();
