@@ -282,6 +282,66 @@ export async function pickSoundFile(): Promise<string | null> {
   return typeof selected === 'string' ? selected : null
 }
 
+// A folder chosen in the system's folder picker; null when it is canceled.
+export async function pickFolder(startIn?: string): Promise<string | null> {
+  if (!tauriAvailable()) {
+    return null
+  }
+
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const selected = await open({ multiple: false, directory: true, defaultPath: startIn || undefined })
+
+  return typeof selected === 'string' ? selected : null
+}
+
+// One of the PC's monitors. `name` is its device name as the system reports
+// it (\\.\DISPLAY2), which is what the stabilized mirror window's settings save.
+export interface MonitorInfo {
+  name: string
+  width: number
+  height: number
+  primary: boolean
+}
+
+// The PC's monitors, for the stabilized mirror window's Fill a monitor
+// picker. Empty outside the desktop app.
+export async function listMonitors(): Promise<MonitorInfo[]> {
+  if (!tauriAvailable()) {
+    return []
+  }
+
+  const { availableMonitors, primaryMonitor } = await import('@tauri-apps/api/window')
+  const [monitors, primary] = await Promise.all([availableMonitors(), primaryMonitor().catch(() => null)])
+  const seen = new Set<string>()
+  return monitors.flatMap((monitor) => {
+    const name = monitor.name ?? ''
+    if (!name || seen.has(name)) return []
+    seen.add(name)
+    return [{ name, width: monitor.size.width, height: monitor.size.height, primary: primary?.name === name }]
+  })
+}
+
+// Where screenshots go when no folder is chosen: VectorXR in the Windows
+// Pictures folder. Empty outside the desktop app.
+export async function defaultScreenshotFolder(): Promise<string> {
+  if (!tauriAvailable()) {
+    return ''
+  }
+
+  return invoke<string>('default_screenshot_folder')
+}
+
+// Opens the screenshot folder (`folder`, or the default one). The default
+// folder is created first; a custom folder that does not exist yet is an
+// error, since it may not be saved.
+export async function openScreenshotFolder(folder?: string): Promise<void> {
+  if (!tauriAvailable()) {
+    return
+  }
+
+  await invoke('open_screenshot_folder', { folder: folder?.trim() || null })
+}
+
 export async function playTestSound(path: string, activate: boolean, volume = 100, defaultName?: string): Promise<void> {
   if (!tauriAvailable()) {
     return
@@ -444,7 +504,10 @@ export interface RuntimeStatusSession {
   // framegenState: 'off' | 'waiting' | 'active' | 'standby' | 'paused' | 'unavailable';
   // framegenDepth: 'in-use' | 'checking' | 'not-sent' | 'not-readable' | 'empty' | 'unusable', or empty
   // before generated frames; Frame Generation fields are absent with older layers.
-  state: { osdVisible?: boolean; osdCompact?: boolean; osdMessage?: string; quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string; framegenState?: string; framegenReason?: string; framegenDepth?: string; framegenFlow?: string; framegenFlowMode?: string; framegenFlowReason?: string }
+  // mirrorState (the stabilized mirror window): 'off' | 'pending' | 'active' | 'hidden' |
+  //   'unsupported' | 'failed', or empty from older layers; mirrorReason is the layer's
+  //   English text, shown as it reads.
+  state: { osdVisible?: boolean; osdCompact?: boolean; osdMessage?: string; quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string; framegenState?: string; framegenReason?: string; framegenDepth?: string; framegenFlow?: string; framegenFlowMode?: string; framegenFlowReason?: string; mirrorVisible?: boolean; mirrorState?: string; mirrorReason?: string }
 }
 
 export interface RuntimeStatusEnvelope {
@@ -477,6 +540,10 @@ export interface DebugSourceSnapshot {
 export async function loadDebugSources(): Promise<DebugSourceSnapshot> {
   if (!tauriAvailable()) return { files: [], warnings: ['Raw diagnostic files are available only in the desktop app.'] } // i18n-ignore: debug package content
   return invoke<DebugSourceSnapshot>('load_debug_sources')
+}
+
+export function setRuntimeMirrorVisible(sessionId: string, visible: boolean): Promise<number> {
+  return invoke<number>('set_runtime_mirror_visible', { sessionId, visible })
 }
 
 export async function setRuntimeQuadViewsDiagnosticVisualization(

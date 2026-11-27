@@ -140,6 +140,33 @@ class VulkanBridgeLayerTestPeer {
     static void ReloadConfig() {
         OpenXrLayer::Instance().PollConfigFile();
     }
+    // The stabilized mirror window: never put on the desktop by a test, and
+    // what the session's status says of it.
+    static void MirrorOffDesktop() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        layer.mirror_.on_desktop = false;
+    }
+    static std::string MirrorStateText() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return std::string(MirrorStateName(layer.MirrorStateLocked()));
+    }
+    static std::string MirrorReason() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.MirrorReasonLocked(layer.MirrorStateLocked());
+    }
+    static std::uint64_t MirrorShown() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.mirror_.shown_frames;
+    }
+    static bool HooksAddForMirror() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.vulkan_mirror_extensions_;
+    }
     // The bridge's 30 s summary is logged at the next xrEndFrame.
     static void ExpireBridgeSummary() {
         OpenXrLayer& layer = OpenXrLayer::Instance();
@@ -864,6 +891,7 @@ struct StandIn {
     std::vector<std::string> extensions{kVulkanExtension, kVulkan2Extension, kD3D12Extension}; // listed before the instance
     bool enumeration_offered{true};
     bool vulkan_offered{true}; // XR_KHR_vulkan_enable(2)'s functions
+    bool visibility_mask_offered{false}; // XR_KHR_visibility_mask's function
     bool refuse_d3d12_instance{false}; // XR_ERROR_EXTENSION_NOT_PRESENT for instances with XR_KHR_D3D12_enable
     bool refuse_d3d12_session{false};  // XR_ERROR_GRAPHICS_DEVICE_INVALID for Direct3D 12 sessions
     bool refuse_destroy_session{false}; // xrDestroySession fails (the session stays)
@@ -1465,6 +1493,13 @@ XrResult XRAPI_CALL RtEnumerateBlendModes(XrInstance, XrSystemId, XrViewConfigur
     return XR_SUCCESS;
 }
 
+XrResult XRAPI_CALL RtGetVisibilityMask(XrSession, XrViewConfigurationType, std::uint32_t, XrVisibilityMaskTypeKHR,
+                                        XrVisibilityMaskKHR* mask) {
+    mask->vertexCountOutput = 0;
+    mask->indexCountOutput = 0;
+    return XR_SUCCESS;
+}
+
 XrResult XRAPI_CALL RtPollEvent(XrInstance, XrEventDataBuffer*) {
     return XR_EVENT_UNAVAILABLE;
 }
@@ -1996,6 +2031,10 @@ XrResult XRAPI_CALL RtGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (const auto it = kVulkanFunctions.find(name); it != kVulkanFunctions.end() && g_runtime.vulkan_offered) {
         *function = it->second;
+        return XR_SUCCESS;
+    }
+    if (std::strcmp(name, "xrGetVisibilityMaskKHR") == 0 && g_runtime.visibility_mask_offered) {
+        *function = Function(RtGetVisibilityMask);
         return XR_SUCCESS;
     }
     return XR_ERROR_FUNCTION_UNSUPPORTED;
@@ -2875,6 +2914,7 @@ struct CaseSettings {
     // Auto was the default, so they keep it unless they choose another.
     std::string frame_multiplier{"auto"};
     std::string synthesis_mode;   // Frame Generation's (its default when empty)
+    bool mirror{false};           // the stabilized mirror window on (every frame of the game shown)
 };
 
 void WriteSettings(const CaseSettings& case_settings) {
@@ -2895,7 +2935,11 @@ void WriteSettings(const CaseSettings& case_settings) {
         }
         settings << "}";
     }
-    settings << "}}}\n";
+    settings << "}";
+    if (case_settings.mirror) {
+        settings << R"(, "mirror": {"enabled": true, "defaults": {"frameRate": 120, "smoothing": 0}})";
+    }
+    settings << "}}\n";
 }
 
 // The settings changed while the game runs, seen by the layer at once.
@@ -3276,6 +3320,66 @@ void TestEnable2CreateInfos() {
     }
 }
 
+// xrGetInstanceProcAddr without an instance, and for an extension's function
+// the instance does not have.
+void TestProcAddrLookups() {
+    {
+        // No instance: only the three functions OpenXR allows then are looked
+        // up (the chain below answers them), never one the layer hooks.
+        BeginCase("proc-addr-no-instance");
+        App app = StartApp({kVulkan2Extension});
+        for (const char* name : {"xrLocateViews", "xrGetVisibilityMaskKHR", "xrCreateSession", "xrEndFrame",
+                                 "xrGetInstanceProcAddr", "xrCreateVulkanDeviceKHR", "xrGetSystem"}) {
+            PFN_xrVoidFunction function = Function(RtPollEvent);
+            Check(xrGetInstanceProcAddr(XR_NULL_HANDLE, name, &function) == XR_ERROR_HANDLE_INVALID && !function,
+                  std::string(name) + " without an instance is the handle's error, with no function");
+        }
+        PFN_xrVoidFunction function = nullptr;
+        Check(xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &function) ==
+                      XR_SUCCESS &&
+                  function,
+              "xrEnumerateInstanceExtensionProperties without an instance is the runtime's");
+        // The stand-in runtime has neither of these two: its answer comes back.
+        for (const char* name : {"xrEnumerateApiLayerProperties", "xrCreateInstance"}) {
+            function = Function(RtPollEvent);
+            Check(xrGetInstanceProcAddr(XR_NULL_HANDLE, name, &function) == XR_ERROR_FUNCTION_UNSUPPORTED &&
+                      !function,
+                  std::string(name) + " without an instance is asked of the runtime");
+        }
+        // With the instance the layer's functions are handed out as before.
+        function = nullptr;
+        Check(xrGetInstanceProcAddr(app.api.instance, "xrLocateViews", &function) == XR_SUCCESS && function &&
+                  function != Function(RtLocateViews),
+              "xrLocateViews with the instance is the layer's");
+        StopApp(app);
+        EndCase();
+    }
+    {
+        // XR_KHR_visibility_mask not enabled: the runtime has no function,
+        // and the layer hands out none of its own.
+        BeginCase("proc-addr-visibility-mask-absent");
+        App app = StartApp({kVulkan2Extension});
+        PFN_xrVoidFunction function = Function(RtPollEvent);
+        Check(xrGetInstanceProcAddr(app.api.instance, "xrGetVisibilityMaskKHR", &function) ==
+                      XR_ERROR_FUNCTION_UNSUPPORTED &&
+                  !function,
+              "xrGetVisibilityMaskKHR is unsupported, as the runtime says");
+        StopApp(app);
+        EndCase();
+    }
+    {
+        BeginCase("proc-addr-visibility-mask-present");
+        g_runtime.visibility_mask_offered = true;
+        App app = StartApp({kVulkan2Extension});
+        PFN_xrVoidFunction function = nullptr;
+        Check(xrGetInstanceProcAddr(app.api.instance, "xrGetVisibilityMaskKHR", &function) == XR_SUCCESS &&
+                  function && function != Function(RtGetVisibilityMask),
+              "xrGetVisibilityMaskKHR is the layer's where the runtime has it");
+        StopApp(app);
+        EndCase();
+    }
+}
+
 void CheckRouting(SessionCreate& create);
 
 // 2b. A runtime that looks vkCreateDevice up while it makes the game's
@@ -3367,6 +3471,240 @@ void TestEnableLists() {
               std::string(plain.c_str()) == g_runtime.vulkan_device_extensions,
           "without the bridge the runtime's list is the game's: " + std::string(plain.c_str()));
     StopApp(app);
+    EndCase();
+}
+
+// A runtime hands a Vulkan swapchain's colour images out in the attachment
+// layout (XR_KHR_vulkan_enable); the stand-in runtime makes its Vulkan images
+// and leaves them undefined, so a case whose game renders into them puts
+// them there first.
+void HandOutInAttachmentLayout(VulkanGame& game, const Target& target) {
+    for (const std::uint64_t handle : target.images) {
+        std::uint32_t slot = 0;
+        const VkCommandBuffer commands = BeginCommands(game, slot);
+        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        const bool depth = (target.info.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+        barrier.dstAccessMask = depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                                      : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                  : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = reinterpret_cast<VkImage>(handle);
+        barrier.subresourceRange = {static_cast<VkImageAspectFlags>(depth ? VK_IMAGE_ASPECT_DEPTH_BIT
+                                                                          : VK_IMAGE_ASPECT_COLOR_BIT),
+                                    0, 1, 0, std::max(1u, target.info.arraySize)};
+        g_vk.vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                                        : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                  0, 0, nullptr, 0, nullptr, 1, &barrier);
+        SubmitCommands(game, slot);
+    }
+}
+
+// The mirror window on and Frame Generation off: the game's Vulkan instance
+// and device get the mirror's memory-sharing names through the same four
+// OpenXR functions, and nothing else (no semaphore sharing, no timeline
+// semaphores, no XR_KHR_D3D12_enable); the session stays the game's Vulkan
+// one, its colour swapchains get the copy usage, and the mirror shows its
+// frames without changing what reaches the runtime.
+void TestMirrorOnly(int enable) {
+    CaseSettings settings;
+    settings.framegen = false;
+    settings.mirror = true;
+    BeginCase(enable == 2 ? "mirror-only-enable2" : "mirror-only-enable", settings);
+    Peer::MirrorOffDesktop();
+    App app = StartApp({enable == 2 ? kVulkan2Extension : kVulkanExtension});
+    Check(g_runtime.instance_attempts.size() == 1 &&
+              g_runtime.instance_attempts[0] == Names{enable == 2 ? kVulkan2Extension : kVulkanExtension},
+          "the instance gets no XR_KHR_D3D12_enable for the mirror: " + Text(g_runtime.instance_attempts));
+    Check(Peer::HooksAddForMirror() && !Peer::HooksAddForBridge(), "the mirror's names are wanted, the bridge's not");
+    const auto count_of = [](const Names& names, const char* name) {
+        return std::count(names.begin(), names.end(), std::string(name));
+    };
+    if (enable == 1) {
+        std::uint32_t size = 0;
+        Check(app.api.vulkan_device_extensions(app.api.instance, app.system, 0, &size, nullptr) == XR_SUCCESS && size > 0,
+              "the device list is counted");
+        std::string text(size, '\0');
+        Check(app.api.vulkan_device_extensions(app.api.instance, app.system, size, &size, text.data()) == XR_SUCCESS,
+              "the device list");
+        const Names device = Split(text.c_str());
+        const Names runtime_device = Split(g_runtime.vulkan_device_extensions.c_str());
+        for (const char* name : depthxr::VulkanMirrorDeviceExtensions()) {
+            Check(count_of(device, name) == 1, std::string("the device list has ") + name + " once: " + Text(device));
+        }
+        for (const char* name : depthxr::VulkanBridge::DeviceExtensions()) {
+            const auto& mirror = depthxr::VulkanMirrorDeviceExtensions();
+            const bool mirrors = std::any_of(mirror.begin(), mirror.end(),
+                                             [&](const char* other) { return std::strcmp(other, name) == 0; });
+            if (!mirrors) {
+                Check(count_of(device, name) == count_of(runtime_device, name),
+                      std::string("the bridge's ") + name + " is not added for the mirror: " + Text(device));
+            }
+        }
+        size = 0;
+        Check(app.api.vulkan_instance_extensions(app.api.instance, app.system, 0, &size, nullptr) == XR_SUCCESS,
+              "the instance list is counted");
+        std::string instance_text(size, '\0');
+        Check(app.api.vulkan_instance_extensions(app.api.instance, app.system, size, &size, instance_text.data()) ==
+                  XR_SUCCESS,
+              "the instance list");
+        const Names instance = Split(instance_text.c_str());
+        for (const char* name : depthxr::VulkanMirrorInstanceExtensions()) {
+            Check(count_of(instance, name) == 1,
+                  std::string("the instance list has ") + name + " once: " + Text(instance));
+        }
+    }
+    GameOptions options;
+    options.enable = enable;
+    VulkanGame game = MakeVulkanGame(app, options);
+    if (enable == 2) {
+        const depthxr::VulkanBridgeGame known =
+            depthxr::VulkanGameFor(reinterpret_cast<std::uint64_t>(game.device));
+        Check(known.get_instance_proc_addr != nullptr, "the game's device was made through the layer");
+    }
+    SessionCreate create(game, app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    Check(g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR && g_runtime.vk_device == game.device &&
+              !Peer::Bridge().Active() && !Peer::QueueSubstituted(),
+          "the session is the game's Vulkan one, unbridged");
+    Check(g_runtime.Position("xrGetD3D12GraphicsRequirementsKHR") < 0,
+          "nothing of Direct3D 12 reaches the runtime for the mirror");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    HandOutInAttachmentLayout(game, left);
+    HandOutInAttachmentLayout(game, right);
+    std::string log = Peer::Log();
+    Check(Contains(log, "Mirror window: this session's Vulkan images can be shown"),
+          "the session has a reader for the mirror");
+    Check(Contains(log, "Mirror window added swapchain usage"), "the colour swapchains get the copy usage");
+    if (enable == 2) {
+        Check(Contains(log, "Mirror window (Vulkan): added") && Contains(log, "VK_KHR_external_memory_win32") &&
+                  !Contains(log, "timeline semaphores added") && !Contains(log, "VK_KHR_external_semaphore_win32"),
+              "the game's device got the mirror's names and nothing of the bridge's");
+    }
+    const Renderer vulkan{&game, nullptr};
+    int frames = 0;
+    for (; frames < 400 && Peer::MirrorShown() < 5; ++frames) {
+        const std::vector<Color> colors{FrameColor(frames, 0), FrameColor(frames, 1)};
+        Check(Frame(app, vulkan, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS,
+              "a Vulkan frame with the mirror on");
+        const ShownFrame& shown = g_runtime.frames.back();
+        // (The stand-in runtime reads no texels of a Vulkan session's images.)
+        Check(shown.views.size() == 2 && shown.views[0].swapchain == left.swapchain &&
+                  shown.views[1].swapchain == right.swapchain,
+              "the frame reaches the runtime with the game's swapchains");
+        Sleep(2);
+    }
+    Check(Peer::MirrorShown() >= 5, "the mirror shows the game's frames (state " + Peer::MirrorStateText() + ", " +
+                                        Peer::MirrorReason() + ", after " + std::to_string(frames) + " frames)");
+    Check(Peer::MirrorStateText() == "active" && Contains(Peer::MirrorReason(), "showing the left eye"),
+          "the status says so: " + Peer::MirrorReason());
+    CheckVulkanValidation(g_case + " (mirror frames)");
+    // (The game's own rendering is done before it destroys its swapchains.)
+    CheckVk(g_vk.vkQueueWaitIdle(game.queue), "the game's queue idles");
+    Check(app.api.destroy_swapchain(left.swapchain) == XR_SUCCESS &&
+              app.api.destroy_swapchain(right.swapchain) == XR_SUCCESS,
+          "the swapchains are destroyed");
+    StopApp(app);
+    Check(GameRuns(game), "the game's device works");
+    DestroyGame(game);
+    EndCase();
+}
+
+// The mirror turned on after the game started: a Vulkan game's device was
+// not prepared, the session has no mirror and the status says to restart.
+void TestMirrorTooLate() {
+    BeginCase("mirror-too-late", false);
+    Peer::MirrorOffDesktop();
+    App app = StartApp({kVulkan2Extension});
+    Check(!Peer::HooksAddForMirror(), "with the mirror off nothing is wanted of the game's device");
+    VulkanGame game = MakeVulkanGame(app);
+    SessionCreate create(game, app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    BeginSession(app);
+    CaseSettings later;
+    later.framegen = false;
+    later.mirror = true;
+    ChangeSettings(later);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    HandOutInAttachmentLayout(game, left);
+    HandOutInAttachmentLayout(game, right);
+    const Renderer vulkan{&game, nullptr};
+    for (int frame = 0; frame < 5; ++frame) {
+        Check(Frame(app, vulkan, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)},
+                    {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS,
+              "a Vulkan frame");
+    }
+    Check(Peer::MirrorStateText() == "unsupported" && Contains(Peer::MirrorReason(), "restart the game") &&
+              Peer::MirrorShown() == 0,
+          "the status says to restart the game: " + Peer::MirrorStateText() + ", " + Peer::MirrorReason());
+    Check(!Contains(Peer::Log(), "Mirror window added swapchain usage"), "nothing is added to its swapchains");
+    // (The game's own rendering is done before it destroys its swapchains.)
+    CheckVk(g_vk.vkQueueWaitIdle(game.queue), "the game's queue idles");
+    Check(app.api.destroy_swapchain(left.swapchain) == XR_SUCCESS &&
+              app.api.destroy_swapchain(right.swapchain) == XR_SUCCESS,
+          "the swapchains are destroyed");
+    StopApp(app);
+    DestroyGame(game);
+    EndCase();
+}
+
+// The mirror window of a game on the Vulkan bridge: drawn from the runtime's
+// Direct3D 12 images on the bridge's device, with nothing more asked of the
+// game's device or swapchains, and the frame that reaches the runtime is
+// what the game rendered.
+void TestBridgedMirror() {
+    CaseSettings settings;
+    settings.mirror = true;
+    BeginCase("bridged-mirror", settings);
+    Peer::MirrorOffDesktop();
+    App app = StartApp({kVulkan2Extension});
+    VulkanGame game = MakeVulkanGame(app);
+    SessionCreate create(game, app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    Check(Peer::Bridge().Active(), "the session is bridged");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const std::string log = Peer::Log();
+    Check(Contains(log, "Mirror window: this session's Vulkan (on Frame Generation's Direct3D 12 bridge) images can "
+                        "be shown"),
+          "the bridged session has a reader for the mirror");
+    Check(!Contains(log, "Mirror window added swapchain usage"), "a bridged swapchain gets nothing added for it");
+    const Renderer vulkan{&game, nullptr};
+    int frames = 0;
+    for (; frames < 400 && Peer::MirrorShown() < 5; ++frames) {
+        const std::vector<Color> colors{FrameColor(frames, 0), FrameColor(frames, 1)};
+        Check(Frame(app, vulkan, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS,
+              "a bridged frame with the mirror on");
+        const ShownFrame& shown = g_runtime.frames.back();
+        Check(shown.views.size() == 2 && shown.views[0].swapchain == left.swapchain &&
+                  shown.views[1].swapchain == right.swapchain && Near(shown.views[0].texel, colors[0]) &&
+                  Near(shown.views[1].texel, colors[1]),
+              "the runtime shows what the game rendered");
+        Sleep(2);
+    }
+    Check(Peer::MirrorShown() >= 5, "the mirror shows the bridged game's frames (state " + Peer::MirrorStateText() +
+                                        ", " + Peer::MirrorReason() + ", after " + std::to_string(frames) + " frames)");
+    Check(Peer::MirrorStateText() == "active", "the status is active: " + Peer::MirrorReason());
+    for (const Target* target : {&left, &right}) {
+        const std::string describe = Peer::Bridge().Describe(target->swapchain);
+        Check(Contains(describe, "skippedCopies=0") && Contains(describe, "failedSubmits=0"),
+              "the bridge's copies go on as without the mirror: " + describe);
+    }
+    CheckValidation("bridged mirror frames");
+    // (The game's own rendering is done before it destroys its swapchains.)
+    CheckVk(g_vk.vkQueueWaitIdle(game.queue), "the game's queue idles");
+    Check(app.api.destroy_swapchain(left.swapchain) == XR_SUCCESS &&
+              app.api.destroy_swapchain(right.swapchain) == XR_SUCCESS,
+          "the swapchains are destroyed");
+    StopApp(app);
+    Check(GameRuns(game), "the game's device works");
+    DestroyGame(game);
     EndCase();
 }
 
@@ -5722,6 +6060,12 @@ void TestDepthRects(const std::string& kind) {
     Target smaller = depth_target(48, 36, "smaller depth");
     Target larger = depth_target(80, 60, "larger depth");
     Target side_by_side = depth_target(2 * kWidth, kHeight, "side-by-side depth");
+    if (kind == "vulkan-native") {
+        // The stand-in runtime's own Vulkan images, as a runtime hands them out.
+        for (const Target* target : {&left, &right, &smaller, &larger, &side_by_side}) {
+            HandOutInAttachmentLayout(*game, *target);
+        }
+    }
     constexpr std::int32_t kMax = std::numeric_limits<std::int32_t>::max();
     struct Case {
         const char* what;
@@ -5794,6 +6138,11 @@ void TestDepthRects(const std::string& kind) {
     Check(Count(log, "The game's depth sub-image lies outside its depth image") == 1,
           name + ": the log tells once of depth outside its image");
     Check(!Contains(log, "keeps the game's depth to itself"), name + ": no depth swapchain is private");
+    if (kind == "vulkan-native") {
+        // The runtime's own Vulkan images go with the session: the game's
+        // rendering into them is done first.
+        CheckVk(g_vk.vkQueueWaitIdle(game->queue), name + ": the game's queue idles");
+    }
     StopApp(app);
     if (kind == "vulkan-native") SetEnv("VECTORXR_VULKAN_BRIDGE", "");
     Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
@@ -6109,10 +6458,15 @@ int main(int argc, char** argv) {
     TestInstanceExtensions();
     TestRefusedInstance();
     TestEnable2CreateInfos();
+    TestProcAddrLookups();
     TestEnableLists();
     TestBridgeOffSession();
     TestBridgeOffWithD3D11();
     TestVulkanBindingNotFirst();
+    // The stabilized mirror window of an unbridged Vulkan game.
+    TestMirrorOnly(2);
+    TestMirrorOnly(1);
+    TestMirrorTooLate();
     TestNativeD3D12("native-d3d12");
     TestDepthRects("vulkan-native");
     TestDepthRects("native-d3d12");
@@ -6122,6 +6476,7 @@ int main(int argc, char** argv) {
         TestBridgedSession(2);
         TestBridgedSession(1);
         TestBridgedFallbacks();
+        TestBridgedMirror();
         TestBothEnablesOwnDevice();
         TestDestroyInstanceWithSession();
         TestPrivateDepthTeardown();

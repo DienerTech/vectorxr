@@ -1,0 +1,191 @@
+{
+  "screenshots": {
+    "heading": "Screenshots",
+    "intro": "Saves each eye's image exactly as the game rendered it, at full resolution, as a PNG file. The file is written in the background, so the game does not stall.",
+    "binding": {
+      "label": "Take Screenshot",
+      "description": "Saves a screenshot each time it is pressed, in every game.",
+      "none": "No binding assigned. Screenshots are off until a binding is added."
+    },
+    "eyes": {
+      "legend": "Eyes to save",
+      "both": {
+        "label": "Both eyes",
+        "description": "Two files for each screenshot, ending in _L and _R."
+      },
+      "left": {
+        "label": "Left eye",
+        "description": "One file, ending in _L."
+      },
+      "right": {
+        "label": "Right eye",
+        "description": "One file, ending in _R."
+      }
+    },
+    "folder": {
+      "title": "Screenshot folder",
+      "defaultLocation": "VectorXR in your Pictures folder",
+      "perGame": "Each game gets its own folder inside, named after its program file.",
+      "choose": "Choose Folder…",
+      "useDefault": "Use Default",
+      "open": "Open Folder",
+      "pickerFailed": "Failed to open the folder picker.",
+      "openFailed": "Failed to open the screenshot folder."
+    },
+    "notes": {
+      "title": "Good to know",
+      "names": "Files are named after the game, with the date and time of the screenshot.",
+      "api": "Works in D3D11 and D3D12 games. Vulkan games are not supported yet.",
+      "quadviews": "With Quadviews, the screenshot is the complete image VectorXR puts together for each eye.",
+      "framegen": "With Frame Generation, the screenshot is always a frame the game rendered, never a generated one.",
+      "feedback": "When a binding's sound is on, it plays as the screenshot is saved. If no screenshot can be taken, the off sound plays instead and the log says why. The log names each file."
+    }
+  },
+  "mirror": {
+    "heading": "Stabilized mirror window",
+    "intro": "Opens a VectorXR window on the desktop that shows one eye's image with head shake smoothed out, for streaming and recording. The headset picture is not changed. Turn it on for every game or per game.",
+    "liveNote": "Changes take effect in a running game as soon as you save; the window is resized when the aspect ratio or width changes.",
+    "notes": {
+      "title": "Good to know",
+      "summary": "OBS, supported games, and what is smoothed",
+      "obs": {
+        "label": "Streaming and recording.",
+        "body": "{label} In OBS, add a Window Capture source and pick the window whose name starts with \"VectorXR Mirror\", followed by the game's name."
+      },
+      "hdr": {
+        "label": "HDR monitors.",
+        "body": "{label} If the mirror is on an HDR monitor and the game is SDR, the picture OBS records can look washed out or too bright. Tick Force SDR in the Window Capture source's properties."
+      },
+      "separate": {
+        "label": "Why a separate window.",
+        "body": "{label} The headset software's own mirror (SteamVR VR View, the Meta or Oculus mirror, Virtual Desktop, Pimax) and the game's own desktop window show exactly what the headset gets and cannot be stabilized separately."
+      },
+      "support": {
+        "label": "Supported games.",
+        "body": "{label} Works in D3D11, D3D12 and Vulkan games. For a Vulkan game, turn this on before you start the game."
+      },
+      "smoothing": {
+        "label": "What is smoothed.",
+        "body": "{label} Head rotation, which is what head shake is. Position bobbing is not smoothed. Stronger smoothing lags further behind fast head turns, and the margin zooms the picture in to hide its edges."
+      },
+      "framegen": {
+        "label": "With Frame Generation.",
+        "body": "{label} The window shows the frames the game rendered, not generated ones."
+      },
+      "window": {
+        "label": "The window.",
+        "body": "{label} It never takes keyboard focus from the game. Closing it hides it. Use Show mirror under Running games or press the binding to reopen it. Its size and position are remembered for each game."
+      },
+      "fill": {
+        "label": "Fill a monitor.",
+        "body": "{label} The picture can fill a monitor or TV, borderless, for people watching in the room as well as for OBS. It covers whatever is on that monitor, including the game's own window, so pick a different monitor from the game's unless that is what you want. A filled monitor has no close button: hide and show it with the binding."
+      },
+      "cost": {
+        "label": "Small cost.",
+        "body": "{label} One small draw at the window's own size for each frame it shows, capped by the frame rate limit. It never holds up the game's frames."
+      }
+    },
+    "status": {
+      "show": "Show mirror",
+      "hide": "Hide mirror",
+      "heading": "Running games",
+      "unavailable": "Runtime status is temporarily unavailable.",
+      "noSession": "No VR application running"
+    },
+    "session": {
+      "withReason": "{status} · {reason}",
+      "active": "Window open",
+      "pending": "Waiting for the first frame",
+      "hidden": "Window hidden",
+      "unsupported": "Not available in this game right now",
+      "failed": "Failed · no window",
+      "off": "Off",
+      "needsLayer": "Needs the updated VectorXR layer",
+      "unknown": "Status unavailable"
+    },
+    "binding": {
+      "label": "Show or Hide Mirror Window",
+      "description": "Shows or hides the window while a game runs, in games where the mirror window is turned on.",
+      "none": "No binding assigned. The window opens when a game starts, wherever it is turned on."
+    },
+    "defaultProfile": {
+      "heading": "Default Profile",
+      "appliesTo": "Applies to games without an enabled custom profile",
+      "toggleOn": "Default Profile On",
+      "toggleOff": "Default Profile Off",
+      "offNote": "Off for games without a custom profile. Custom profiles below still turn it on for their games."
+    },
+    "customProfiles": {
+      "heading": "Custom Profiles",
+      "description": "Set the mirror window per game. The first enabled matching profile wins.",
+      "add": "Add Profile",
+      "empty": "No custom profiles yet. Add a profile to turn the mirror window on for a game.",
+      "duplicateApplication": "{application} is already targeted by Profile {profile}. The first active profile wins."
+    },
+    "summary": {
+      "plain": "No smoothing",
+      "smoothing": "Smoothing {value}"
+    },
+    "fields": {
+      "stabilization": {
+        "heading": "Stabilization"
+      },
+      "window": {
+        "heading": "Window"
+      },
+      "smoothing": {
+        "label": "Smoothing",
+        "help": "How strongly head shake is smoothed out. 0 is a plain mirror with no stabilization; higher values are steadier and lag further behind fast head turns.",
+        "off": "Off"
+      },
+      "levelHorizon": {
+        "label": "Keep the horizon level",
+        "help": "Takes head roll out of the picture, so it stays level when you tilt your head."
+      },
+      "margin": {
+        "label": "Margin",
+        "help": "How far the picture is zoomed in so its edges stay filled while it is stabilized. A larger margin covers bigger head movements and shows less of the view."
+      },
+      "percent": "{value}%",
+      "valueLabel": "{setting}, exact value",
+      "eye": {
+        "legend": "Eye to show",
+        "left": {
+          "label": "Left eye",
+          "description": "The window shows the left eye's image."
+        },
+        "right": {
+          "label": "Right eye",
+          "description": "The window shows the right eye's image."
+        }
+      },
+      "aspect": {
+        "label": "Aspect ratio"
+      },
+      "width": {
+        "label": "Picture width (pixels)",
+        "help": "Picture width: the picture's width when the window first opens, from {min} to {max} pixels. The height follows the aspect ratio.",
+        "opensAt": "The window opens at {width} × {height}."
+      },
+      "frameRate": {
+        "label": "Frame rate limit (fps)",
+        "help": "Frame rate limit: the most frames per second the window shows, from {min} to {max}."
+      },
+      "fillMonitor": {
+        "label": "Fill a monitor",
+        "help": "The picture fills the chosen monitor, borderless, instead of sitting in a resizable window, and takes the shape of that monitor. It still never takes keyboard focus or input from the game. Mouse clicks pass through the picture to the game underneath. If that monitor is not connected, the mirror opens as a normal window.",
+        "sizeUnused": "Aspect ratio and picture width are not used while the picture fills a monitor."
+      },
+      "monitor": {
+        "label": "Monitor",
+        "choose": "Choose a monitor…",
+        "option": "{name} · {width}×{height}",
+        "optionPrimary": "{name} · {width}×{height} · primary",
+        "notConnected": "{name} · not connected",
+        "none": "No monitor chosen. The mirror opens as a normal window until you pick one; a monitor is never picked for you.",
+        "covers": "The picture covers whatever is on that monitor, including the game's own window. Pick a different monitor from the game's unless that is what you want. Hide and show it with the binding; a filled monitor has no close button.",
+        "unavailable": "The PC's monitors are listed here in the VectorXR desktop app."
+      }
+    }
+  }
+}

@@ -7,6 +7,8 @@
     "tools": "Anzeige und Werkzeuge"
   },
   "badges": {
+    "new": "Neu",
+    "beta": "Beta",
     "experimental": "Experimentell"
   },
   "back": "Alle Anleitungen",
@@ -42,7 +44,13 @@
     "depthPlane": "Tiefenebene",
     "wait": "Wartet auf die Laufzeit",
     "render": "Spiel rendert",
-    "osdPanel": "OSD-Anzeige"
+    "osdPanel": "OSD-Anzeige",
+    "mirrorWindow": "VectorXR-Spiegelfenster",
+    "smoothedCopy": "Eine Kopie, geglättet",
+    "binding": "Ihre Belegung",
+    "runtimeMirror": "Spiegel der Headset-Software",
+    "sameImage": "Dasselbe Bild",
+    "pngFiles": "PNG pro Auge"
   },
   "items": {
     "start": {
@@ -80,7 +88,7 @@
           "heading": "Ihr erstes Spiel einrichten",
           "steps": {
             "1": "Starten Sie das Spiel einmal mit installiertem VectorXR und beenden Sie es wieder.",
-            "2": "Öffnen Sie das **Anwendungsregister**, klicken Sie auf **Aktualisieren** und registrieren Sie das Spiel aus der Liste der Apps, die VectorXR gesehen hat.",
+            "2": "Öffnen Sie **Anwendungen → Erkennung**, klicken Sie auf **Aktualisieren** und registrieren Sie das Spiel aus der Liste der Apps, die VectorXR gesehen hat.",
             "3": "Öffnen Sie in der Seitenleiste eine Erweiterung, klicken Sie auf **Profil hinzufügen** und wählen Sie das Spiel.",
             "4": "Passen Sie die Einstellungen an und klicken Sie auf **Änderungen speichern**. Manche Erweiterungen brauchen einen Neustart des Spiels; ihre Anleitungen sagen, welche."
           }
@@ -285,6 +293,61 @@
           "body": "Schalten Sie das OSD auf seiner Seite aus und speichern Sie, oder blenden Sie es mit seiner Belegung für die Sitzung aus."
         }
       }
+    },
+    "screenshots": {
+      "title": "Screenshots",
+      "summary": "Das Bild jedes Auges in voller Auflösung per Taste oder Knopf als PNG speichern.",
+      "sections": {
+        "what": {
+          "body": "Ein Screenshot speichert das Bild, das das Spiel an das Headset sendet, vor der Linsenkorrektur. Er ist daher schärfer und größer als eine Aufnahme des Desktop-Spiegels. Die Bildschirmanzeige und andere Overlays sind nicht enthalten. Mit Frame Generation wird ein vom Spiel gerendertes Bild gespeichert, nie ein generiertes."
+        },
+        "setup": {
+          "steps": {
+            "1": "Öffnen Sie **Screenshots** und fügen Sie eine Belegung für **Screenshot aufnehmen** hinzu. Standardmäßig gibt es keine.",
+            "2": "Wählen Sie **Beide Augen**, **Linkes Auge** oder **Rechtes Auge**.",
+            "3": "Klicken Sie auf **Änderungen speichern** und drücken Sie dann die Belegung im Headset."
+          }
+        },
+        "check": {
+          "body": "Die Dateien landen in Bilder\\VectorXR, in einem Ordner pro Spiel. Ein großes Bild braucht ein bis zwei Sekunden, bis es erscheint. Ist der Ton der Belegung an, hören Sie ein Signal, sobald die Dateien gespeichert sind."
+        },
+        "problems": {
+          "body": "Screenshots funktionieren in Direct3D-11- und Direct3D-12-Spielen. Vulkan-Spiele werden noch nicht unterstützt. Wird nichts gespeichert, nennt das VectorXR-Protokoll den Grund."
+        }
+      }
+    },
+    "mirror": {
+      "title": "Stabilisiertes Spiegelfenster",
+      "summary": "Ein beruhigtes Desktop-Fenster mit dem Bild eines Auges, für Streams und Aufnahmen.",
+      "sections": {
+        "what": {
+          "body": "Das stabilisierte Spiegelfenster ist ein VectorXR-Fenster auf Ihrem Desktop, das das Bild eines Auges mit geglättetem Kopfwackeln zeigt. Das Bild im Headset bleibt unverändert. Der Spiegel der Headset-Software und das Desktop-Fenster des Spiels zeigen genau das, was das Headset bekommt, und lassen sich daher nicht für sich stabilisieren."
+        },
+        "when": {
+          "body": "Nutzen Sie es, wenn Sie streamen oder aufnehmen oder wenn andere im Raum auf einem Monitor oder Fernseher zusehen. Es funktioniert in Direct3D-11-, Direct3D-12- und Vulkan-Spielen."
+        },
+        "setup": {
+          "steps": {
+            "1": "Öffnen Sie **Stabilisierter Spiegel** und schalten Sie das Spiegelfenster ein: im **Standardprofil** für alle Spiele oder in einem eigenen Profil für ein Spiel.",
+            "2": "Klicken Sie auf **Änderungen speichern**. Das Fenster öffnet sich, sobald das Spiel sein erstes Bild zeigt. Bei einem Vulkan-Spiel schalten Sie es ein, bevor Sie das Spiel starten.",
+            "3": "Fügen Sie in OBS eine Quelle **Fensteraufnahme** hinzu und wählen Sie das Fenster, dessen Name mit VectorXR Mirror beginnt.",
+            "4": "Erhöhen Sie **Glättung** für ein ruhigeres Bild und **Rand**, wenn bei schnellen Kopfdrehungen die Bildränder sichtbar werden. Änderungen wirken, sobald Sie speichern."
+          }
+        },
+        "check": {
+          "body": "Die Seite Stabilisierter Spiegel listet laufende Spiele auf, mit **Fenster geöffnet**, solange das Spiegelfenster angezeigt wird."
+        },
+        "off": {
+          "body": "Schalten Sie das Profil aus und speichern Sie, oder blenden Sie das Fenster mit der Belegung **Spiegelfenster ein- oder ausblenden** aus. Schließen blendet das Fenster nur aus."
+        },
+        "problems": {
+          "points": {
+            "a": "**Das Bild hinkt schnellen Kopfdrehungen hinterher:** Verringern Sie Glättung.",
+            "b": "**Kein Fenster in einem Vulkan-Spiel:** Schalten Sie das Spiegelfenster ein, speichern Sie und starten Sie das Spiel neu.",
+            "c": "**Das Bild verdeckt das Fenster des Spiels:** Wählen Sie bei **Monitor ausfüllen** einen anderen Monitor als den des Spiels."
+          }
+        }
+      }
     }
   },
   "walkthrough": {
@@ -315,7 +378,11 @@
       "biggerWorld": "Engere Augen: eine größere Welt",
       "compactWorld": "Weitere Augen: eine kompaktere Welt",
       "frames_one": "{count} Bild",
-      "frames_other": "{count} Bilder"
+      "frames_other": "{count} Bilder",
+      "windowCapture": "Fensteraufnahme",
+      "mirror": "Desktop-Spiegel",
+      "fullRes": "Volle Auflösung",
+      "folder": "Bilder\\VectorXR"
     }
   },
   "walkthroughs": {
@@ -387,6 +454,26 @@
         "3": "Wählen Sie eine Vorgabe und ziehen Sie die Anzeige in der Vorschau an ihren Platz.",
         "4": "Im Spiel blendet Ctrl+Alt+F10 sie ein oder aus, und Ctrl+Alt+F11 wechselt das Layout.",
         "5": "Schalten Sie sie auf der Seite Bildschirmanzeige ein, wählen Sie eine Vorgabe und speichern Sie."
+      }
+    },
+    "screenshots": {
+      "title": "Ansehen: So funktionieren Screenshots",
+      "steps": {
+        "1": "Eine Aufnahme des Desktop-Spiegels ist klein und zeigt das Bild nach der Linsenkorrektur.",
+        "2": "VectorXR speichert das Bild, das das Spiel an das Headset sendet, in voller Auflösung und ohne Overlays.",
+        "3": "Drücken Sie Ihre Belegung, und ein PNG pro Auge landet in einem Ordner für das Spiel in Bilder\\VectorXR.",
+        "4": "Fügen Sie auf der Seite Screenshots eine Belegung für Screenshot aufnehmen hinzu, wählen Sie die Augen und speichern Sie."
+      }
+    },
+    "mirror": {
+      "title": "Ansehen: So funktioniert das stabilisierte Spiegelfenster",
+      "steps": {
+        "1": "Der Spiegel der Headset-Software und das Desktop-Fenster des Spiels zeigen genau das Bild, das das Headset bekommt. Jedes Kopfwackeln ist also in Ihrem Stream zu sehen.",
+        "2": "VectorXR öffnet ein eigenes Fenster mit einer Kopie des Bildes eines Auges und glättet nur diese Kopie. Das Bild im Headset bleibt unverändert.",
+        "3": "Fügen Sie in OBS eine Quelle Fensteraufnahme hinzu und wählen Sie das Fenster, dessen Name mit VectorXR Mirror beginnt.",
+        "4": "Schalten Sie auf der Seite Stabilisierter Spiegel das Standardprofil für alle Spiele ein oder fügen Sie ein eigenes Profil für ein Spiel hinzu, und speichern Sie. Das Fenster öffnet sich mit dem ersten Bild des Spiels.",
+        "5": "Erhöhen Sie Glättung für ein ruhigeres Bild und Rand, wenn bei schnellen Kopfdrehungen die Bildränder sichtbar werden. Horizont gerade halten nimmt die Kopfneigung aus dem Bild.",
+        "6": "Wählen Sie unter Fenster das Auge, Form und Größe des Bildes und ein Bildratenlimit, oder füllen Sie einen Monitor aus. Änderungen wirken, sobald Sie speichern."
       }
     }
   }

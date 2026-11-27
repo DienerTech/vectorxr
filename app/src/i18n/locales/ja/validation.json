@@ -19,6 +19,15 @@
     "compactMetrics": "OSD のコンパクト パフォーマンスの選択が無効です",
     "bodyOrder": "OSD の本文の順序には各行を 1 回ずつ含める必要があります"
   },
+  "screenshot": {
+    "eyes": "{field} は both、left、right のいずれかである必要があります",
+    "folder": "{field} はフォルダーの完全なパス (例: D:\\Screenshots) である必要があります"
+  },
+  "mirror": {
+    "eye": "{field} は left または right である必要があります",
+    "aspect": "{field} は {values} である必要があります",
+    "monitor": "{field} は {max} 文字以内のテキストである必要があります"
+  },
   "binding": {
     "chordEmpty": "{field} には少なくとも 1 つのキーを含める必要があります",
     "chordUnsupportedKey": "{field} にサポートされていないキーが含まれています: {key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field} は performance、balanced、quality のいずれかである必要があります",
     "motionEstimation": "{field} は shader または hardware である必要があります",
     "frameMultiplier": "{field} は auto、dynamic、2x、3x、4x のいずれかである必要があります",
+    "autoLowestRate": "{field} は off または 2x である必要があります",
     "diagnosticView": "{field} は off、flow、confidence、tint のいずれかである必要があります",
     "interpolateFlow": "{field} は auto、hardware、shader のいずれかにしてください"
   },
@@ -61,6 +71,8 @@
   "version": "version は {version} である必要があります",
   "warnings": {
     "turboFrameGenOverlap": "{targets} で Turbo と Frame Generation の両方がオンになっています。Frame Generation がフレーム ペーシングを引き継ぐため、Frame Generation が動作するセッションでは Turbo はオフのままです。",
+    "mirrorFillNoMonitorDefault": "手ぶれ補正ミラー ウィンドウ: 既定のプロファイルで「モニター全体に表示」がオンですが、モニターが選択されていません。選択するまで、ミラーは通常のウィンドウとして開きます。",
+    "mirrorFillNoMonitorProfile": "手ぶれ補正ミラー ウィンドウ: プロファイル {profile} で「モニター全体に表示」がオンですが、モニターが選択されていません。選択するまで、ミラーは通常のウィンドウとして開きます。",
     "moreApplications_other": "ほか {count} 件",
     "applicationsWithoutProfile": "カスタム プロファイルのないアプリケーション"
   },

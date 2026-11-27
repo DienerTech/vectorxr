@@ -911,6 +911,17 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         search.outputs = {Texture(FrameGenTextureKind::kFlow, kFrameGenPyramidLevels), {}};
         search.constants.options[3] = 1;
         search.predicate = measured_predicate;
+        // Research: a wider coarsest search (FG_SEARCH_MAX_RADIUS covers it).
+        if (tuning.flow_reach != 0) {
+            search.constants.options[0] = std::min(tuning.flow_reach, kFrameGenSearchRadiusMost);
+        }
+        // Research: the shortest displacement within a tolerance of the best.
+        if (tuning.flow_shortest.enabled) {
+            search.constants.options[1] |= kFrameGenFlagFlowShortest;
+            search.constants.tuning[1] = tuning.flow_shortest.tolerance;
+            search.constants.tuning[2] = tuning.flow_shortest.share;
+            search.constants.tuning[3] = tuning.flow_shortest.toward_neighbours ? 1.0f : 0.0f;
+        }
         plan.dispatches.push_back(search);
     }
 
@@ -927,6 +938,13 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         refine.constants.options[3] = 1u << (level - match);
         refine.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
         refine.predicate = measured_predicate;
+        // Research: the final level's costs carry each match's ambiguity
+        // (options.x, which no refine reads otherwise: the cost it adds).
+        if (tuning.flow_evidence.enabled && level == plan.final_flow_level) {
+            refine.constants.options[1] |= kFrameGenFlagFlowEvidence;
+            refine.constants.tuning[3] = tuning.flow_evidence.sharpness;
+            std::memcpy(&refine.constants.options[0], &tuning.flow_evidence.cost, sizeof(float));
+        }
         plan.dispatches.push_back(refine);
         if (level == plan.final_flow_level) {
             break;
@@ -944,10 +962,11 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     filter.outputs = {Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
     filter.constants.options[3] = plan.final_flow_level;
     filter.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
-    // Research (hypothesis E): content with nothing to track keeps the head's
-    // predicted motion unless its match is clearly better; the cover filter
-    // below is a copy and holds it too.
-    const bool prior = tuning.flow_prior.enabled && (!tuning.flow_prior.still || FrameGenWorldStill(request));
+    // Hypothesis E: content with nothing to track keeps the head's predicted
+    // motion unless its match is clearly better; the cover filter below is a
+    // copy and holds it too. The default prior leaves hardware flow alone.
+    const bool prior = tuning.flow_prior.enabled && !(tuning.flow_prior.shader_only && hardware) &&
+                       (!tuning.flow_prior.still || FrameGenWorldStill(request));
     if (prior) {
         filter.pass = FrameGenPass::kFilterPrior;
         filter.constants.options[1] |= kFrameGenFlagFlowPrior | (tuning.flow_prior.distant ? kFrameGenFlagFlowPriorFar : 0u);
@@ -2001,6 +2020,76 @@ FrameGenFlowPrior ParseFrameGenFlowPrior(const std::string& value) {
         start = comma + 1;
     }
     return prior;
+}
+
+FrameGenFlowShortest ParseFrameGenFlowShortest(const std::string& value) {
+    std::string text(value);
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    FrameGenFlowShortest shortest;
+    if (text == "1" || text == "on") {
+        shortest.enabled = true;
+        return shortest;
+    }
+    const auto number = [](const std::string& part, float& out) {
+        char* end = nullptr;
+        const float parsed = std::strtof(part.c_str(), &end);
+        if (part.empty() || !end || *end != '\0' || !(parsed >= 0.0f && parsed <= 1.0f)) {
+            return false;
+        }
+        out = parsed;
+        return true;
+    };
+    const std::size_t comma = text.find(',');
+    if (!number(text.substr(0, comma), shortest.tolerance)) {
+        return FrameGenFlowShortest{};
+    }
+    shortest.enabled = true;
+    if (comma != std::string::npos) {
+        const std::size_t second = text.find(',', comma + 1);
+        number(text.substr(comma + 1, second == std::string::npos ? std::string::npos : second - comma - 1),
+               shortest.share);
+        shortest.toward_neighbours = second != std::string::npos && text.substr(second + 1) == "median";
+    }
+    return shortest;
+}
+
+std::uint32_t ParseFrameGenFlowReach(const std::string& value) {
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (value.empty() || !end || *end != '\0' || parsed < 1 || parsed > static_cast<long>(kFrameGenSearchRadiusMost)) {
+        return 0;
+    }
+    return static_cast<std::uint32_t>(parsed);
+}
+
+FrameGenFlowEvidence ParseFrameGenFlowEvidence(const std::string& value) {
+    std::string text(value);
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    FrameGenFlowEvidence evidence;
+    if (text == "1" || text == "on") {
+        evidence.enabled = true;
+        return evidence;
+    }
+    const auto number = [](const std::string& part, float& out, bool positive) {
+        char* end = nullptr;
+        const float parsed = std::strtof(part.c_str(), &end);
+        if (part.empty() || !end || *end != '\0' || !(parsed >= 0.0f && parsed <= 1.0f) || (positive && parsed == 0.0f)) {
+            return false;
+        }
+        out = parsed;
+        return true;
+    };
+    const std::size_t comma = text.find(',');
+    if (!number(text.substr(0, comma), evidence.sharpness, true)) {
+        return FrameGenFlowEvidence{};
+    }
+    evidence.enabled = true;
+    if (comma != std::string::npos) {
+        number(text.substr(comma + 1), evidence.cost, false);
+    }
+    return evidence;
 }
 
 bool FrameGenWorldStill(const FrameGenViewRequest& request) {
@@ -3950,6 +4039,7 @@ std::optional<std::string> ReadResearchSwitch(const char* name) {
     const std::string_view wanted(name);
     if (wanted.rfind("VECTORXR_FRAMEGEN_ENGINE_", 0) != 0 && wanted.rfind("VECTORXR_FRAMEGEN_DEPTH_", 0) != 0 &&
         wanted.rfind("VECTORXR_FRAMEGEN_SYNTH_", 0) != 0 && wanted.rfind("VECTORXR_FRAMEGEN_FLOW_", 0) != 0 &&
+        wanted.rfind("VECTORXR_FRAMEGEN_AUTO_", 0) != 0 &&
         wanted != "VECTORXR_FRAMEGEN_WORLD") {
         return std::nullopt;
     }

@@ -125,6 +125,7 @@
     "format": "{mode} · {rate} · {motion}",
     "dynamic": "Dinámico",
     "fixedAuto": "Fijo automático",
+    "fixedAutoLowest": "Fijo automático, 2x o más",
     "fixed": "Fijo {multiplier}"
   },
   "howItWorks": {
@@ -179,8 +180,10 @@
         "description": "Mantiene el juego en una fracción fija de la frecuencia de actualización para un ritmo uniforme y rellena el resto con fotogramas generados."
       },
       "fixedRate": "Multiplicador fijo",
+      "lowestRate": "Multiplicador mínimo",
       "rates": {
         "auto": "Elige 2x, 3x o 4x según lo necesite el juego y no genera nada mientras el juego da abasto por sí solo.",
+        "autoLowest": "Elige 2x, 3x o 4x según lo necesite el juego y sigue generando a 2x aunque el juego pudiera dar abasto por sí solo.",
         "x2": "El juego funciona hasta a 1/2 de la frecuencia de actualización, por ejemplo 45 fps a 90 Hz. Por debajo de eso, el ritmo es menos uniforme.",
         "x3": "El juego funciona hasta a 1/3 de la frecuencia de actualización, por ejemplo 30 fps a 90 Hz. Por debajo de eso, el ritmo es menos uniforme.",
         "x4": "El juego funciona hasta a 1/4 de la frecuencia de actualización, por ejemplo 22.5 fps a 90 Hz. El que más artefactos produce; para los juegos más exigentes."

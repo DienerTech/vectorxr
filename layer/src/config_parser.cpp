@@ -885,6 +885,7 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
         "trackSeenApps",
         "osd",
         "sound",
+        "screenshot",
     };
 
     NoteUnknownKeys(object, allowed);
@@ -931,6 +932,39 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
         }
         if (volume.has_value()) {
             out.sound_volume = std::clamp(*volume, 0, 100);
+        }
+    }
+    if (const auto it = object.find("screenshot"); it != object.end()) {
+        const JsonValue::Object* screenshot = RequireObject(it->second, "core.screenshot", error);
+        if (!screenshot) {
+            return false;
+        }
+        static const std::unordered_set<std::string> screenshot_allowed = {"bindings", "eyes", "folder"};
+        NoteUnknownKeys(*screenshot, screenshot_allowed);
+        std::optional<std::string> eyes;
+        std::optional<std::string> folder;
+        if (!ReadOptionalString(*screenshot, "eyes", eyes, error) ||
+            !ReadOptionalString(*screenshot, "folder", folder, error)) {
+            return false;
+        }
+        if (eyes.has_value()) {
+            if (*eyes == "both") {
+                out.screenshot.eyes = ScreenshotEyes::Both;
+            } else if (*eyes == "left") {
+                out.screenshot.eyes = ScreenshotEyes::Left;
+            } else if (*eyes == "right") {
+                out.screenshot.eyes = ScreenshotEyes::Right;
+            } else {
+                error = "Field core.screenshot.eyes must be both, left or right";
+                return false;
+            }
+        }
+        if (folder.has_value()) {
+            out.screenshot.folder = *folder;
+        }
+        if (screenshot->count("bindings") &&
+            !ParseInputBindings(*screenshot, "bindings", "binding", out.screenshot.bindings, error)) {
+            return false;
         }
     }
 
@@ -1315,14 +1349,17 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
 bool ParseTurboExperimental(const JsonValue::Object& object, TurboExperimentalSettings& out, std::string& error) {
     NoteUnknownKeys(object, {"enabled", "applicationIds", "waitForSubmit", "sampleAtEntry",
                             "predictionPercent", "frameLimit", "timingTrace"});
-    for (auto [key, target] : {std::pair{"enabled", &out.enabled}, {"waitForSubmit", &out.wait_for_submit},
-                              {"sampleAtEntry", &out.sample_at_entry}}) {
+    for (auto [key, target] : {std::pair{"enabled", &out.enabled}, {"waitForSubmit", &out.wait_for_submit}}) {
         std::optional<bool> value;
         if (!ReadOptionalBool(object, key, value, error)) return false;
         if (value) *target = *value;
     }
-    std::optional<bool> legacy_trace;
-    if (!ReadOptionalBool(object, "timingTrace", legacy_trace, error)) return false;
+    // Retired options: settings files written by earlier versions still
+    // carry them, so they are read and ignored.
+    for (const char* key : {"timingTrace", "sampleAtEntry"}) {
+        std::optional<bool> retired;
+        if (!ReadOptionalBool(object, key, retired, error)) return false;
+    }
     const auto ids = object.find("applicationIds");
     if (ids != object.end() && !ParseStringArray(ids->second, "turbo.experimental.applicationIds", out.application_ids, error)) return false;
     for (auto [key, target] : {std::pair{"predictionPercent", &out.prediction_percent}, {"frameLimit", &out.frame_limit}}) {
@@ -2452,6 +2489,154 @@ bool ReadOptionalBoundedInt(const JsonValue::Object& object, const char* key, co
     return true;
 }
 
+bool ParseMirrorSettings(const JsonValue::Object& object, const char* field, MirrorSettings& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {"smoothing", "levelHorizon", "eye",
+                                                            "margin",    "aspect",       "width",
+                                                            "frameRate", "fillMonitor",  "monitor"};
+    NoteUnknownKeys(object, allowed);
+
+    struct Percent {
+        const char* key;
+        double* target;
+        double high;
+    };
+    for (const Percent& percent : {Percent{"smoothing", &out.smoothing, 100.0}, Percent{"margin", &out.margin, 40.0}}) {
+        std::optional<double> value;
+        if (!ReadOptionalNumber(object, percent.key, value, error)) {
+            return false;
+        }
+        if (!value) {
+            continue;
+        }
+        if (!std::isfinite(*value) || *value < 0.0 || *value > percent.high) {
+            error = std::string(field) + "." + percent.key + " must be a number from 0 to " +
+                    std::to_string(static_cast<int>(percent.high));
+            return false;
+        }
+        *percent.target = *value;
+    }
+    std::optional<bool> level;
+    std::optional<bool> fill;
+    std::optional<std::string> eye;
+    std::optional<std::string> aspect;
+    std::optional<std::string> monitor;
+    if (!ReadOptionalBool(object, "levelHorizon", level, error) || !ReadOptionalString(object, "eye", eye, error) ||
+        !ReadOptionalString(object, "aspect", aspect, error) || !ReadOptionalBool(object, "fillMonitor", fill, error) ||
+        !ReadOptionalString(object, "monitor", monitor, error)) {
+        return false;
+    }
+    if (fill) {
+        out.fill_monitor = *fill;
+    }
+    if (monitor) {
+        if (monitor->size() > 64) {
+            error = std::string(field) + ".monitor must be a monitor's device name of at most 64 characters";
+            return false;
+        }
+        out.monitor = *monitor;
+    }
+    if (level) {
+        out.level_horizon = *level;
+    }
+    if (eye) {
+        const std::optional<MirrorEye> parsed = ParseMirrorEye(*eye);
+        if (!parsed) {
+            error = std::string(field) + ".eye must be left or right";
+            return false;
+        }
+        out.eye = *parsed;
+    }
+    if (aspect) {
+        const std::optional<MirrorAspect> parsed = ParseMirrorAspect(*aspect);
+        if (!parsed) {
+            error = std::string(field) + ".aspect must be 16:9, 16:10, 4:3, 1:1 or 21:9";
+            return false;
+        }
+        out.aspect = *parsed;
+    }
+    return ReadOptionalBoundedInt(object, "width", field, 320, 3840, out.width, error) &&
+           ReadOptionalBoundedInt(object, "frameRate", field, 15, 120, out.frame_rate, error);
+}
+
+bool ParseMirrorProfile(const JsonValue& value, MirrorProfile& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "mirrorProfile", error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {"name", "enabled", "mode", "applicationIds", "settings"};
+    NoteUnknownKeys(*object, allowed);
+
+    const auto application_ids_it = object->find("applicationIds");
+    if (application_ids_it == object->end()) {
+        error = "Missing required field: mirrorProfile.applicationIds";
+        return false;
+    }
+    if (!ParseStringArray(application_ids_it->second, "mirrorProfile.applicationIds", out.application_ids, error)) {
+        return false;
+    }
+
+    std::optional<std::string> name;
+    std::optional<bool> enabled;
+    std::optional<ProfileMode> mode;
+    if (!ReadOptionalString(*object, "name", name, error) || !ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalProfileMode(*object, "mode", mode, error)) {
+        return false;
+    }
+    out.name = name.value_or("New Profile");
+    out.enabled = enabled.value_or(true);
+    out.mode = mode.value_or(ProfileMode::Custom);
+
+    const auto settings_it = object->find("settings");
+    if (settings_it != object->end()) {
+        const JsonValue::Object* settings_object = RequireObject(settings_it->second, "mirrorProfile.settings", error);
+        if (!settings_object || !ParseMirrorSettings(*settings_object, "mirrorProfile.settings", out.settings, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ParseMirrorModule(const JsonValue::Object& object, MirrorModuleConfig& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {"enabled", "bindings", "defaults", "profiles"};
+    NoteUnknownKeys(object, allowed);
+
+    std::optional<bool> enabled;
+    if (!ReadOptionalBool(object, "enabled", enabled, error)) {
+        return false;
+    }
+    if (enabled) {
+        out.enabled = *enabled;
+    }
+    if (object.count("bindings") && !ParseInputBindings(object, "bindings", "binding", out.bindings, error)) {
+        return false;
+    }
+
+    const auto defaults_it = object.find("defaults");
+    if (defaults_it != object.end()) {
+        const JsonValue::Object* defaults_object = RequireObject(defaults_it->second, "mirror.defaults", error);
+        if (!defaults_object || !ParseMirrorSettings(*defaults_object, "mirror.defaults", out.defaults, error)) {
+            return false;
+        }
+    }
+
+    const auto profiles_it = object.find("profiles");
+    if (profiles_it != object.end()) {
+        const JsonValue::Array* profiles = RequireArray(profiles_it->second, "mirror.profiles", error);
+        if (!profiles) {
+            return false;
+        }
+        for (const JsonValue& profile_value : *profiles) {
+            MirrorProfile profile;
+            if (!ParseMirrorProfile(profile_value, profile, error)) {
+                return false;
+            }
+            out.profiles.push_back(std::move(profile));
+        }
+    }
+    return true;
+}
+
 bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, FrameGenSettings& out,
                            std::string& error) {
     static const std::unordered_set<std::string> allowed = {
@@ -2464,6 +2649,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
         "motionLimitPercent",
         "extendHeadPrediction",
         "edgeFill",
+        "autoLowestRate",
         "useGameDepth",
     };
     NoteUnknownKeys(object, allowed);
@@ -2533,6 +2719,17 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
     }
     if (edge_fill) {
         out.edge_fill = *edge_fill;
+    }
+    std::optional<std::string> auto_lowest_rate;
+    if (!ReadOptionalString(object, "autoLowestRate", auto_lowest_rate, error)) {
+        return false;
+    }
+    if (auto_lowest_rate) {
+        if (*auto_lowest_rate != "off" && *auto_lowest_rate != "2x") {
+            error = std::string(field) + ".autoLowestRate must be off or 2x";
+            return false;
+        }
+        out.auto_lowest_multiplier = *auto_lowest_rate == "2x" ? 2 : 1;
     }
     std::optional<bool> use_game_depth;
     if (!ReadOptionalBool(object, "useGameDepth", use_game_depth, error)) {
@@ -2693,7 +2890,7 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
         return false;
     }
 
-    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr", "quadviews", "turbo", "framegen"};
+    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr", "quadviews", "turbo", "framegen", "mirror"};
     NoteUnknownKeys(*modules_object, allowed_modules);
 
     const auto depth_it = modules_object->find("depthxr");
@@ -2738,6 +2935,15 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
     if (framegen_it != modules_object->end()) {
         const JsonValue::Object* framegen_object = RequireObject(framegen_it->second, "modules.framegen", error);
         if (!framegen_object || !ParseFrameGenModule(*framegen_object, out.framegen, error)) {
+            return false;
+        }
+    }
+
+    // Optional: absent in configs written before the mirror window existed.
+    const auto mirror_it = modules_object->find("mirror");
+    if (mirror_it != modules_object->end()) {
+        const JsonValue::Object* mirror_object = RequireObject(mirror_it->second, "modules.mirror", error);
+        if (!mirror_object || !ParseMirrorModule(*mirror_object, out.mirror, error)) {
             return false;
         }
     }

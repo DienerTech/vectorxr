@@ -194,6 +194,8 @@ struct FakeRuntime {
         *time = now;
         return XR_SUCCESS;
     }
+
+    static XrResult XRAPI_CALL DestroySpace(XrSpace) { return XR_SUCCESS; }
 };
 
 } // namespace
@@ -351,6 +353,16 @@ public:
         Layer().head_prediction_last_probe_ = std::chrono::steady_clock::now() - std::chrono::seconds(1);
     }
     static void DropClock() { Layer().turbo_convert_counter_time_ = nullptr; }
+
+    // The game destroys its LOCAL space and the runtime hands the same handle
+    // out for the one it creates next.
+    static void RecreateLocalSpace() {
+        auto& layer = Layer();
+        layer.next_destroy_space_ = &FakeRuntime::DestroySpace;
+        Expect(layer.DestroySpace(kLocalSpace) == XR_SUCCESS, "xrDestroySpace must succeed");
+        layer.next_destroy_space_ = nullptr;
+        layer.tracked_local_spaces_ = {kLocalSpace};
+    }
 
     static bool Settled() { return Layer().head_prediction_limit_.Settled(); }
     static XrTime Limit() { return Layer().head_prediction_limit_.LimitNs(); }
@@ -653,6 +665,76 @@ void RacedLocatesOfOneDisplayTimeAnswerTheSame() {
     Peer::Finish();
 }
 
+void ADestroyedSpacesAnswersAreNotASpaceCreatedUnderItsHandle() {
+    // The answer kept for a display time names its spaces by handle. A space
+    // destroyed and another created under the same handle is located afresh,
+    // at the same display time too.
+    Peer::Reset();
+    Peer::SettleLimit();
+    const XrTime time = FakeRuntime::now + 100 * kMs;
+    FakeRuntime::locates = 0;
+    Peer::SpaceHead(time);
+    Expect(FakeRuntime::locates == 4, "the first locate extends the head with three extra locates (" +
+                                          std::to_string(FakeRuntime::locates) + ")");
+    Peer::RecreateLocalSpace();
+    Peer::SpaceHead(time);
+    Expect(FakeRuntime::locates == 8, "the new space's locate must be extended afresh, not answered from the "
+                                      "destroyed one's (" +
+                                          std::to_string(FakeRuntime::locates) + " locates)");
+    // VIEW in the new space is kept again from here.
+    Peer::SpaceHead(time);
+    Expect(FakeRuntime::locates == 9, "a later locate in the new space costs one runtime locate (" +
+                                          std::to_string(FakeRuntime::locates) + ")");
+    Peer::Finish();
+}
+
+void ViewsAndSpaceLocatesOfOneDisplayTimeShareOneHead() {
+    // The first locate of a display time extends the head (three extra
+    // runtime locates). The views located again at that time, and VIEW space
+    // located at it, turn to that same head, whatever the runtime answers by
+    // then, for one extra locate each. A new display time is extended afresh:
+    // nothing is kept across display times.
+    Peer::Reset();
+    Peer::SettleLimit();
+    const XrTime time = FakeRuntime::now + 100 * kMs;
+    FakeRuntime::locates = 0;
+    const XrPosef views = Peer::ViewsHead(time);
+    const int first_cost = FakeRuntime::locates;
+    const XrPosef runtime_first = FakeRuntime::Answer(time);
+    Expect(AngleBetween(views, runtime_first) > 1.0, "the head must be extended");
+
+    FakeRuntime::now += 30 * kMs;
+    Expect(AngleBetween(FakeRuntime::Answer(time), runtime_first) > 3.0,
+           "the runtime's answers must move with its clock");
+    FakeRuntime::locates = 0;
+    const XrPosef again = Peer::ViewsHead(time);
+    Expect(AngleBetween(again, views) < 1e-3 && Distance(again.position, views.position) < 1e-4,
+           "the views located again at the display time must turn to the same head (off by " +
+               Describe(AngleBetween(again, views)) + " deg)");
+    Expect(FakeRuntime::locates == first_cost - 2,
+           "the kept head costs one extra runtime locate, not three (" + std::to_string(FakeRuntime::locates) +
+               " locates, the first " + std::to_string(first_cost) + ")");
+
+    FakeRuntime::now += 4 * kMs;
+    FakeRuntime::locates = 0;
+    const XrPosef space = Peer::SpaceHead(time);
+    Expect(FakeRuntime::locates == 2, "VIEW located at the display time takes the views' head for one extra locate (" +
+                                          std::to_string(FakeRuntime::locates) + ")");
+    Expect(AngleBetween(space, views) < 1e-3 && Distance(space.position, views.position) < 1e-4,
+           "VIEW located in LOCAL must be the head the views turned to (off by " +
+               Describe(AngleBetween(space, views)) + " deg)");
+    const XrPosef inverse = Peer::InverseSpaceHead(time);
+    Expect(AngleBetween(inverse, views) < 1e-3 && Distance(inverse.position, views.position) < 1e-4,
+           "LOCAL located in VIEW must be its inverse (off by " + Describe(AngleBetween(inverse, views)) + " deg)");
+
+    FakeRuntime::locates = 0;
+    const XrPosef next = Peer::ViewsHead(time + 11 * kMs);
+    Expect(FakeRuntime::locates == first_cost, "a new display time is extended afresh (" +
+                                                   std::to_string(FakeRuntime::locates) + " locates)");
+    Expect(AngleBetween(next, views) > 0.5, "a new display time must not take the last one's head");
+    Peer::Finish();
+}
+
 struct Scenario {
     const char* name;
     std::function<void()> run;
@@ -674,6 +756,10 @@ int main() {
         {"no runtime clock, no extension", NoClockNoExtension},
         {"repeated space locates of one display time answer the same", RepeatedSpaceLocatesOfOneDisplayTimeAnswerTheSame},
         {"raced locates of one display time answer the same", RacedLocatesOfOneDisplayTimeAnswerTheSame},
+        {"a destroyed space's answers are not a space's created under its handle",
+         ADestroyedSpacesAnswersAreNotASpaceCreatedUnderItsHandle},
+        {"views and space locates of one display time share one head",
+         ViewsAndSpaceLocatesOfOneDisplayTimeShareOneHead},
         {"canted eyes place the inset through each eye", CantedEyesPlaceTheInsetThroughEachEye},
         {"views the runtime did not locate are left alone", ViewsTheRuntimeDidNotLocateAreLeftAlone},
     };

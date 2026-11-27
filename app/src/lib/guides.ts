@@ -14,9 +14,11 @@ export type GuideId =
   | 'pivot'
   | 'depth'
   | 'osd'
+  | 'screenshots'
+  | 'mirror'
 
 export type GuideGroup = 'start' | 'enhancements' | 'tools'
-export type GuideBadge = 'experimental'
+export type GuideBadge = 'new' | 'beta' | 'experimental'
 
 export interface GuideEntry {
   id: GuideId
@@ -37,6 +39,8 @@ export const guides: GuideEntry[] = [
   { id: 'pivot', group: 'enhancements', tab: 'pivotxr', badges: [] },
   { id: 'depth', group: 'enhancements', tab: 'depthxr', badges: [] },
   { id: 'osd', group: 'tools', tab: 'osd', badges: [] },
+  { id: 'screenshots', group: 'tools', tab: 'screenshots', badges: ['new', 'beta'] },
+  { id: 'mirror', group: 'tools', tab: 'mirror', badges: ['new', 'beta'] },
 ]
 
 export function guideEntry(id: GuideId): GuideEntry | undefined {

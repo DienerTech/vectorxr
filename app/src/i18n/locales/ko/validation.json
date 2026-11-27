@@ -19,6 +19,15 @@
     "compactMetrics": "OSD 간략 성능 항목 선택이 잘못되었습니다",
     "bodyOrder": "OSD 본문 순서에는 각 행이 한 번씩 포함되어야 합니다"
   },
+  "screenshot": {
+    "eyes": "{field}은(는) both, left 또는 right여야 합니다",
+    "folder": "{field}은(는) D:\\Screenshots와 같은 전체 폴더 경로여야 합니다"
+  },
+  "mirror": {
+    "eye": "{field}은(는) left 또는 right여야 합니다",
+    "aspect": "{field}은(는) {values}여야 합니다",
+    "monitor": "{field}은(는) {max}자 이하의 텍스트여야 합니다"
+  },
   "binding": {
     "chordEmpty": "{field}에는 키가 하나 이상 포함되어야 합니다",
     "chordUnsupportedKey": "{field}에 지원되지 않는 키가 포함되어 있습니다: {key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field}은(는) performance, balanced 또는 quality여야 합니다",
     "motionEstimation": "{field}은(는) shader 또는 hardware여야 합니다",
     "frameMultiplier": "{field}은(는) auto, dynamic, 2x, 3x 또는 4x여야 합니다",
+    "autoLowestRate": "{field}은(는) off 또는 2x여야 합니다",
     "diagnosticView": "{field}은(는) off, flow, confidence 또는 tint여야 합니다",
     "interpolateFlow": "{field} 값은 auto, hardware 또는 shader여야 합니다"
   },
@@ -61,6 +71,8 @@
   "version": "version은 {version}이어야 합니다",
   "warnings": {
     "turboFrameGenOverlap": "{targets}에 Turbo와 Frame Generation이 모두 켜져 있습니다. Frame Generation이 프레임 페이싱을 맡으며, Frame Generation이 실행되는 세션에서는 Turbo가 꺼진 상태로 유지됩니다.",
+    "mirrorFillNoMonitorDefault": "안정화된 미러 창: 기본 프로필에서 \"모니터 채우기\"가 켜져 있지만 선택한 모니터가 없습니다. 모니터를 선택할 때까지 미러는 일반 창으로 열립니다.",
+    "mirrorFillNoMonitorProfile": "안정화된 미러 창: {profile} 프로필에서 \"모니터 채우기\"가 켜져 있지만 선택한 모니터가 없습니다. 모니터를 선택할 때까지 미러는 일반 창으로 열립니다.",
     "moreApplications_other": "외 {count}개",
     "applicationsWithoutProfile": "사용자 지정 프로필이 없는 애플리케이션"
   },

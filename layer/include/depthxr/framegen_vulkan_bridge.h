@@ -50,7 +50,9 @@ struct VulkanBridgeGame {
 // colour is rendered privately and resolved into the twin at release;
 // multisampled depth stays private and never reaches the runtime (the caller
 // keeps it out of submitted frames), as does all depth with
-// VECTORXR_VULKAN_BRIDGE_DEPTH=private.
+// VECTORXR_VULKAN_BRIDGE_DEPTH=private, and depth the game's device cannot
+// import from Direct3D 12 (the game still gets its depth swapchain; the
+// runtime gets no depth from it).
 //
 // A game may write its depth after the frame's end (Star Citizen in October
 // 2026, which CIG said it will fix). About once a second the bridge reads a
@@ -65,11 +67,16 @@ struct VulkanBridgeGame {
 // Frame Generation finds the game's depth empty (WantDepthTimingCheck).
 
 //
-// Every Vulkan call that uses the game's queue is made inside the
+// Nearly every Vulkan call that uses the game's queue is made inside the
 // application's own xrAcquireSwapchainImage, xrReleaseSwapchainImage and
 // xrEndFrame (where the layer hands releases over), the calls in which
 // XR_KHR_vulkan_enable lets a runtime use it; nothing here is called from the
-// presenter thread.
+// presenter thread. Three are not: a release still held when the application
+// waits for the swapchain's next image (the runtime refuses that wait with the
+// release outstanding), one still held when its swapchain is destroyed, and
+// the barrier at the session's end (both cover the game's last rendering
+// before the images are freed). A game that renders on another thread through
+// those calls is not kept off its queue there.
 class VulkanBridge {
   public:
     VulkanBridge();
@@ -96,7 +103,9 @@ class VulkanBridge {
     // Before xrCreateSession, for a session whose first structure is a Vulkan
     // binding (XR_KHR_vulkan_enable or _enable2): makes a Direct3D 12 device on
     // the game's adapter (which must be the one the runtime asks for), the
-    // bridge's queue and the shared fences, imported into the game's device.
+    // bridge's queue and the shared fences, imported into the game's device,
+    // and makes and imports one small shared image to see that it can (let go
+    // at once; nothing is submitted).
     // `vulkan_get_instance_proc_addr` is the game's vkGetInstanceProcAddr (from
     // XR_KHR_vulkan_enable2's create infos), or null for the loader the game
     // loaded. Every Vulkan function the bridge calls (vkGetDeviceProcAddr
@@ -165,7 +174,8 @@ class VulkanBridge {
     // terms, without the ones Vulkan has no format for (or repeats).
     static std::vector<std::int64_t> TranslatedFormats(const std::vector<std::int64_t>& runtime_formats);
     // What the game is offered on a bridged session: the translated formats the
-    // game's device can import as the bridge's images.
+    // game's device can import as the bridge's images, and the depth formats
+    // it cannot import but can make private images of.
     std::vector<std::int64_t> GameFormats(const std::vector<std::int64_t>& runtime_formats) const;
     // Before the runtime is asked for a swapchain: whether the bridge can make
     // the images the application's create info needs. False with the result
@@ -193,6 +203,15 @@ class VulkanBridge {
     bool HasUnmirrored() const;
     // The VkImage handles the game renders into, by image index (empty when not bridged).
     std::vector<std::uint64_t> Images(XrSwapchain swapchain) const;
+    // The Direct3D 12 side of those images, by image index (ID3D12Resource
+    // pointers, not referenced; empty when not bridged, null for an image
+    // that is not shared: private depth): the textures the game's Vulkan
+    // images are imported from. A colour one is made for simultaneous
+    // access, so a reader on the bridge's queue (the mirror window) needs no
+    // state of its own on it and is in nobody's way, unlike a reader of the
+    // runtime's image, which Frame Generation's queue takes right after the
+    // bridge's copy.
+    std::vector<void*> SharedImages(XrSwapchain swapchain) const;
     // The application's xrEnumerateSwapchainImages of a bridged swapchain
     // (XrSwapchainImageVulkanKHR structures), with the two-call idiom.
     XrResult EnumerateImages(XrSwapchain swapchain, std::uint32_t capacity, std::uint32_t* count,

@@ -14,6 +14,12 @@
       "label": "オンスクリーン表示",
       "subtitle": "ヘッドセットの表示、配置、バインド"
     },
+    "screenshots": {
+      "label": "スクリーンショット"
+    },
+    "mirror": {
+      "label": "手ぶれ補正ミラー"
+    },
     "registry": {
       "label": "アプリケーション レジストリ",
       "subtitle": "プロファイル割り当て用にアプリケーションを登録",
@@ -27,6 +33,10 @@
     "guides": {
       "label": "ガイド",
       "subtitle": "各機能のしくみと、オンとオフの切り替え方"
+    },
+    "supporters": {
+      "label": "サポーター",
+      "subtitle": "Patreon メンバーへの謝辞"
     },
     "about": {
       "label": "バージョン情報",
@@ -78,9 +88,25 @@
     "httpFailed": "GitHub の更新確認が HTTP {status} で失敗しました",
     "invalidRelease": "GitHub から有効なリリースが返されませんでした"
   },
+  "supporters": {
+    "thanks": "Patreon でのご支援のおかげで、VectorXR の改善を続けることができます。ありがとうございます。",
+    "communityTitle": "コミュニティの皆さまに感謝を込めて",
+    "communityThanks": "Ko-fi を通じてご寄付くださった方、バグを知らせてくださった方、レポートや改善案をお寄せくださった方、皆さまに感謝します。",
+    "forumsThanks": "とりわけ、Eagle Dynamics のフォーラムで VectorXR 0.11 の初期ビルドを温かく迎えてくださった DCS コミュニティの皆さまに、心より感謝します。",
+    "empty": "サポーターのお名前はまだ公開されていません。",
+    "comingSoon": "VectorXR の Patreon は Soon™ 公開予定です。参加してくださった方々のお名前をここに掲載します。",
+    "joinFirst": "まだ掲載されているサポーターはいません。Patreon に参加して、ここで最初に感謝される一人になってください。",
+    "unavailable": "サポーター一覧を読み込めません。しばらくしてから更新してください。",
+    "cached": "最新の一覧を読み込めないため、前回保存した一覧を表示しています。"
+  },
   "sidebar": {
     "appSettings": "アプリの設定",
+    "applications": "アプリケーション",
+    "capture": "キャプチャとミラー",
+    "openxrUtilities": "OpenXR ユーティリティ",
     "enhancements": "OpenXR 拡張機能",
+    "performance": "パフォーマンス",
+    "lookAndFeel": "見え方",
     "suiteOff": "VectorXR のランタイム効果はオフです",
     "moduleTitle": "{subtitle}。{status}",
     "saveHint": "設定を適用するには [変更を保存] をクリックしてください。VR アプリケーションの再起動が必要な変更は、各拡張機能に記載されています。",
@@ -111,6 +137,8 @@
     "issuesFound_other": "検証の問題が {count} 件見つかりました",
     "issuesHint": "このまま適用することもできます。エラーは [検証] パネルに表示され、解決するまで保存はブロックされます。",
     "valid": "構成の構造と値の範囲は有効なようです。",
+    "networkPathsTitle": "ネットワークパスはインポートされません",
+    "networkPathsHint": "このファイルには、別のコンピューター上のファイルまたはフォルダーが指定されています。VectorXR はこれらのパスをすべてのゲーム内で開くため、インポートから除外されます。スクリーンショットのフォルダーは既定に、サウンドと画像は内蔵のものに戻ります。必要な場合は、インポート後に選び直してください。",
     "applyToEditor": "エディターに適用",
     "importAndSave": "インポートして保存"
   },

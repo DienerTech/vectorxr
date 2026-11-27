@@ -97,7 +97,14 @@ frame calls:
   runtimes return waits inside a cycle at once and would show only the newest frame.
 - Auto steps the multiplier up when more than 30% of the last second's app frames miss the
   cadence, and probes one step down after five steady seconds, doubling the wait between
-  probes (10 s to 80 s) each time a probe fails. At 1x it passes frames straight through.
+  probes (10 s to 80 s) each time a probe fails. At 1x it passes frames straight through,
+  and also engages once the game runs below 90% of the refresh rate for two seconds, as
+  Dynamic does. Frames without a projection layer, the first frame after a pause and frames
+  late while the game makes or destroys a swapchain are left out of the cadence. A step up
+  after a hitch or a mode switch is checked again after a few seconds instead of the
+  back-off. The game's measured work per frame holds back probes to full rate after one
+  failed at the same work, and brings a probe down from 3x or 4x forward when it is well
+  inside the lower step. Turning Frame Generation off and on starts Auto afresh.
   When the late frames are inline cycles whose first slot was already past due, a higher
   multiplier would only hold the game's thread longer, so Auto drops to full rate for a
   minute instead.

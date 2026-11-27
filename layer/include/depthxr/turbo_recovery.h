@@ -52,6 +52,9 @@ public:
     bool ConsumeClearRequest();
     const std::string& Reason() const { return reason_; }
 private:
+    // The record as marker text. Advances its timestamp, so no two records
+    // of one guard share an archive name.
+    std::string Serialize();
     bool Write();
     std::filesystem::path root_;
     std::filesystem::path own_path_;

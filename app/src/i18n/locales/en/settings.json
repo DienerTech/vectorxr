@@ -37,7 +37,7 @@
       },
       "trackSeenApps": {
         "title": "Track discovered XR apps",
-        "description": "Notes the executable name and first/last seen time of OpenXR apps you launch, so you can easily register them from the Application Registry. All data is kept locally on this PC."
+        "description": "Notes the executable name and first/last seen time of OpenXR apps you launch, so you can easily register them from the Discovery page. All data is kept locally on this PC."
       }
     },
     "logging": {

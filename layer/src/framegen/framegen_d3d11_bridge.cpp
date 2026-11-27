@@ -6,6 +6,7 @@
 #include <vulkan/vulkan_core.h>
 #include <openxr/openxr_platform.h>
 
+#include "depthxr/d3d11_predication.h"
 #include "depthxr/framegen_d3d11_bridge.h"
 
 #include "bridge_depth_ps.h"
@@ -470,8 +471,14 @@ struct D3D11Bridge::Impl {
         }
         bool on = false;
         if (multithread) {
+            // Inside the device's lock: a thread that holds the context (the
+            // frame's, through its hand-over) is then waited for here, at the
+            // lock, and not from inside a Direct3D 11 call made beside its own
+            // (which the debug layer reports as two threads in one context).
+            multithread->Enter();
             multithread->SetMultithreadProtected(TRUE);
             on = multithread->GetMultithreadProtected() != FALSE;
+            multithread->Leave();
         }
         std::scoped_lock lock(mutex);
         multithread_protected = multithread_protected || on;
@@ -661,16 +668,17 @@ struct D3D11Bridge::Impl {
         return nullptr;
     }
 
-    bool MakeTwin(Swapchain& chain, Image& image, bool unordered_access, std::string& reason) {
-        D3D12_HEAP_PROPERTIES heap{};
-        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    // A colour twin's description: `storage` is its format's family
+    // (ColorStorageFormat).
+    static D3D12_RESOURCE_DESC TwinDesc(DXGI_FORMAT storage, std::uint32_t width, std::uint32_t height,
+                                        std::uint32_t array_size, std::uint32_t mip_count, bool unordered_access) {
         D3D12_RESOURCE_DESC desc{};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = chain.width;
-        desc.Height = chain.height;
-        desc.DepthOrArraySize = static_cast<UINT16>(chain.array_size);
-        desc.MipLevels = static_cast<UINT16>(chain.mode == Mode::kResolve ? 1 : chain.mip_count);
-        desc.Format = chain.storage;
+        desc.Width = width;
+        desc.Height = height;
+        desc.DepthOrArraySize = static_cast<UINT16>(array_size);
+        desc.MipLevels = static_cast<UINT16>(mip_count);
+        desc.Format = storage;
         desc.SampleDesc.Count = 1;
         desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
         // Direct3D 11 opens a Direct3D 12 texture only as a render target, and
@@ -679,6 +687,41 @@ struct D3D11Bridge::Impl {
         if (unordered_access) {
             desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         }
+        return desc;
+    }
+
+    // Makes a colour twin of `desc` (TwinDesc) on `device12` and opens it on
+    // the game's device: every twin's way there, and the one Begin tries
+    // before the session is bridged.
+    static bool ShareTwin(ID3D12Device* device12, ID3D11Device5* device11, const D3D12_RESOURCE_DESC& desc,
+                          ComPtr<ID3D12Resource>& twin, ComPtr<ID3D11Texture2D>& twin11, std::string& reason) {
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        HRESULT hr = device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
+                                                       D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&twin));
+        if (FAILED(hr)) {
+            reason = Failure("Creating a shared Direct3D 12 texture", hr);
+            return false;
+        }
+        HANDLE handle = nullptr;
+        hr = device12->CreateSharedHandle(twin.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
+        if (FAILED(hr)) {
+            reason = Failure("Sharing a Direct3D 12 texture", hr);
+            return false;
+        }
+        hr = device11->OpenSharedResource1(handle, IID_PPV_ARGS(&twin11));
+        CloseHandle(handle);
+        if (FAILED(hr)) {
+            reason = Failure("Opening a shared texture on the game's Direct3D 11 device", hr);
+            return false;
+        }
+        return true;
+    }
+
+    bool MakeTwin(Swapchain& chain, Image& image, bool unordered_access, std::string& reason) {
+        const D3D12_RESOURCE_DESC desc =
+            TwinDesc(chain.storage, chain.width, chain.height, chain.array_size,
+                     chain.mode == Mode::kResolve ? 1 : chain.mip_count, unordered_access);
 
         if (!image.runtime) {
             reason = "the runtime's image is null";
@@ -704,27 +747,11 @@ struct D3D11Bridge::Impl {
             return false;
         }
 
-        HRESULT hr = device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
-                                                       D3D12_RESOURCE_STATE_COMMON, nullptr,
-                                                       IID_PPV_ARGS(&image.twin));
-        if (FAILED(hr)) {
-            reason = Failure("Creating a shared Direct3D 12 texture", hr);
+        if (!ShareTwin(device12.Get(), device11.Get(), desc, image.twin, image.twin11, reason)) {
             return false;
         }
         image.twin->SetName(L"VectorXR Direct3D 11 bridge image");
         chain.twin_bytes += device12->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
-        HANDLE handle = nullptr;
-        hr = device12->CreateSharedHandle(image.twin.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
-        if (FAILED(hr)) {
-            reason = Failure("Sharing a Direct3D 12 texture", hr);
-            return false;
-        }
-        hr = device11->OpenSharedResource1(handle, IID_PPV_ARGS(&image.twin11));
-        CloseHandle(handle);
-        if (FAILED(hr)) {
-            reason = Failure("Opening a shared texture on the game's Direct3D 11 device", hr);
-            return false;
-        }
         image.copies.emplace_back();
         return RecordCopy(chain, image, image.copies.back(), reason);
     }
@@ -1027,6 +1054,7 @@ struct D3D11Bridge::Impl {
 
     // CopyDepthToTwin's calls, holding the context.
     void CopyDepthToTwinHeld(const Swapchain& chain, Image& image, ID3D11DeviceContext4* context) {
+        const ScopedD3D11Unpredicated unpredicated(context);
         // The output merger: only its depth target changes, and only while it
         // is the image. Its render targets are set again up to the last one
         // bound, with its unordered-access views kept: a view in a slot the
@@ -1133,6 +1161,7 @@ struct D3D11Bridge::Impl {
             CopyDepthToTwin(chain, image);
         }
         if (chain.mode == Mode::kResolve) {
+            const ScopedD3D11Unpredicated unpredicated(context11.Get());
             const DXGI_FORMAT format = ResolveFormat(chain.format);
             for (UINT slice = 0; slice < chain.array_size; ++slice) {
                 const UINT subresource = D3D11CalcSubresource(0, slice, 1);
@@ -1411,37 +1440,15 @@ const XrSessionCreateInfo* D3D11Bridge::Begin(XrInstance instance, const XrSessi
     // device cannot open fails the game's xrCreateSwapchain. A device
     // wrapped by another Direct3D 11 mod (REAL VR's dxgi.dll) can refuse
     // shared textures while sharing fences, so one is opened here first and
-    // the session stays Direct3D 11 if that fails.
+    // the session stays Direct3D 11 if that fails: made and opened as a
+    // colour swapchain's twins are (typeless, as an sRGB swapchain's).
     {
-        D3D12_HEAP_PROPERTIES heap{};
-        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-        D3D12_RESOURCE_DESC desc{};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = 16;
-        desc.Height = 16;
-        desc.DepthOrArraySize = 1;
-        desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+        const D3D12_RESOURCE_DESC desc =
+            Impl::TwinDesc(ColorStorageFormat(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB), 16, 16, 1, 1, false);
         ComPtr<ID3D12Resource> probe;
         ComPtr<ID3D11Texture2D> probe11;
-        HANDLE handle = nullptr;
-        hr = impl->device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
-                                                     D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&probe));
-        if (SUCCEEDED(hr)) {
-            hr = impl->device12->CreateSharedHandle(probe.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
-        }
-        if (SUCCEEDED(hr)) {
-            hr = impl->device11->OpenSharedResource1(handle, IID_PPV_ARGS(&probe11));
-        }
-        if (handle) {
-            CloseHandle(handle);
-        }
-        if (FAILED(hr)) {
-            reason = Failure("Opening a shared texture on the game's Direct3D 11 device", hr) +
-                     " (another Direct3D 11 mod may wrap the game's device)";
+        if (!Impl::ShareTwin(impl->device12.Get(), impl->device11.Get(), desc, probe, probe11, reason)) {
+            reason += " (another Direct3D 11 mod may wrap the game's device)";
             return nullptr;
         }
     }
@@ -1768,6 +1775,9 @@ bool D3D11Bridge::Released(XrSwapchain swapchain) {
     }
     // A release whose Direct3D 11 half did not run ahead (StageReleases)
     // runs it here, holding the context first (ContextHold's lock order).
+    // Under the layer's locks its thread entered the device's lock before
+    // them (GameContextLock, always in a bridged session): this hold is that
+    // thread's lock again, and never waits.
     std::optional<ContextHold> hold;
     if (Impl::NeedsContext(*chain)) {
         lock.unlock();

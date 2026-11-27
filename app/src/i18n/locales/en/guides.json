@@ -7,6 +7,8 @@
     "tools": "Display and tools"
   },
   "badges": {
+    "new": "New",
+    "beta": "Beta",
     "experimental": "Experimental"
   },
   "back": "All guides",
@@ -42,7 +44,13 @@
     "depthPlane": "Depth plane",
     "wait": "Waiting on the runtime",
     "render": "Game renders",
-    "osdPanel": "OSD panel"
+    "osdPanel": "OSD panel",
+    "mirrorWindow": "VectorXR mirror window",
+    "smoothedCopy": "A copy, smoothed",
+    "binding": "Your binding",
+    "runtimeMirror": "Headset software's mirror",
+    "sameImage": "The same image",
+    "pngFiles": "PNG for each eye"
   },
   "items": {
     "start": {
@@ -80,7 +88,7 @@
           "heading": "Set up your first game",
           "steps": {
             "1": "Launch the game once with VectorXR installed, then quit it.",
-            "2": "Open **Application Registry**, click **Refresh**, and register the game from the list of apps VectorXR has seen.",
+            "2": "Open **Applications → Discovery**, click **Refresh**, and register the game from the list of apps VectorXR has seen.",
             "3": "Open an enhancement in the sidebar, click **Add Profile**, and choose the game.",
             "4": "Adjust the settings, then click **Save Changes**. Some enhancements need the game restarted; their guides say which."
           }
@@ -285,6 +293,61 @@
           "body": "Switch the OSD off on its page and save, or hide it for the session with its binding."
         }
       }
+    },
+    "screenshots": {
+      "title": "Screenshots",
+      "summary": "Save each eye's full-resolution image as a PNG with a key or button.",
+      "sections": {
+        "what": {
+          "body": "A screenshot saves the image the game sends to the headset, before lens correction, so it's sharper and larger than a capture of the desktop mirror. It doesn't include the On-Screen Display or other overlays. With Frame Generation on, it saves a frame the game rendered, never a generated one."
+        },
+        "setup": {
+          "steps": {
+            "1": "Open **Screenshots** and add a **Take Screenshot** binding. There's none by default.",
+            "2": "Choose **Both eyes**, **Left eye** or **Right eye**.",
+            "3": "Click **Save Changes**, then press the binding in the headset."
+          }
+        },
+        "check": {
+          "body": "Files go to Pictures\\VectorXR, in a folder for each game. A large image takes a second or two to appear. With the binding's sound on, you hear a cue when the files are saved."
+        },
+        "problems": {
+          "body": "Screenshots work in Direct3D 11 and Direct3D 12 games. Vulkan games aren't supported yet. If nothing is saved, the VectorXR log says why."
+        }
+      }
+    },
+    "mirror": {
+      "title": "Stabilized mirror window",
+      "summary": "A steadied desktop window of one eye's view, for streaming and recording.",
+      "sections": {
+        "what": {
+          "body": "The stabilized mirror window is a VectorXR window on your desktop that shows one eye's image with your head's shake smoothed out. The picture in the headset is not changed. The headset software's own mirror and the game's desktop window show exactly what the headset gets, so they can't be steadied on their own."
+        },
+        "when": {
+          "body": "Use it when you stream or record, or when people in the room watch on a monitor or TV. It works in Direct3D 11, Direct3D 12 and Vulkan games."
+        },
+        "setup": {
+          "steps": {
+            "1": "Open **Stabilized Mirror** and turn the mirror window on: in the **Default Profile** for every game, or in a custom profile for one game.",
+            "2": "Click **Save Changes**. The window opens when the game shows its first frame. For a Vulkan game, turn it on before you start the game.",
+            "3": "In OBS, add a **Window Capture** source and pick the window whose name starts with VectorXR Mirror.",
+            "4": "Raise **Smoothing** for a steadier picture, and **Margin** if the picture's edges show during fast head turns. Changes apply as soon as you save."
+          }
+        },
+        "check": {
+          "body": "The Stabilized Mirror page lists running games, with **Window open** while the mirror is showing."
+        },
+        "off": {
+          "body": "Turn off the profile and save, or hide the window with the **Show or Hide Mirror Window** binding. Closing the window only hides it."
+        },
+        "problems": {
+          "points": {
+            "a": "**The picture lags behind fast head turns:** lower Smoothing.",
+            "b": "**No window in a Vulkan game:** turn the mirror window on, save, and restart the game.",
+            "c": "**The picture covers the game's window:** with **Fill a monitor**, choose a different monitor from the game's."
+          }
+        }
+      }
     }
   },
   "walkthrough": {
@@ -315,7 +378,11 @@
       "neck": "That's your neck's limit",
       "deadzone": "Inside the deadzone: 1:1",
       "biggerWorld": "Closer eyes: a bigger world",
-      "compactWorld": "Wider eyes: a more compact world"
+      "compactWorld": "Wider eyes: a more compact world",
+      "windowCapture": "Window Capture",
+      "mirror": "Desktop mirror",
+      "fullRes": "Full resolution",
+      "folder": "Pictures\\VectorXR"
     }
   },
   "walkthroughs": {
@@ -387,6 +454,26 @@
         "3": "Pick a preset, then drag the panel to where you want it in the preview.",
         "4": "In the game, Ctrl+Alt+F10 shows or hides it, and Ctrl+Alt+F11 switches layouts.",
         "5": "On the On-Screen Display page, switch it on, choose a preset, and save."
+      }
+    },
+    "screenshots": {
+      "title": "Watch: how Screenshots work",
+      "steps": {
+        "1": "A capture of the desktop mirror is small, and shows the picture after lens correction.",
+        "2": "VectorXR saves the image the game sends to the headset, at full resolution and without overlays.",
+        "3": "Press your binding, and a PNG for each eye lands in a folder for the game in Pictures\\VectorXR.",
+        "4": "On the Screenshots page, add a Take Screenshot binding, choose the eyes, and save."
+      }
+    },
+    "mirror": {
+      "title": "Watch: how the stabilized mirror window works",
+      "steps": {
+        "1": "The headset software's mirror and the game's desktop window show exactly the image the headset gets, so every shake of your head is on your stream.",
+        "2": "VectorXR opens its own window with a copy of one eye's image, and smooths only that copy. The picture in the headset is not changed.",
+        "3": "In OBS, add a Window Capture source and pick the window whose name starts with VectorXR Mirror.",
+        "4": "On the Stabilized Mirror page, turn on the Default Profile for every game, or add a custom profile for one game, and save. The window opens with the game's first frame.",
+        "5": "Raise Smoothing for a steadier picture, and Margin if the picture's edges show during fast head turns. Keep the horizon level takes out head roll.",
+        "6": "Under Window, choose the eye, the picture's shape and size, and a frame rate limit, or fill a monitor. Changes apply as soon as you save."
       }
     }
   }

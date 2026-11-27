@@ -19,6 +19,15 @@
     "compactMetrics": "Недопустимый выбор показателей производительности для компактного OSD",
     "bodyOrder": "Порядок строк OSD должен содержать каждую строку один раз"
   },
+  "screenshot": {
+    "eyes": "{field} должно иметь значение both, left или right",
+    "folder": "{field} должно быть полным путём к папке, например D:\\Screenshots"
+  },
+  "mirror": {
+    "eye": "{field} должно иметь значение left или right",
+    "aspect": "{field} должно иметь значение {values}",
+    "monitor": "{field} должно быть текстом не длиннее {max} символов"
+  },
   "binding": {
     "chordEmpty": "{field} должно включать хотя бы одну клавишу",
     "chordUnsupportedKey": "{field} содержит неподдерживаемую клавишу: {key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field} должно иметь значение performance, balanced или quality",
     "motionEstimation": "{field} должно иметь значение shader или hardware",
     "frameMultiplier": "{field} должно иметь значение auto, dynamic, 2x, 3x или 4x",
+    "autoLowestRate": "{field} должно быть off или 2x",
     "diagnosticView": "{field} должно иметь значение off, flow, confidence или tint",
     "interpolateFlow": "{field} должно быть auto, hardware или shader"
   },
@@ -61,6 +71,8 @@
   "version": "version должно быть равно {version}",
   "warnings": {
     "turboFrameGenOverlap": "Turbo и Frame Generation одновременно включены для {targets}. Frame Generation берёт на себя темп кадров; Turbo остаётся выключенным в сеансах, где работает Frame Generation.",
+    "mirrorFillNoMonitorDefault": "Стабилизированное окно-зеркало: «Заполнить монитор» включено в профиле по умолчанию, но монитор не выбран. Зеркало открывается как обычное окно, пока монитор не выбран.",
+    "mirrorFillNoMonitorProfile": "Стабилизированное окно-зеркало: «Заполнить монитор» включено в профиле {profile}, но монитор не выбран. Зеркало открывается как обычное окно, пока монитор не выбран.",
     "moreApplications_one": "ещё {count}",
     "moreApplications_few": "ещё {count}",
     "moreApplications_many": "ещё {count}",

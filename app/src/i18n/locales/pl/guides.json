@@ -7,6 +7,8 @@
     "tools": "Wyświetlanie i narzędzia"
   },
   "badges": {
+    "new": "Nowość",
+    "beta": "Beta",
     "experimental": "Eksperymentalne"
   },
   "back": "Wszystkie poradniki",
@@ -42,7 +44,13 @@
     "depthPlane": "Płaszczyzna głębi",
     "wait": "Czekanie na środowisko",
     "render": "Gra renderuje",
-    "osdPanel": "Panel OSD"
+    "osdPanel": "Panel OSD",
+    "mirrorWindow": "Okno podglądu VectorXR",
+    "smoothedCopy": "Kopia, wygładzona",
+    "binding": "Twoje przypisanie",
+    "runtimeMirror": "Podgląd oprogramowania gogli",
+    "sameImage": "Ten sam obraz",
+    "pngFiles": "PNG dla każdego oka"
   },
   "items": {
     "start": {
@@ -80,7 +88,7 @@
           "heading": "Skonfiguruj pierwszą grę",
           "steps": {
             "1": "Uruchom grę raz z zainstalowanym VectorXR, a potem ją zamknij.",
-            "2": "Otwórz **Rejestr aplikacji**, kliknij **Odśwież** i zarejestruj grę z listy aplikacji, które VectorXR widział.",
+            "2": "Otwórz **Aplikacje → Wykrywanie**, kliknij **Odśwież** i zarejestruj grę z listy aplikacji, które VectorXR widział.",
             "3": "Otwórz ulepszenie na pasku bocznym, kliknij **Dodaj profil** i wybierz grę.",
             "4": "Dostosuj ustawienia i kliknij **Zapisz zmiany**. Niektóre ulepszenia wymagają ponownego uruchomienia gry; ich poradniki mówią które."
           }
@@ -285,6 +293,61 @@
           "body": "Wyłącz OSD na jego stronie i zapisz albo ukryj go na czas sesji jego przypisaniem."
         }
       }
+    },
+    "screenshots": {
+      "title": "Zrzuty ekranu",
+      "summary": "Zapisuj obraz każdego oka w pełnej rozdzielczości jako PNG klawiszem lub przyciskiem.",
+      "sections": {
+        "what": {
+          "body": "Zrzut zapisuje obraz, który gra wysyła do gogli, przed korekcją soczewek, więc jest ostrzejszy i większy niż zrzut lustra na pulpicie. Nie zawiera wyświetlacza ekranowego ani innych nakładek. Przy włączonym Frame Generation zapisuje klatkę wyrenderowaną przez grę, nigdy wygenerowaną."
+        },
+        "setup": {
+          "steps": {
+            "1": "Otwórz **Zrzuty ekranu** i dodaj przypisanie **Wykonaj zrzut ekranu**. Domyślnie nie ma żadnego.",
+            "2": "Wybierz **Oboje oczu**, **Lewe oko** lub **Prawe oko**.",
+            "3": "Kliknij **Zapisz zmiany**, a potem naciśnij przypisanie w goglach."
+          }
+        },
+        "check": {
+          "body": "Pliki trafiają do Obrazy\\VectorXR, do osobnego folderu dla każdej gry. Duży obraz pojawia się po sekundzie lub dwóch. Gdy dźwięk przypisania jest włączony, usłyszysz sygnał po zapisaniu plików."
+        },
+        "problems": {
+          "body": "Zrzuty działają w grach Direct3D 11 i Direct3D 12. Gry Vulkan nie są jeszcze obsługiwane. Jeśli nic się nie zapisało, dziennik VectorXR podaje powód."
+        }
+      }
+    },
+    "mirror": {
+      "title": "Stabilizowane okno podglądu",
+      "summary": "Ustabilizowane okno na pulpicie z widokiem jednego oka, do transmisji i nagrywania.",
+      "sections": {
+        "what": {
+          "body": "Stabilizowane okno podglądu to okno VectorXR na pulpicie, które pokazuje obraz jednego oka z wygładzonymi drganiami głowy. Obraz w goglach się nie zmienia. Podgląd oprogramowania gogli i okno gry na pulpicie pokazują dokładnie to, co trafia do gogli, więc nie da się ich osobno ustabilizować."
+        },
+        "when": {
+          "body": "Używaj go, gdy transmitujesz lub nagrywasz albo gdy inni w pokoju oglądają na monitorze lub telewizorze. Działa w grach Direct3D 11, Direct3D 12 i Vulkan."
+        },
+        "setup": {
+          "steps": {
+            "1": "Otwórz **Stabilizowany podgląd** i włącz okno podglądu: w sekcji **Profil domyślny** dla wszystkich gier albo w profilu niestandardowym dla jednej gry.",
+            "2": "Kliknij **Zapisz zmiany**. Okno otwiera się, gdy gra pokaże pierwszą klatkę. W grze Vulkan włącz je przed uruchomieniem gry.",
+            "3": "W OBS dodaj źródło **Przechwytywanie okna** i wybierz okno, którego nazwa zaczyna się od VectorXR Mirror.",
+            "4": "Zwiększ **Wygładzanie**, aby obraz był stabilniejszy, oraz **Margines**, jeśli przy szybkich obrotach głowy widać krawędzie obrazu. Zmiany działają od razu po zapisaniu."
+          }
+        },
+        "check": {
+          "body": "Strona Stabilizowany podgląd pokazuje uruchomione gry, z oznaczeniem **Okno otwarte**, gdy podgląd jest wyświetlany."
+        },
+        "off": {
+          "body": "Wyłącz profil i zapisz albo ukryj okno przypisaniem **Pokaż lub ukryj okno podglądu**. Zamknięcie okna tylko je ukrywa."
+        },
+        "problems": {
+          "points": {
+            "a": "**Obraz nie nadąża za szybkimi obrotami głowy:** zmniejsz Wygładzanie.",
+            "b": "**Brak okna w grze Vulkan:** włącz okno podglądu, zapisz i uruchom grę ponownie.",
+            "c": "**Obraz zasłania okno gry:** w opcji **Wypełnij monitor** wybierz inny monitor niż ten, na którym jest gra."
+          }
+        }
+      }
     }
   },
   "walkthrough": {
@@ -317,7 +380,11 @@
       "frames_one": "{count} klatka",
       "frames_few": "{count} klatki",
       "frames_many": "{count} klatek",
-      "frames_other": "{count} klatki"
+      "frames_other": "{count} klatki",
+      "windowCapture": "Przechwytywanie okna",
+      "mirror": "Lustro na pulpicie",
+      "fullRes": "Pełna rozdzielczość",
+      "folder": "Obrazy\\VectorXR"
     }
   },
   "walkthroughs": {
@@ -389,6 +456,26 @@
         "3": "Wybierz ustawienie i przeciągnij panel w podglądzie tam, gdzie ma być.",
         "4": "W grze Ctrl+Alt+F10 pokazuje lub ukrywa panel, a Ctrl+Alt+F11 przełącza układ.",
         "5": "Na stronie Wyświetlacz ekranowy włącz go, wybierz ustawienie i zapisz."
+      }
+    },
+    "screenshots": {
+      "title": "Obejrzyj: jak działają zrzuty ekranu",
+      "steps": {
+        "1": "Zrzut lustra na pulpicie jest mały i pokazuje obraz po korekcji soczewek.",
+        "2": "VectorXR zapisuje obraz, który gra wysyła do gogli, w pełnej rozdzielczości i bez nakładek.",
+        "3": "Naciśnij przypisanie, a PNG dla każdego oka trafi do folderu gry w Obrazy\\VectorXR.",
+        "4": "Na stronie Zrzuty ekranu dodaj przypisanie Wykonaj zrzut ekranu, wybierz oczy i zapisz."
+      }
+    },
+    "mirror": {
+      "title": "Obejrzyj: jak działa stabilizowane okno podglądu",
+      "steps": {
+        "1": "Podgląd oprogramowania gogli i okno gry na pulpicie pokazują dokładnie ten obraz, który trafia do gogli, więc każde drgnięcie głowy widać w transmisji.",
+        "2": "VectorXR otwiera własne okno z kopią obrazu jednego oka i wygładza tylko tę kopię. Obraz w goglach się nie zmienia.",
+        "3": "W OBS dodaj źródło Przechwytywanie okna i wybierz okno, którego nazwa zaczyna się od VectorXR Mirror.",
+        "4": "Na stronie Stabilizowany podgląd włącz Profil domyślny dla wszystkich gier albo dodaj profil niestandardowy dla jednej gry i zapisz. Okno otwiera się z pierwszą klatką gry.",
+        "5": "Zwiększ Wygładzanie, aby obraz był stabilniejszy, oraz Margines, jeśli przy szybkich obrotach głowy widać krawędzie obrazu. Utrzymuj poziomy horyzont usuwa z obrazu przechylenie głowy.",
+        "6": "W sekcji Okno wybierz oko, kształt i rozmiar obrazu oraz limit klatek na sekundę albo wypełnij monitor. Zmiany działają od razu po zapisaniu."
       }
     }
   }

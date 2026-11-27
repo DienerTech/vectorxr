@@ -465,6 +465,11 @@ int RunScenarios(Harness& harness) {
           error);
 
     FrameGenTuning tuning;
+    // These scenarios describe the shader flow without the flow prior and the
+    // shortest search (both switches set off): 2' scans the plain search, 1b
+    // and 2a compare the switches against it. 2a' checks the default.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     FrameGenExecuteResult result;
     auto run = [&](std::uint32_t index, bool synthesize, float yaw_newest, float yaw_previous) {
         const std::vector<FrameGenViewSubmission> views{
@@ -618,6 +623,124 @@ int RunScenarios(Harness& harness) {
             }
         }
     }
+    // 1b. The flow research switches (FrameGenTuning::flow_shortest,
+    // flow_reach): with them the coarsest level's search takes, per cell, the
+    // shortest displacement within the radius whose cost lies within the
+    // tolerance of the lowest (the cheaper of equal lengths), as a scan on the
+    // CPU finds it; off again, the frame is as it was. With flow_evidence the
+    // frame differs where the square's texture is ambiguous and is as it was
+    // with the switch parsed off.
+    {
+        const auto shortest_cells = [&](float yaw, std::size_t& compared, std::size_t& moved) {
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            run(1, true, yaw, 0);
+            std::vector<float> current, previous, flow;
+            FrameGenExtent extent{}, previous_extent{}, cells{};
+            std::uint32_t channels = 0, previous_channels = 0, flow_channels = 0;
+            if (!gpu->ReadTexture(0, {FrameGenTextureKind::kLumaNewest, kFrameGenPyramidLevels}, current, extent, channels) ||
+                !gpu->ReadTexture(0, {FrameGenTextureKind::kLumaPrevious, kFrameGenPyramidLevels}, previous,
+                                  previous_extent, previous_channels) ||
+                !gpu->ReadTexture(0, {FrameGenTextureKind::kFlow, kFrameGenPyramidLevels}, flow, cells, flow_channels)) {
+                return false;
+            }
+            const int w = static_cast<int>(extent.width), h = static_cast<int>(extent.height);
+            const int radius = static_cast<int>(tuning.flow_reach);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const auto cost = [&](int dx, int dy) {
+                        float sum = 0.0f, count = 0.0f;
+                        for (int i = 0; i < 25; ++i) {
+                            const int qx = x + i % 5 - 2, qy = y + i / 5 - 2;
+                            if (qx >= 0 && qy >= 0 && qx < w && qy < h) {
+                                const int px = qx - dx, py = qy - dy;
+                                const float p = px < 0 || py < 0 || px >= w || py >= h
+                                                    ? -1.0f
+                                                    : previous[static_cast<std::size_t>(py) * w + px];
+                                sum += p < 0.0f ? 0.25f : std::abs(current[static_cast<std::size_t>(qy) * w + qx] - p);
+                                count += 1.0f;
+                            }
+                        }
+                        return sum / std::max(count, 1.0f) +
+                               0.05f * std::hypot(static_cast<float>(dx) / w, static_cast<float>(dy) / h);
+                    };
+                    float lowest = cost(0, 0);
+                    for (int dy = -radius; dy <= radius; ++dy) {
+                        for (int dx = -radius; dx <= radius; ++dx) {
+                            lowest = std::min(lowest, cost(dx, dy));
+                        }
+                    }
+                    const float allowed = lowest + tuning.flow_shortest.tolerance + tuning.flow_shortest.share * lowest;
+                    int best_x = 0, best_y = 0, best_length = std::numeric_limits<int>::max();
+                    float best_cost = 0.0f;
+                    bool tie = false;
+                    for (int dy = -radius; dy <= radius; ++dy) {
+                        for (int dx = -radius; dx <= radius; ++dx) {
+                            const float c = cost(dx, dy);
+                            // Within rounding of the tolerance either way, or of
+                            // an equal length's cost: the GPU may pick either.
+                            if (std::abs(c - allowed) <= 1e-5f) tie = true;
+                            if (c > allowed) continue;
+                            const int length = dx * dx + dy * dy;
+                            if (length < best_length || (length == best_length && c < best_cost)) {
+                                tie = tie || (length == best_length && best_cost - c <= 1e-5f);
+                                best_length = length;
+                                best_cost = c;
+                                best_x = dx;
+                                best_y = dy;
+                            } else if (length == best_length && c - best_cost <= 1e-5f) {
+                                tie = true;
+                            }
+                        }
+                    }
+                    if (tie) {
+                        continue;
+                    }
+                    const float* v = &flow[(static_cast<std::size_t>(y) * w + x) * 4];
+                    const int gx = static_cast<int>(std::lround(v[0] * w)), gy = static_cast<int>(std::lround(v[1] * h));
+                    Check(gx == best_x && gy == best_y && std::abs(v[2] - best_cost) <= 1e-3f * best_cost + 1e-6f,
+                          harness.name + " shortest search: cell " + std::to_string(x) + "," + std::to_string(y) +
+                              " found " + std::to_string(gx) + "," + std::to_string(gy) + ", the scan " +
+                              std::to_string(best_x) + "," + std::to_string(best_y));
+                    ++compared;
+                    moved += best_x != 0 || best_y != 0 ? 1 : 0;
+                }
+            }
+            return true;
+        };
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        const Pixels plain = run(1, true, 0.08f, 0);
+        for (const std::uint32_t reach : {kFrameGenSearchRadius, 9u}) {
+            tuning.flow_shortest = ParseFrameGenFlowShortest("0.004");
+            tuning.flow_reach = reach;
+            for (const float yaw : {0.0f, 0.08f}) {
+                std::size_t compared = 0, moved = 0;
+                const bool readable = shortest_cells(yaw, compared, moved);
+                Check(harness.name != "D3D12" || readable, harness.name + " shortest search: the coarsest level reads back");
+                if (readable) {
+                    std::cout << harness.name << " shortest search, radius " << reach << ", yaw " << yaw << ": " << compared
+                              << " cells as the scan, " << moved << " of them moved\n";
+                    Check(compared >= 100, harness.name + " shortest search: most cells compared");
+                }
+            }
+        }
+        tuning.flow_shortest = ParseFrameGenFlowShortest("off");
+        tuning.flow_reach = 0;
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        Check(run(1, true, 0.08f, 0) == plain, harness.name + " shortest search: off, the frame is as it was");
+        tuning.flow_evidence = ParseFrameGenFlowEvidence("0.004,0.3");
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        const Pixels evident = run(1, true, 0.08f, 0);
+        tuning.flow_evidence = ParseFrameGenFlowEvidence("off");
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        Check(run(1, true, 0.08f, 0) == plain, harness.name + " flow evidence: off, the frame is as it was");
+        std::cout << harness.name << " flow evidence: the frame differs from the plain one by "
+                  << MeanError(evident, plain, 0, 0, kSize, kSize) << '\n';
+    }
     // 2a. The flow prior (research, FrameGenTuning::flow_prior; without depth
     // it holds every cell): the background, which no motion matches as well
     // as any vector, keeps no residual flow at all, while the square, whose
@@ -715,6 +838,25 @@ int RunScenarios(Harness& harness) {
                   harness.name + " flow prior: within the head's parallax the background keeps its residual flow (" +
                       std::to_string(moved_after.first) + " of " + std::to_string(before.first) + " cells)");
         }
+    }
+    // 2a'. The default flow (kFrameGenFlowPriorDefault with
+    // kFrameGenFlowShortestDefault): the background keeps no residual flow and
+    // the square is still interpolated far better than repeating the newest
+    // frame.
+    {
+        tuning.flow_prior = kFrameGenFlowPriorDefault;
+        tuning.flow_shortest = kFrameGenFlowShortestDefault;
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        const Pixels defaulted = run(1, true, 0, 0);
+        tuning.flow_prior = {};
+        tuning.flow_shortest = {};
+        const double default_error = MeanError(defaulted, truth_mid, 96, 96, 256, 256);
+        std::cout << harness.name << " default flow: error " << default_error << " vs hold " << hold_error << " (plain "
+                  << interp_error << ")\n";
+        Check(default_error < 0.3 * hold_error,
+              harness.name + " default flow: interpolation is not better than repeating the newest frame");
+        Check(MeanError(defaulted, truth_mid, 0, 0, 64, 64) < 0.01, harness.name + " default flow: static background was disturbed");
     }
 
     // 2b. A 3x multiplier: one flow field feeds two generated frames.
@@ -4270,8 +4412,9 @@ int RunQuadViews(Harness& harness) {
             const FrameGenExtent filtered = levels[FrameGenFinalFlowLevel(tuning)];
             slot += allocation(views[i].extent, static_cast<ID3D12Resource*>(g_swapchains[sources[i]][0])->GetDesc().Format,
                                false) +
-                    2 * allocation(filtered, DXGI_FORMAT_R16G16B16A16_FLOAT, true) +
-                    allocation(levels[1], DXGI_FORMAT_R32_FLOAT, true);
+                    2 * allocation(filtered, DXGI_FORMAT_R16G16B16A16_FLOAT, true);
+            // No depth image: these views bring no depth, and the ring's depth is
+            // made only when one does.
         }
         const std::uint64_t slots = FrameGenHistoryRing(true) - FrameGenHistoryRing(false);
         std::cout << harness.name << " history ring: quad views " << bytes[0] / 1024 << " KiB, not composed "
@@ -8908,6 +9051,11 @@ int RunReplay(Harness& harness) {
                     {"keys", {FrameGenTextureKind::kShiftKeys, 0}},
                     {"filtered", {FrameGenTextureKind::kFilteredNewest, 0}},
                     {"search", {FrameGenTextureKind::kFlow, kFrameGenPyramidLevels}},
+                    // Every refine level's flow too (the levels a plan does not
+                    // reach are not written): where stray vectors start.
+                    {"flow4", {FrameGenTextureKind::kFlow, 4}},
+                    {"flow3", {FrameGenTextureKind::kFlow, 3}},
+                    {"flow2", {FrameGenTextureKind::kFlow, 2}},
                     {"world", {FrameGenTextureKind::kWorldParams, 0}},
                     {"scalevotes", {FrameGenTextureKind::kDepthScaleVotes, 0}},
                     {"scaleraw", {FrameGenTextureKind::kDepthScaleRaw, 0}},
@@ -10884,6 +11032,40 @@ void HardwareWatchOwnershipTest() {
     Check(!watch.ResetFence(nullptr), "a pending hardware operation was discarded while retiring its fence");
     second.completed = 7;
     Check(watch.ResetFence(nullptr) && !watch.Pending(), "a finished hardware fence cannot be retired");
+
+    // More operations than places, the first never finishing (captures on the
+    // game's queue can run that far ahead): the first keeps its watch, and so
+    // does the latest, whose release covers the ones between.
+    Fence busy;
+    FrameGenHardwareWatch<Fence> crowded;
+    Check(crowded.ResetFence(&busy), "the crowded hardware fence is installed");
+    for (std::uint64_t done = 1; done <= 6; ++done) {
+        crowded.Watch(done, 20 + done, 250);
+    }
+    bool first_watched = false;
+    bool latest_watched = false;
+    for (std::size_t index = 0; index < 4; ++index) {
+        const auto operation = crowded.Read(index);
+        first_watched = first_watched || (operation && operation.fence == &busy && operation.done == 1 &&
+                                          operation.input == 21 && crowded.Current(operation));
+        latest_watched = latest_watched || (operation && operation.done == 6 && operation.input == 26);
+    }
+    Check(first_watched, "a later hardware operation took the place of an unfinished one");
+    Check(latest_watched, "the latest hardware operation is not watched while every place is taken");
+    Check(crowded.Pending() && !crowded.ResetFence(nullptr), "an unfinished hardware operation was discarded");
+    // A finished operation's place is the one given up.
+    busy.completed = 1;
+    crowded.Watch(7, 27, 250);
+    bool second_watched = false;
+    bool next_watched = false;
+    for (std::size_t index = 0; index < 4; ++index) {
+        const auto operation = crowded.Read(index);
+        second_watched = second_watched || (operation && operation.done == 2);
+        next_watched = next_watched || (operation && operation.done == 7 && operation.input == 27);
+    }
+    Check(second_watched && next_watched, "a finished hardware operation's place was not the one reused");
+    busy.completed = 7;
+    Check(crowded.ResetFence(nullptr) && !crowded.Pending(), "the finished crowded hardware fence cannot be retired");
 }
 
 // A one-shot failure at every working-texture allocation. Check the complete
@@ -12190,6 +12372,12 @@ EngineRunResult RunEngineFrames(Harness& harness, const EngineFrames& frames, co
     encoding.near_z = 0.1f;
     encoding.far_z = options.infinite_far ? std::numeric_limits<float>::infinity() : 1000.0f;
     FrameGenTuning tuning;
+    // The engine scenarios weigh the game's vectors against the measured flow
+    // they were tuned with: the shader flow without the flow prior and the
+    // shortest search (both switches set off). The prior would also filter
+    // the merged vectors, an engine-vector question of its own.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     tuning.mode = options.synthesis;
     tuning.fractions[0] = options.fraction;
     tuning.generated = 1;
@@ -15600,6 +15788,42 @@ int D3D12Test() {
     X(CmdPipelineBarrier) X(CmdCopyImageToBuffer) X(CmdCopyBufferToImage) X(CreateFence) X(DestroyFence) X(ResetFences)   \
     X(WaitForFences) X(QueueSubmit) X(DeviceWaitIdle)
 
+// A game's images, captured at their release (no SetCopyAfterRelease): the
+// first frame has no capture and only sets its view up, the next release is
+// captured into that view and the frame shows it.
+void VulkanUncapturedTest(Harness& harness) {
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    Check(gpu != nullptr, "Vulkan uncaptured backend: " + error);
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    g_swapchains[kSource] = {harness.create(kSize, kSize)};
+    g_swapchains[kOutput] = {harness.create(kSize, kSize)};
+    g_swapchains[kOutputSecond] = {harness.create(kSize, kSize)};
+    Check(gpu->Track(kSource, EnumerateImages, error) && gpu->Track(kOutput, EnumerateImages, error) &&
+              gpu->Track(kOutputSecond, EnumerateImages, error),
+          error);
+    const Pixels pixels = MovingSquare(120, 120);
+    harness.upload(g_swapchains[kSource][0], pixels);
+    const std::vector<FrameGenViewSubmission> views{Submission(0, harness.format, output_format, true, 0, 0)};
+    FrameGenTuning tuning;
+    FrameGenExecuteResult result;
+    Check(!gpu->Execute(views, tuning, result, error) && result.uncaptured,
+          "Vulkan: a frame without a capture was not reported as uncaptured: " + error);
+    Check(gpu->WaitIdle(), "Vulkan: setting an uncaptured view up did not finish");
+    Check(gpu->Capture(0, views[0].source, views[0].request, tuning.quality, error),
+          "Vulkan: a view set up by an uncaptured frame refused its capture: " + error);
+    result = {};
+    Check(gpu->Execute(views, tuning, result, error) && gpu->WaitIdle(), "Vulkan: a captured frame did not execute: " + error);
+    Check(!result.uncaptured && !result.synthesized[0], "Vulkan: a captured first frame must pass through");
+    Check(MeanError(harness.readback(g_swapchains[kOutput][0]), pixels, 0, 0, kSize, kSize) < 0.004,
+          "Vulkan: a captured first frame differs from its source");
+    gpu.reset();
+    g_swapchains.erase(kSource);
+    g_swapchains.erase(kOutput);
+    g_swapchains.erase(kOutputSecond);
+    std::cout << "Vulkan capture at release after an uncaptured frame passed\n";
+}
+
 int VulkanTest() {
     const HMODULE loader = LoadLibraryExW(L"vulkan-1.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!loader) {
@@ -15801,6 +16025,9 @@ int VulkanTest() {
         std::memcpy(pixels.data(), mapped, pixels.size() * 4);
         return pixels;
     };
+    if (!g_bench) {
+        VulkanUncapturedTest(harness);
+    }
     const int result = g_bench ? RunBench(harness) : RunScenarios(harness);
     vkDeviceWaitIdle(device);
     for (const auto& image : owned) {

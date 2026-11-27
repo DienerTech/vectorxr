@@ -14,6 +14,12 @@
       "label": "Wyświetlacz ekranowy",
       "subtitle": "Wyświetlacz w goglach, położenie i przypisania"
     },
+    "screenshots": {
+      "label": "Zrzuty ekranu"
+    },
+    "mirror": {
+      "label": "Stabilizowany podgląd"
+    },
     "registry": {
       "label": "Rejestr aplikacji",
       "subtitle": "Rejestrowanie aplikacji do przypisywania profili",
@@ -30,6 +36,10 @@
     "guides": {
       "label": "Poradniki",
       "subtitle": "Jak działa każda funkcja i jak ją włączyć i wyłączyć"
+    },
+    "supporters": {
+      "label": "Wspierający",
+      "subtitle": "Podziękowania dla osób wspierających na Patreon"
     },
     "about": {
       "label": "Informacje",
@@ -81,9 +91,25 @@
     "httpFailed": "Sprawdzanie aktualizacji w serwisie GitHub nie powiodło się (HTTP {status})",
     "invalidRelease": "Serwis GitHub nie zwrócił prawidłowego wydania"
   },
+  "supporters": {
+    "communityTitle": "Dziękujemy naszej społeczności",
+    "communityThanks": "Dziękujemy wszystkim, którzy wsparli nas przez Ko-fi, zgłosili błędy, przesłali raporty lub zaproponowali ulepszenia.",
+    "forumsThanks": "Szczególne podziękowania dla społeczności DCS na forach Eagle Dynamics za tak ciepłe przyjęcie wczesnej wersji VectorXR 0.11.",
+    "thanks": "Dziękujemy osobom wspierającym nas na platformie Patreon. Dzięki Wam możemy nadal rozwijać VectorXR.",
+    "empty": "Nie opublikowano jeszcze żadnych nazw osób wspierających.",
+    "comingSoon": "Patreon VectorXR już Soon™. Tutaj podziękujemy osobom, które dołączą.",
+    "joinFirst": "Nikt nie jest tu jeszcze wymieniony. Dołącz na Patreonie, aby znaleźć się wśród pierwszych, którym tu podziękujemy.",
+    "unavailable": "Lista osób wspierających jest niedostępna. Spróbuj ją odświeżyć za chwilę.",
+    "cached": "Aktualna lista jest niedostępna. Wyświetlana jest ostatnia zapisana lista."
+  },
   "sidebar": {
     "appSettings": "Ustawienia aplikacji",
+    "applications": "Aplikacje",
+    "capture": "Przechwytywanie i podgląd",
+    "openxrUtilities": "Narzędzia OpenXR",
     "enhancements": "Ulepszenia OpenXR",
+    "performance": "Wydajność",
+    "lookAndFeel": "Wygląd obrazu",
     "suiteOff": "Efekty działania VectorXR są wyłączone",
     "moduleTitle": "{subtitle}. {status}",
     "saveHint": "Kliknij Zapisz zmiany, aby zastosować ustawienia. Każde ulepszenie informuje, które zmiany wymagają ponownego uruchomienia aplikacji VR.",
@@ -123,6 +149,8 @@
     "issuesFound_other": "Znaleziono {count} problemu walidacji",
     "issuesHint": "Nadal można zastosować — błędy pojawią się w panelu Walidacja, a zapisywanie będzie zablokowane do czasu ich rozwiązania.",
     "valid": "Struktura konfiguracji i zakresy wartości wyglądają na prawidłowe.",
+    "networkPathsTitle": "Ścieżki sieciowe nie są importowane",
+    "networkPathsHint": "Ten plik wskazuje pliki lub foldery na innym komputerze. VectorXR otwiera te ścieżki w każdej grze, dlatego są pomijane: folder zrzutów ekranu wraca do domyślnego, a dźwięki i obrazy do wbudowanych. Po imporcie wybierz je ponownie, jeśli chcesz ich używać.",
     "applyToEditor": "Zastosuj w edytorze",
     "importAndSave": "Importuj i zapisz"
   },

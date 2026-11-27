@@ -22,8 +22,30 @@ class FrameGenHardwareWatch {
         explicit operator bool() const { return fence && done; }
     };
 
+    // Only the producer calls this, with rising values on one fence. An
+    // operation keeps its place until it has finished. With every place
+    // taken the latest one gives way: the oldest unfinished operations (a
+    // hang is reported for the first of them) and the latest (its release
+    // covers every operation before it) stay watched.
     void Watch(std::uint64_t done, std::uint64_t input, std::uint64_t allowed) {
-        Operation& operation = operations_[done % Count];
+        Fence* active = fence_;
+        const std::uint64_t completed = active ? active->GetCompletedValue() : ~std::uint64_t{0};
+        std::size_t index = static_cast<std::size_t>(done % Count);
+        if (operations_[index].done > completed) {
+            std::size_t latest = index;
+            bool finished = false;
+            for (std::size_t i = 0; i < Count && !finished; ++i) {
+                const std::uint64_t other = operations_[i].done;
+                if (other <= completed) {
+                    index = i;
+                    finished = true;
+                } else if (other > operations_[latest].done) {
+                    latest = i;
+                }
+            }
+            if (!finished) index = latest;
+        }
+        Operation& operation = operations_[index];
         operation.done = 0;
         operation.input = input;
         operation.allowed = allowed;

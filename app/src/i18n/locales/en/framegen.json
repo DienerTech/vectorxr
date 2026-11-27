@@ -125,6 +125,7 @@
     "format": "{mode} · {rate} · {motion}",
     "dynamic": "Dynamic",
     "fixedAuto": "Fixed Auto",
+    "fixedAutoLowest": "Fixed Auto, 2x or more",
     "fixed": "Fixed {multiplier}"
   },
   "howItWorks": {
@@ -179,8 +180,10 @@
         "description": "Holds the game at a set fraction of the refresh rate for even pacing, and fills the rest with generated frames."
       },
       "fixedRate": "Fixed rate",
+      "lowestRate": "Lowest rate",
       "rates": {
         "auto": "Picks 2x, 3x or 4x as the game needs, and generates nothing while the game keeps up on its own.",
+        "autoLowest": "Picks 2x, 3x or 4x as the game needs, and keeps generating at 2x even while the game could keep up on its own.",
         "x2": "The game runs at up to 1/2 the refresh rate, such as 45 fps at 90 Hz. Below that, pacing is less even.",
         "x3": "The game runs at up to 1/3 the refresh rate, such as 30 fps at 90 Hz. Below that, pacing is less even.",
         "x4": "The game runs at up to 1/4 the refresh rate, such as 22.5 fps at 90 Hz. The most artifacts; for the heaviest games."

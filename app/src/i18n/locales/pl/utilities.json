@@ -1,0 +1,191 @@
+{
+  "screenshots": {
+    "heading": "Zrzuty ekranu",
+    "intro": "Zapisuje obraz każdego oka dokładnie tak, jak wyrenderowała go gra, w pełnej rozdzielczości, jako plik PNG. Plik jest zapisywany w tle, więc gra się nie zacina.",
+    "binding": {
+      "label": "Wykonaj zrzut ekranu",
+      "description": "Zapisuje zrzut ekranu przy każdym naciśnięciu, w każdej grze.",
+      "none": "Brak przypisania. Zrzuty ekranu są wyłączone, dopóki nie dodasz przypisania."
+    },
+    "eyes": {
+      "legend": "Zapisywane oczy",
+      "both": {
+        "label": "Oboje oczu",
+        "description": "Dwa pliki na każdy zrzut, z końcówkami _L i _R."
+      },
+      "left": {
+        "label": "Lewe oko",
+        "description": "Jeden plik z końcówką _L."
+      },
+      "right": {
+        "label": "Prawe oko",
+        "description": "Jeden plik z końcówką _R."
+      }
+    },
+    "folder": {
+      "title": "Folder zrzutów ekranu",
+      "defaultLocation": "VectorXR w folderze Obrazy",
+      "perGame": "Każda gra otrzymuje w nim własny folder o nazwie swojego pliku programu.",
+      "choose": "Wybierz folder…",
+      "useDefault": "Użyj domyślnego",
+      "open": "Otwórz folder",
+      "pickerFailed": "Nie udało się otworzyć okna wyboru folderu.",
+      "openFailed": "Nie udało się otworzyć folderu zrzutów ekranu."
+    },
+    "notes": {
+      "title": "Warto wiedzieć",
+      "names": "Nazwy plików zawierają nazwę gry oraz datę i godzinę wykonania zrzutu.",
+      "api": "Działa w grach korzystających z D3D11 i D3D12. Gry korzystające z Vulkan nie są jeszcze obsługiwane.",
+      "quadviews": "Z Quadviews zrzut ekranu to pełny obraz, który VectorXR składa dla każdego oka.",
+      "framegen": "Z Frame Generation zrzut ekranu to zawsze klatka wyrenderowana przez grę, nigdy klatka wygenerowana.",
+      "feedback": "Jeśli dźwięk przypisania jest włączony, zostanie odtworzony po zapisaniu zrzutu. Jeśli zrzutu nie da się wykonać, zamiast niego zabrzmi dźwięk wyłączenia, a dziennik poda przyczynę. W dzienniku znajdzie się nazwa każdego pliku."
+    }
+  },
+  "mirror": {
+    "heading": "Stabilizowane okno podglądu",
+    "intro": "Otwiera na pulpicie okno VectorXR, które pokazuje obraz jednego oka z wygładzonymi drganiami głowy – do transmisji i nagrywania. Obraz w goglach się nie zmienia. Włącz je dla wszystkich gier lub dla poszczególnych gier.",
+    "liveNote": "Zmiany działają w uruchomionej grze od razu po zapisaniu; po zmianie proporcji obrazu lub szerokości rozmiar okna zostaje dopasowany.",
+    "notes": {
+      "title": "Warto wiedzieć",
+      "summary": "OBS, obsługiwane gry i to, co jest wygładzane",
+      "obs": {
+        "label": "Transmisja i nagrywanie.",
+        "body": "{label} W OBS dodaj źródło „Przechwytywanie okna” i wybierz okno, którego nazwa zaczyna się od „VectorXR Mirror”, a po niej następuje nazwa gry."
+      },
+      "hdr": {
+        "label": "Monitory HDR.",
+        "body": "{label} Jeśli lustro jest na monitorze HDR, a gra działa w SDR, obraz nagrywany przez OBS może wyglądać na wyblakły lub zbyt jasny. Zaznacz „Wymuś SDR” (Force SDR) we właściwościach źródła „Przechwytywanie okna”."
+      },
+      "separate": {
+        "label": "Dlaczego osobne okno.",
+        "body": "{label} Własny podgląd oprogramowania gogli (widok VR w SteamVR, podgląd Meta lub Oculus, Virtual Desktop, Pimax) i okno gry na pulpicie pokazują dokładnie to, co trafia do gogli, i nie da się ich stabilizować osobno."
+      },
+      "support": {
+        "label": "Obsługiwane gry.",
+        "body": "{label} Działa w grach korzystających z D3D11, D3D12 i Vulkan. W grze korzystającej z Vulkan włącz tę funkcję przed uruchomieniem gry."
+      },
+      "smoothing": {
+        "label": "Co jest wygładzane.",
+        "body": "{label} Obrót głowy, czyli jej drgania. Kołysanie pozycji nie jest wygładzane. Mocniejsze wygładzanie bardziej opóźnia się za szybkimi obrotami głowy, a margines przybliża obraz, by ukryć jego krawędzie."
+      },
+      "framegen": {
+        "label": "Z Frame Generation.",
+        "body": "{label} Okno pokazuje klatki wyrenderowane przez grę, a nie wygenerowane."
+      },
+      "window": {
+        "label": "Okno.",
+        "body": "{label} Nigdy nie odbiera grze fokusu klawiatury. Zamknięcie ukrywa okno. Aby je przywrócić, wybierz „Pokaż lustro” lub użyj przypisanego skrótu. Jego rozmiar i położenie są zapamiętywane dla każdej gry."
+      },
+      "fill": {
+        "label": "Wypełnij monitor.",
+        "body": "{label} Obraz może wypełnić monitor lub telewizor, bez ramki – dla osób oglądających w pokoju, a także dla OBS. Zasłania wszystko, co jest na tym monitorze, także okno samej gry, więc wybierz inny monitor niż ten z grą, chyba że właśnie o to chodzi. Wypełniony monitor nie ma przycisku zamykania: ukrywaj i pokazuj obraz przypisaniem."
+      },
+      "cost": {
+        "label": "Niewielki koszt.",
+        "body": "{label} Jedno niewielkie rysowanie w rozmiarze samego okna na każdą pokazywaną klatkę, ograniczone limitem klatek na sekundę. Nigdy nie wstrzymuje klatek gry."
+      }
+    },
+    "status": {
+      "show": "Pokaż lustro",
+      "hide": "Ukryj lustro",
+      "heading": "Uruchomione gry",
+      "unavailable": "Stan środowiska jest chwilowo niedostępny.",
+      "noSession": "Brak uruchomionej aplikacji VR"
+    },
+    "session": {
+      "withReason": "{status} · {reason}",
+      "active": "Okno otwarte",
+      "pending": "Czekam na pierwszą klatkę",
+      "hidden": "Okno ukryte",
+      "unsupported": "Obecnie niedostępne w tej grze",
+      "failed": "Niepowodzenie · brak okna",
+      "off": "Wyłączone",
+      "needsLayer": "Wymaga zaktualizowanej warstwy VectorXR",
+      "unknown": "Stan niedostępny"
+    },
+    "binding": {
+      "label": "Pokaż lub ukryj okno podglądu",
+      "description": "Pokazuje lub ukrywa okno podczas gry, w grach, w których okno podglądu jest włączone.",
+      "none": "Brak przypisania. Okno otwiera się przy starcie gry, dla której jest włączone."
+    },
+    "defaultProfile": {
+      "heading": "Profil domyślny",
+      "appliesTo": "Dotyczy gier bez włączonego profilu niestandardowego",
+      "toggleOn": "Profil domyślny włączony",
+      "toggleOff": "Profil domyślny wyłączony",
+      "offNote": "Wyłączone dla gier bez profilu niestandardowego. Profile niestandardowe poniżej nadal włączają je dla swoich gier."
+    },
+    "customProfiles": {
+      "heading": "Profile niestandardowe",
+      "description": "Ustawiaj okno podglądu dla poszczególnych gier. Wygrywa pierwszy włączony pasujący profil.",
+      "add": "Dodaj profil",
+      "empty": "Brak profili niestandardowych. Dodaj profil, aby włączyć okno podglądu dla gry.",
+      "duplicateApplication": "{application} jest już przypisana do profilu {profile}. Wygrywa pierwszy aktywny profil."
+    },
+    "summary": {
+      "plain": "Bez wygładzania",
+      "smoothing": "Wygładzanie {value}"
+    },
+    "fields": {
+      "stabilization": {
+        "heading": "Stabilizacja"
+      },
+      "window": {
+        "heading": "Okno"
+      },
+      "smoothing": {
+        "label": "Wygładzanie",
+        "help": "Jak mocno wygładzane są drgania głowy. 0 to zwykły podgląd bez stabilizacji; wyższe wartości dają stabilniejszy obraz, który bardziej opóźnia się za szybkimi obrotami głowy.",
+        "off": "Wyłączone"
+      },
+      "levelHorizon": {
+        "label": "Utrzymuj poziomy horyzont",
+        "help": "Usuwa z obrazu przechylenie głowy na boki, dzięki czemu obraz pozostaje poziomy, gdy przechylasz głowę."
+      },
+      "margin": {
+        "label": "Margines",
+        "help": "Jak bardzo obraz jest przybliżany, aby jego krawędzie pozostały wypełnione podczas stabilizacji. Większy margines obejmuje większe ruchy głowy i pokazuje mniejszą część widoku."
+      },
+      "percent": "{value}%",
+      "valueLabel": "{setting}, dokładna wartość",
+      "eye": {
+        "legend": "Pokazywane oko",
+        "left": {
+          "label": "Lewe oko",
+          "description": "Okno pokazuje obraz lewego oka."
+        },
+        "right": {
+          "label": "Prawe oko",
+          "description": "Okno pokazuje obraz prawego oka."
+        }
+      },
+      "aspect": {
+        "label": "Proporcje obrazu"
+      },
+      "width": {
+        "label": "Szerokość obrazu (piksele)",
+        "help": "Szerokość obrazu: szerokość obrazu przy pierwszym otwarciu okna, od {min} do {max} pikseli. Wysokość wynika z proporcji obrazu.",
+        "opensAt": "Okno otwiera się w rozmiarze {width} × {height}."
+      },
+      "frameRate": {
+        "label": "Limit klatek na sekundę (fps)",
+        "help": "Limit klatek na sekundę: największa liczba klatek na sekundę pokazywana w oknie, od {min} do {max}."
+      },
+      "fillMonitor": {
+        "label": "Wypełnij monitor",
+        "help": "Obraz wypełnia wybrany monitor, bez ramki, zamiast znajdować się w oknie o zmiennym rozmiarze, i przyjmuje kształt tego monitora. Nadal nigdy nie odbiera grze fokusu klawiatury ani sterowania. Kliknięcia myszy przechodzą przez obraz do gry pod spodem. Jeśli ten monitor nie jest podłączony, podgląd otwiera się jako zwykłe okno.",
+        "sizeUnused": "Proporcje obrazu i szerokość obrazu nie są używane, gdy obraz wypełnia monitor."
+      },
+      "monitor": {
+        "label": "Monitor",
+        "choose": "Wybierz monitor…",
+        "option": "{name} · {width}×{height}",
+        "optionPrimary": "{name} · {width}×{height} · główny",
+        "notConnected": "{name} · niepodłączony",
+        "none": "Nie wybrano monitora. Podgląd otwiera się jako zwykłe okno, dopóki go nie wybierzesz; monitor nigdy nie jest wybierany automatycznie.",
+        "covers": "Obraz zasłania wszystko, co jest na tym monitorze, także okno samej gry. Wybierz inny monitor niż ten z grą, chyba że właśnie o to chodzi. Ukrywaj i pokazuj go przypisaniem; wypełniony monitor nie ma przycisku zamykania.",
+        "unavailable": "Monitory komputera są tu wyświetlane w aplikacji VectorXR na komputer."
+      }
+    }
+  }
+}

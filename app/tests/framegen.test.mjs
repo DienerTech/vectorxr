@@ -24,13 +24,13 @@ test('configs written before Frame Generation load with it off and default setti
   delete config.modules.framegen
   const normalized = normalizeConfig(config)
   assert.deepEqual(normalized.modules.framegen, defaultFrameGenModule())
-  assert.deepEqual(normalized.modules.framegen.defaults, { synthesisMode: 'interpolate', flowQuality: 'balanced', motionEstimation: 'shader', interpolateFlow: 'auto', frameMultiplier: 'dynamic', artifactSuppression: 50, motionLimitPercent: 10 })
+  assert.deepEqual(normalized.modules.framegen.defaults, { synthesisMode: 'interpolate', flowQuality: 'balanced', motionEstimation: 'shader', interpolateFlow: 'auto', frameMultiplier: 'dynamic', artifactSuppression: 10, motionLimitPercent: 10 })
   assert.deepEqual(normalized.modules.framegen.toggleBindings, [])
   assert.equal(normalized.modules.framegen.diagnosticView, 'off')
   assert.deepEqual(validateConfig(normalized), [])
   // Defaults are fresh objects, never shared between calls.
   defaultFrameGenModule().defaults.artifactSuppression = 1
-  assert.equal(defaultFrameGenSettings().artifactSuppression, 50)
+  assert.equal(defaultFrameGenSettings().artifactSuppression, 10)
 })
 
 test('invalid imported values normalize safely: enums fall back, integers clamp', () => {
@@ -191,8 +191,8 @@ test('profiles own independent settings objects', () => {
   config.modules.framegen.profiles = [{ name: 'A', enabled: true, applicationIds: ['dcs'] }, { name: 'B', enabled: true, applicationIds: ['msfs'] }]
   const normalized = normalizeConfig(config).modules.framegen
   normalized.profiles[0].settings.artifactSuppression = 90
-  assert.equal(normalized.profiles[1].settings.artifactSuppression, 50)
-  assert.equal(normalized.defaults.artifactSuppression, 50)
+  assert.equal(normalized.profiles[1].settings.artifactSuppression, 10)
+  assert.equal(normalized.defaults.artifactSuppression, 10)
 })
 
 test('a matching custom profile enables Frame Generation even with the default off', () => {
@@ -232,7 +232,7 @@ test('Turbo overlap produces a non-blocking warning naming the affected applicat
   config.applications = [dcs, msfs]
   assert.deepEqual(configWarnings(config), [])
   config.modules.turbo.profiles = [{ id: 'turbo-dcs', name: 'DCS', enabled: true, applicationIds: ['dcs', 'msfs'], disableSafety: false,
-    experimental: { enabled: false, applicationIds: [], waitForSubmit: false, sampleAtEntry: false, predictionPercent: 100, frameLimit: 0 } }]
+    experimental: { enabled: false, applicationIds: [], waitForSubmit: false, predictionPercent: 100, frameLimit: 0 } }]
   config.modules.framegen.profiles = [createFrameGenProfile(defaultFrameGenSettings(), ['dcs'])]
   const [warning] = configWarnings(config)
   assert.equal(warning, 'Turbo and Frame Generation are both on for DCS. Frame Generation takes over frame pacing; Turbo stays off in sessions where Frame Generation runs.')

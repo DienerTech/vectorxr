@@ -46,3 +46,22 @@ when the published file can't be fetched. Restart the app to pick it up, and del
 the file to go back to the published config. In a browser preview of the app
 (`npm run dev`), the same JSON is read from `localStorage` under
 `vectorxr-community-override`.
+
+## Supporter acknowledgements
+
+The **Supporters** page reads a public list of credited Patreon members from the `supporters` branch of
+this repository (`supporters.json`; the address is set by `feed` in
+[config/supporter-credits.json](../config/supporter-credits.json) and read when the app is built).
+DienerTech's Patreon sync writes it; it holds only section headings and the display names members
+agreed to publish, in this shape:
+
+```json
+{ "version": 1, "tiers": [{ "label": "Sponsors", "names": ["A name"] }] }
+```
+
+The app fetches it when **Supporters** is opened or **Refresh** is selected, reuses a successful fetch
+for an hour, and can show the last list for up to seven days offline. An empty list replaces the
+previous credits at once. While no file is published (HTTP 404 or 410, including before the
+`supporters` branch exists), the page says the Patreon is coming soon and clears any saved list;
+only a failed request says the list is unavailable. Names are shown as
+text only, up to 80 characters, with control and direction-override characters refused.

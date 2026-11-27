@@ -1,0 +1,191 @@
+{
+  "screenshots": {
+    "heading": "Capturas de pantalla",
+    "intro": "Guarda la imagen de cada ojo tal como la renderizó el juego, a resolución completa, en un archivo PNG. El archivo se escribe en segundo plano, así que el juego no se detiene.",
+    "binding": {
+      "label": "Hacer captura de pantalla",
+      "description": "Guarda una captura de pantalla cada vez que se pulsa, en todos los juegos.",
+      "none": "No hay ninguna asignación. Las capturas de pantalla están desactivadas hasta que se agregue una asignación."
+    },
+    "eyes": {
+      "legend": "Ojos que se guardan",
+      "both": {
+        "label": "Ambos ojos",
+        "description": "Dos archivos por captura, terminados en _L y _R."
+      },
+      "left": {
+        "label": "Ojo izquierdo",
+        "description": "Un archivo, terminado en _L."
+      },
+      "right": {
+        "label": "Ojo derecho",
+        "description": "Un archivo, terminado en _R."
+      }
+    },
+    "folder": {
+      "title": "Carpeta de capturas de pantalla",
+      "defaultLocation": "VectorXR en la carpeta Imágenes",
+      "perGame": "Cada juego tiene dentro su propia carpeta, con el nombre de su archivo de programa.",
+      "choose": "Elegir carpeta…",
+      "useDefault": "Usar la predeterminada",
+      "open": "Abrir carpeta",
+      "pickerFailed": "No se pudo abrir el selector de carpetas.",
+      "openFailed": "No se pudo abrir la carpeta de capturas de pantalla."
+    },
+    "notes": {
+      "title": "Conviene saber",
+      "names": "Los archivos llevan el nombre del juego y la fecha y la hora de la captura.",
+      "api": "Funciona en juegos con D3D11 y D3D12. Los juegos con Vulkan aún no son compatibles.",
+      "quadviews": "Con Quadviews, la captura es la imagen completa que VectorXR compone para cada ojo.",
+      "framegen": "Con Frame Generation, la captura es siempre un fotograma renderizado por el juego, nunca uno generado.",
+      "feedback": "Si el sonido de una asignación está activado, suena al guardarse la captura. Si no se puede hacer la captura, suena en su lugar el sonido de desactivación y el registro indica el motivo. El registro indica el nombre de cada archivo."
+    }
+  },
+  "mirror": {
+    "heading": "Ventana espejo estabilizada",
+    "intro": "Abre en el escritorio una ventana de VectorXR que muestra la imagen de un ojo con el temblor de la cabeza suavizado, para emitir en directo y grabar. La imagen del visor no cambia. Actívala para todos los juegos o por juego.",
+    "liveNote": "Los cambios se aplican en un juego en marcha en cuanto guardas; la ventana cambia de tamaño cuando cambian la relación de aspecto o el ancho.",
+    "notes": {
+      "title": "Conviene saber",
+      "summary": "OBS, juegos compatibles y qué se suaviza",
+      "obs": {
+        "label": "Emisión en directo y grabación.",
+        "body": "{label} En OBS, añade una fuente «Captura de ventana» y elige la ventana cuyo nombre empieza por «VectorXR Mirror», seguido del nombre del juego."
+      },
+      "hdr": {
+        "label": "Monitores HDR.",
+        "body": "{label} Si el espejo está en un monitor HDR y el juego es SDR, la imagen que graba OBS puede verse desvaída o demasiado brillante. Marca «Forzar SDR» (Force SDR) en las propiedades de la fuente «Captura de ventana»."
+      },
+      "separate": {
+        "label": "Por qué una ventana aparte.",
+        "body": "{label} El espejo propio del software del visor (la vista VR de SteamVR, el espejo de Meta u Oculus, Virtual Desktop, Pimax) y la ventana de escritorio del propio juego muestran exactamente lo que recibe el visor y no se pueden estabilizar por separado."
+      },
+      "support": {
+        "label": "Juegos compatibles.",
+        "body": "{label} Funciona en juegos con D3D11, D3D12 y Vulkan. En un juego con Vulkan, hay que activarlo antes de iniciar el juego."
+      },
+      "smoothing": {
+        "label": "Qué se suaviza.",
+        "body": "{label} La rotación de la cabeza, que es en lo que consiste el temblor. El vaivén de la posición no se suaviza. Un suavizado más fuerte se retrasa más en los giros rápidos de cabeza, y el margen amplía la imagen para ocultar sus bordes."
+      },
+      "framegen": {
+        "label": "Con Frame Generation.",
+        "body": "{label} La ventana muestra los fotogramas renderizados por el juego, no los generados."
+      },
+      "window": {
+        "label": "La ventana.",
+        "body": "{label} Nunca le quita el foco del teclado al juego. Al cerrarla queda oculta. Usa «Mostrar espejo» o la asignación para volver a mostrarla. Su tamaño y su posición se recuerdan para cada juego."
+      },
+      "fill": {
+        "label": "Llenar un monitor.",
+        "body": "{label} La imagen puede llenar un monitor o un televisor, sin bordes, para quienes miran en la sala y también para OBS. Tapa todo lo que haya en ese monitor, incluida la ventana del propio juego, así que elige un monitor distinto al del juego salvo que sea eso lo que quieres. Un monitor lleno no tiene botón de cierre: oculta y muestra la imagen con la asignación."
+      },
+      "cost": {
+        "label": "Coste reducido.",
+        "body": "{label} Un dibujado pequeño, al tamaño de la propia ventana, por cada fotograma que muestra, limitado por el límite de fotogramas. Nunca retiene los fotogramas del juego."
+      }
+    },
+    "status": {
+      "show": "Mostrar espejo",
+      "hide": "Ocultar espejo",
+      "heading": "Juegos en ejecución",
+      "unavailable": "El estado del runtime no está disponible temporalmente.",
+      "noSession": "No hay ninguna aplicación de RV en ejecución"
+    },
+    "session": {
+      "withReason": "{status} · {reason}",
+      "active": "Ventana abierta",
+      "pending": "Esperando el primer fotograma",
+      "hidden": "Ventana oculta",
+      "unsupported": "No disponible en este juego por ahora",
+      "failed": "Error · sin ventana",
+      "off": "Desactivado",
+      "needsLayer": "Necesita la capa de VectorXR actualizada",
+      "unknown": "Estado no disponible"
+    },
+    "binding": {
+      "label": "Mostrar u ocultar la ventana espejo",
+      "description": "Muestra u oculta la ventana mientras se ejecuta un juego, en los juegos que tienen la ventana espejo activada.",
+      "none": "No hay ninguna asignación. La ventana se abre al iniciar un juego en el que esté activada."
+    },
+    "defaultProfile": {
+      "heading": "Perfil predeterminado",
+      "appliesTo": "Se aplica a los juegos sin un perfil personalizado activado",
+      "toggleOn": "Perfil predeterminado activado",
+      "toggleOff": "Perfil predeterminado desactivado",
+      "offNote": "Desactivado para los juegos sin perfil personalizado. Los perfiles personalizados de abajo lo siguen activando para sus juegos."
+    },
+    "customProfiles": {
+      "heading": "Perfiles personalizados",
+      "description": "Configura la ventana espejo por juego. Gana el primer perfil activado que coincida.",
+      "add": "Añadir perfil",
+      "empty": "Aún no hay perfiles personalizados. Añade un perfil para activar la ventana espejo en un juego.",
+      "duplicateApplication": "{application} ya está asignada al perfil {profile}. Gana el primer perfil activo."
+    },
+    "summary": {
+      "plain": "Sin suavizado",
+      "smoothing": "Suavizado {value}"
+    },
+    "fields": {
+      "stabilization": {
+        "heading": "Estabilización"
+      },
+      "window": {
+        "heading": "Ventana"
+      },
+      "smoothing": {
+        "label": "Suavizado",
+        "help": "Con cuánta fuerza se suaviza el temblor de la cabeza. 0 es un espejo simple sin estabilización; los valores más altos dan una imagen más estable que se retrasa más en los giros rápidos de cabeza.",
+        "off": "Desactivado"
+      },
+      "levelHorizon": {
+        "label": "Mantener el horizonte nivelado",
+        "help": "Quita de la imagen la inclinación lateral de la cabeza, para que siga nivelada cuando ladeas la cabeza."
+      },
+      "margin": {
+        "label": "Margen",
+        "help": "Cuánto se amplía la imagen para que sus bordes sigan rellenos mientras se estabiliza. Un margen mayor cubre movimientos de cabeza más amplios y muestra menos campo de visión."
+      },
+      "percent": "{value} %",
+      "valueLabel": "{setting}, valor exacto",
+      "eye": {
+        "legend": "Ojo que se muestra",
+        "left": {
+          "label": "Ojo izquierdo",
+          "description": "La ventana muestra la imagen del ojo izquierdo."
+        },
+        "right": {
+          "label": "Ojo derecho",
+          "description": "La ventana muestra la imagen del ojo derecho."
+        }
+      },
+      "aspect": {
+        "label": "Relación de aspecto"
+      },
+      "width": {
+        "label": "Ancho de la imagen (píxeles)",
+        "help": "Ancho de la imagen: el ancho de la imagen cuando la ventana se abre por primera vez, de {min} a {max} píxeles. El alto depende de la relación de aspecto.",
+        "opensAt": "La ventana se abre a {width} × {height}."
+      },
+      "frameRate": {
+        "label": "Límite de fotogramas (fps)",
+        "help": "Límite de fotogramas: el máximo de fotogramas por segundo que muestra la ventana, de {min} a {max}."
+      },
+      "fillMonitor": {
+        "label": "Llenar un monitor",
+        "help": "La imagen llena el monitor elegido, sin bordes, en lugar de estar en una ventana redimensionable, y adopta la forma de ese monitor. Sigue sin quitarle nunca al juego el foco del teclado ni la entrada. Los clics del ratón atraviesan la imagen y llegan al juego que está debajo. Si ese monitor no está conectado, el espejo se abre como una ventana normal.",
+        "sizeUnused": "La relación de aspecto y el ancho de la imagen no se usan mientras la imagen llena un monitor."
+      },
+      "monitor": {
+        "label": "Monitor",
+        "choose": "Elige un monitor…",
+        "option": "{name} · {width}×{height}",
+        "optionPrimary": "{name} · {width}×{height} · principal",
+        "notConnected": "{name} · no conectado",
+        "none": "No hay ningún monitor elegido. El espejo se abre como una ventana normal hasta que elijas uno; nunca se elige un monitor automáticamente.",
+        "covers": "La imagen tapa todo lo que haya en ese monitor, incluida la ventana del propio juego. Elige un monitor distinto al del juego salvo que sea eso lo que quieres. Ocúltala y muéstrala con la asignación; un monitor lleno no tiene botón de cierre.",
+        "unavailable": "Los monitores del PC se muestran aquí en la aplicación de escritorio de VectorXR."
+      }
+    }
+  }
+}

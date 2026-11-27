@@ -1,0 +1,191 @@
+{
+  "screenshots": {
+    "heading": "Screenshots",
+    "intro": "Speichert das Bild jedes Auges genau so, wie das Spiel es gerendert hat, in voller Auflösung als PNG-Datei. Die Datei wird im Hintergrund geschrieben, das Spiel stockt dabei nicht.",
+    "binding": {
+      "label": "Screenshot aufnehmen",
+      "description": "Speichert bei jedem Drücken einen Screenshot, in jedem Spiel.",
+      "none": "Keine Belegung zugewiesen. Screenshots sind aus, bis eine Belegung hinzugefügt wird."
+    },
+    "eyes": {
+      "legend": "Zu speichernde Augen",
+      "both": {
+        "label": "Beide Augen",
+        "description": "Zwei Dateien pro Screenshot mit den Endungen _L und _R."
+      },
+      "left": {
+        "label": "Linkes Auge",
+        "description": "Eine Datei mit der Endung _L."
+      },
+      "right": {
+        "label": "Rechtes Auge",
+        "description": "Eine Datei mit der Endung _R."
+      }
+    },
+    "folder": {
+      "title": "Screenshot-Ordner",
+      "defaultLocation": "VectorXR im Ordner „Bilder“",
+      "perGame": "Jedes Spiel erhält darin einen eigenen Ordner, benannt nach seiner Programmdatei.",
+      "choose": "Ordner wählen…",
+      "useDefault": "Standard verwenden",
+      "open": "Ordner öffnen",
+      "pickerFailed": "Die Ordnerauswahl konnte nicht geöffnet werden.",
+      "openFailed": "Der Screenshot-Ordner konnte nicht geöffnet werden."
+    },
+    "notes": {
+      "title": "Gut zu wissen",
+      "names": "Die Dateien sind nach dem Spiel sowie Datum und Uhrzeit der Aufnahme benannt.",
+      "api": "Funktioniert in Spielen mit D3D11 und D3D12. Spiele mit Vulkan werden noch nicht unterstützt.",
+      "quadviews": "Mit Quadviews zeigt der Screenshot das vollständige Bild, das VectorXR für jedes Auge zusammensetzt.",
+      "framegen": "Mit Frame Generation ist der Screenshot immer ein vom Spiel gerendertes Bild, nie ein generiertes.",
+      "feedback": "Ist der Ton einer Belegung eingeschaltet, erklingt er, sobald der Screenshot gespeichert ist. Kann kein Screenshot aufgenommen werden, erklingt stattdessen der Aus-Ton und das Protokoll nennt den Grund. Das Protokoll nennt jede Datei."
+    }
+  },
+  "mirror": {
+    "heading": "Stabilisiertes Spiegelfenster",
+    "intro": "Öffnet auf dem Desktop ein VectorXR-Fenster, das das Bild eines Auges mit geglättetem Kopfwackeln zeigt – für Streams und Aufnahmen. Das Bild im Headset bleibt unverändert. Schalte es für alle Spiele oder pro Spiel ein.",
+    "liveNote": "Änderungen wirken in einem laufenden Spiel, sobald du speicherst; ändert sich das Seitenverhältnis oder die Breite, wird die Fenstergröße angepasst.",
+    "notes": {
+      "title": "Gut zu wissen",
+      "summary": "OBS, unterstützte Spiele und was geglättet wird",
+      "obs": {
+        "label": "Streamen und Aufnehmen.",
+        "body": "{label} Füge in OBS eine Quelle „Fensteraufnahme“ hinzu und wähle das Fenster, dessen Name mit „VectorXR Mirror“ beginnt, gefolgt vom Namen des Spiels."
+      },
+      "hdr": {
+        "label": "HDR-Monitore.",
+        "body": "{label} Liegt der Spiegel auf einem HDR-Monitor und das Spiel ist SDR, kann das Bild in der OBS-Aufnahme blass oder zu hell wirken. Aktiviere in den Eigenschaften der Quelle „Fensteraufnahme“ die Option „SDR erzwingen“ (Force SDR)."
+      },
+      "separate": {
+        "label": "Warum ein eigenes Fenster.",
+        "body": "{label} Der Spiegel der Headset-Software (SteamVR VR-Ansicht, der Spiegel von Meta oder Oculus, Virtual Desktop, Pimax) und das Desktop-Fenster des Spiels zeigen genau das, was das Headset bekommt, und lassen sich nicht getrennt stabilisieren."
+      },
+      "support": {
+        "label": "Unterstützte Spiele.",
+        "body": "{label} Funktioniert in Spielen mit D3D11, D3D12 und Vulkan. Bei Spielen mit Vulkan muss die Funktion vor dem Start des Spiels eingeschaltet werden."
+      },
+      "smoothing": {
+        "label": "Was geglättet wird.",
+        "body": "{label} Die Drehung des Kopfes, also das Kopfwackeln. Auf-und-ab-Bewegungen der Position werden nicht geglättet. Stärkere Glättung hängt schnellen Kopfdrehungen weiter hinterher, und der Rand vergrößert das Bild, um seine Kanten zu verbergen."
+      },
+      "framegen": {
+        "label": "Mit Frame Generation.",
+        "body": "{label} Das Fenster zeigt die vom Spiel gerenderten Bilder, keine generierten."
+      },
+      "window": {
+        "label": "Das Fenster.",
+        "body": "{label} Es nimmt dem Spiel nie den Tastaturfokus. Schließen blendet es aus. Über „Spiegelansicht anzeigen“ oder die Tastenbelegung kannst du es wieder einblenden. Größe und Position werden für jedes Spiel gemerkt."
+      },
+      "fill": {
+        "label": "Monitor ausfüllen.",
+        "body": "{label} Das Bild kann einen Monitor oder Fernseher randlos ausfüllen – für Zuschauer im Raum ebenso wie für OBS. Es verdeckt alles, was auf diesem Monitor liegt, auch das Fenster des Spiels. Wähle deshalb einen anderen Monitor als den des Spiels, außer genau das ist gewünscht. Ein ausgefüllter Monitor hat keine Schließen-Schaltfläche: Blende das Bild mit der Belegung aus und ein."
+      },
+      "cost": {
+        "label": "Geringe Kosten.",
+        "body": "{label} Ein kleiner Zeichenvorgang in der Größe des Fensters für jedes gezeigte Bild, begrenzt durch das Bildratenlimit. Die Bilder des Spiels werden dadurch nie aufgehalten."
+      }
+    },
+    "status": {
+      "show": "Spiegelansicht anzeigen",
+      "hide": "Spiegelansicht ausblenden",
+      "heading": "Laufende Spiele",
+      "unavailable": "Der Runtime-Status ist vorübergehend nicht verfügbar.",
+      "noSession": "Keine VR-Anwendung läuft"
+    },
+    "session": {
+      "withReason": "{status} · {reason}",
+      "active": "Fenster geöffnet",
+      "pending": "Warte auf das erste Bild",
+      "hidden": "Fenster ausgeblendet",
+      "unsupported": "In diesem Spiel derzeit nicht verfügbar",
+      "failed": "Fehlgeschlagen · kein Fenster",
+      "off": "Aus",
+      "needsLayer": "Benötigt den aktualisierten VectorXR-Layer",
+      "unknown": "Status nicht verfügbar"
+    },
+    "binding": {
+      "label": "Spiegelfenster ein- oder ausblenden",
+      "description": "Blendet das Fenster im laufenden Spiel ein oder aus, in Spielen, für die das Spiegelfenster eingeschaltet ist.",
+      "none": "Keine Belegung zugewiesen. Das Fenster öffnet sich beim Start eines Spiels, für das es eingeschaltet ist."
+    },
+    "defaultProfile": {
+      "heading": "Standardprofil",
+      "appliesTo": "Gilt für Spiele ohne aktiviertes eigenes Profil",
+      "toggleOn": "Standardprofil an",
+      "toggleOff": "Standardprofil aus",
+      "offNote": "Aus für Spiele ohne eigenes Profil. Eigene Profile unten schalten es für ihre Spiele trotzdem ein."
+    },
+    "customProfiles": {
+      "heading": "Eigene Profile",
+      "description": "Stelle das Spiegelfenster pro Spiel ein. Das erste aktivierte passende Profil gewinnt.",
+      "add": "Profil hinzufügen",
+      "empty": "Noch keine eigenen Profile. Füge ein Profil hinzu, um das Spiegelfenster für ein Spiel einzuschalten.",
+      "duplicateApplication": "{application} wird bereits von Profil {profile} verwendet. Das erste aktive Profil gewinnt."
+    },
+    "summary": {
+      "plain": "Keine Glättung",
+      "smoothing": "Glättung {value}"
+    },
+    "fields": {
+      "stabilization": {
+        "heading": "Stabilisierung"
+      },
+      "window": {
+        "heading": "Fenster"
+      },
+      "smoothing": {
+        "label": "Glättung",
+        "help": "Wie stark das Kopfwackeln geglättet wird. 0 ist ein einfacher Spiegel ohne Stabilisierung; höhere Werte sind ruhiger und hängen schnellen Kopfdrehungen weiter hinterher.",
+        "off": "Aus"
+      },
+      "levelHorizon": {
+        "label": "Horizont gerade halten",
+        "help": "Nimmt die seitliche Kopfneigung aus dem Bild, sodass es gerade bleibt, wenn du den Kopf neigst."
+      },
+      "margin": {
+        "label": "Rand",
+        "help": "Wie weit das Bild vergrößert wird, damit seine Kanten beim Stabilisieren gefüllt bleiben. Ein größerer Rand deckt größere Kopfbewegungen ab und zeigt weniger vom Sichtfeld."
+      },
+      "percent": "{value} %",
+      "valueLabel": "{setting}, genauer Wert",
+      "eye": {
+        "legend": "Angezeigtes Auge",
+        "left": {
+          "label": "Linkes Auge",
+          "description": "Das Fenster zeigt das Bild des linken Auges."
+        },
+        "right": {
+          "label": "Rechtes Auge",
+          "description": "Das Fenster zeigt das Bild des rechten Auges."
+        }
+      },
+      "aspect": {
+        "label": "Seitenverhältnis"
+      },
+      "width": {
+        "label": "Bildbreite (Pixel)",
+        "help": "Bildbreite: die Breite des Bildes beim ersten Öffnen des Fensters, von {min} bis {max} Pixel. Die Höhe ergibt sich aus dem Seitenverhältnis.",
+        "opensAt": "Das Fenster öffnet sich mit {width} × {height}."
+      },
+      "frameRate": {
+        "label": "Bildratenlimit (fps)",
+        "help": "Bildratenlimit: so viele Bilder pro Sekunde zeigt das Fenster höchstens, von {min} bis {max}."
+      },
+      "fillMonitor": {
+        "label": "Monitor ausfüllen",
+        "help": "Das Bild füllt den gewählten Monitor randlos aus, statt in einem Fenster mit änderbarer Größe zu liegen, und übernimmt das Format dieses Monitors. Es nimmt dem Spiel weiterhin nie den Tastaturfokus oder Eingaben. Mausklicks gehen durch das Bild hindurch an das Spiel darunter. Ist dieser Monitor nicht angeschlossen, öffnet sich der Spiegel als normales Fenster.",
+        "sizeUnused": "Seitenverhältnis und Bildbreite werden nicht verwendet, solange das Bild einen Monitor ausfüllt."
+      },
+      "monitor": {
+        "label": "Monitor",
+        "choose": "Monitor wählen …",
+        "option": "{name} · {width}×{height}",
+        "optionPrimary": "{name} · {width}×{height} · Hauptmonitor",
+        "notConnected": "{name} · nicht angeschlossen",
+        "none": "Kein Monitor gewählt. Der Spiegel öffnet sich als normales Fenster, bis du einen wählst; ein Monitor wird nie automatisch gewählt.",
+        "covers": "Das Bild verdeckt alles, was auf diesem Monitor liegt, auch das Fenster des Spiels. Wähle einen anderen Monitor als den des Spiels, außer genau das ist gewünscht. Blende es mit der Belegung aus und ein; ein ausgefüllter Monitor hat keine Schließen-Schaltfläche.",
+        "unavailable": "Die Monitore des PCs werden hier in der VectorXR-Desktop-App aufgelistet."
+      }
+    }
+  }
+}

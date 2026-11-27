@@ -14,6 +14,12 @@
       "label": "屏幕显示",
       "subtitle": "头显显示、位置和绑定"
     },
+    "screenshots": {
+      "label": "截图"
+    },
+    "mirror": {
+      "label": "稳定镜像"
+    },
     "registry": {
       "label": "应用程序注册表",
       "subtitle": "注册应用程序以分配配置文件",
@@ -27,6 +33,10 @@
     "guides": {
       "label": "指南",
       "subtitle": "每项功能如何运作，以及如何开启和关闭"
+    },
+    "supporters": {
+      "label": "支持者",
+      "subtitle": "致谢 Patreon 会员"
     },
     "about": {
       "label": "关于",
@@ -78,9 +88,25 @@
     "httpFailed": "GitHub 更新检查失败，HTTP {status}",
     "invalidRelease": "GitHub 未返回有效的版本"
   },
+  "supporters": {
+    "thanks": "感谢 Patreon 会员的支持，让我们能够持续改进 VectorXR。",
+    "communityTitle": "感谢社区的每一位成员",
+    "communityThanks": "感谢每一位通过 Ko-fi 捐款、指出程序错误、提交报告或提出改进建议的朋友。",
+    "forumsThanks": "特别感谢 Eagle Dynamics 论坛上的 DCS 社区。VectorXR 0.11 的早期版本在那里受到了大家的热烈欢迎。",
+    "empty": "尚未公布支持者姓名。",
+    "comingSoon": "VectorXR 的 Patreon 即将推出（Soon™）。加入的成员将在此获得致谢。",
+    "joinFirst": "目前还没有致谢名单。加入 Patreon，成为第一批在此获得致谢的支持者。",
+    "unavailable": "暂时无法获取支持者名单，请稍后刷新。",
+    "cached": "暂时无法获取最新名单，以下为上次保存的名单。"
+  },
   "sidebar": {
     "appSettings": "应用设置",
+    "applications": "应用程序",
+    "capture": "捕获与镜像",
+    "openxrUtilities": "OpenXR 实用工具",
     "enhancements": "OpenXR 增强功能",
+    "performance": "性能",
+    "lookAndFeel": "视觉效果",
     "suiteOff": "VectorXR 运行时效果已关闭",
     "moduleTitle": "{subtitle}。{status}",
     "saveHint": "单击“保存更改”以应用设置。每项增强功能都会注明哪些更改需要重新启动 VR 应用程序。",
@@ -111,6 +137,8 @@
     "issuesFound_other": "发现 {count} 个验证问题",
     "issuesHint": "您仍然可以应用——错误将显示在“验证”面板中，并且在解决之前会阻止保存。",
     "valid": "配置结构和值范围看起来有效。",
+    "networkPathsTitle": "不会导入网络路径",
+    "networkPathsHint": "此文件指向另一台计算机上的文件或文件夹。VectorXR 会在每个游戏中打开这些路径，因此已将其排除：截图文件夹恢复为默认文件夹，声音和图片恢复为内置项。如有需要，请在导入后重新选择。",
     "applyToEditor": "应用到编辑器",
     "importAndSave": "导入并保存"
   },

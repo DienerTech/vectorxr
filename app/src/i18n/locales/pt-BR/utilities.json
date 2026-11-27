@@ -1,0 +1,191 @@
+{
+  "screenshots": {
+    "heading": "Capturas de tela",
+    "intro": "Salva a imagem de cada olho exatamente como o jogo a renderizou, em resolução total, como um arquivo PNG. O arquivo é gravado em segundo plano, então o jogo não trava.",
+    "binding": {
+      "label": "Fazer captura de tela",
+      "description": "Salva uma captura de tela cada vez que é pressionada, em todos os jogos.",
+      "none": "Nenhuma atribuição definida. As capturas de tela ficam desligadas até que uma atribuição seja adicionada."
+    },
+    "eyes": {
+      "legend": "Olhos a salvar",
+      "both": {
+        "label": "Ambos os olhos",
+        "description": "Dois arquivos por captura, terminados em _L e _R."
+      },
+      "left": {
+        "label": "Olho esquerdo",
+        "description": "Um arquivo, terminado em _L."
+      },
+      "right": {
+        "label": "Olho direito",
+        "description": "Um arquivo, terminado em _R."
+      }
+    },
+    "folder": {
+      "title": "Pasta de capturas de tela",
+      "defaultLocation": "VectorXR na pasta Imagens",
+      "perGame": "Cada jogo ganha sua própria pasta dentro dela, com o nome do arquivo do programa.",
+      "choose": "Escolher pasta…",
+      "useDefault": "Usar a padrão",
+      "open": "Abrir pasta",
+      "pickerFailed": "Falha ao abrir o seletor de pastas.",
+      "openFailed": "Falha ao abrir a pasta de capturas de tela."
+    },
+    "notes": {
+      "title": "Bom saber",
+      "names": "Os arquivos recebem o nome do jogo, com a data e a hora da captura.",
+      "api": "Funciona em jogos D3D11 e D3D12. Jogos Vulkan ainda não são compatíveis.",
+      "quadviews": "Com o Quadviews, a captura é a imagem completa que o VectorXR monta para cada olho.",
+      "framegen": "Com o Frame Generation, a captura é sempre um quadro renderizado pelo jogo, nunca um quadro gerado.",
+      "feedback": "Se o som de uma atribuição estiver ligado, ele toca quando a captura é salva. Se não for possível fazer a captura, toca o som de desligar e o log informa o motivo. O log informa o nome de cada arquivo."
+    }
+  },
+  "mirror": {
+    "heading": "Janela de espelho estabilizada",
+    "intro": "Abre na área de trabalho uma janela do VectorXR que mostra a imagem de um olho com o tremor da cabeça suavizado, para transmissão ao vivo e gravação. A imagem do headset não muda. Ligue para todos os jogos ou por jogo.",
+    "liveNote": "As alterações valem em um jogo em execução assim que você salva; a janela é redimensionada quando a proporção ou a largura muda.",
+    "notes": {
+      "title": "Bom saber",
+      "summary": "OBS, jogos compatíveis e o que é suavizado",
+      "obs": {
+        "label": "Transmissão e gravação.",
+        "body": "{label} No OBS, adicione uma fonte \"Captura de janela\" e escolha a janela cujo nome começa com \"VectorXR Mirror\", seguido do nome do jogo."
+      },
+      "hdr": {
+        "label": "Monitores HDR.",
+        "body": "{label} Se o espelho estiver em um monitor HDR e o jogo for SDR, a imagem gravada pelo OBS pode parecer desbotada ou clara demais. Marque \"Forçar SDR\" (Force SDR) nas propriedades da fonte \"Captura de janela\"."
+      },
+      "separate": {
+        "label": "Por que uma janela separada.",
+        "body": "{label} O espelho do próprio software do headset (a visão VR do SteamVR, o espelho da Meta ou do Oculus, Virtual Desktop, Pimax) e a janela do próprio jogo na área de trabalho mostram exatamente o que o headset recebe e não podem ser estabilizados separadamente."
+      },
+      "support": {
+        "label": "Jogos compatíveis.",
+        "body": "{label} Funciona em jogos D3D11, D3D12 e Vulkan. Em um jogo Vulkan, ative este recurso antes de iniciar o jogo."
+      },
+      "smoothing": {
+        "label": "O que é suavizado.",
+        "body": "{label} A rotação da cabeça, que é o tremor da cabeça. O balanço da posição não é suavizado. Uma suavização mais forte fica mais atrasada em giros rápidos da cabeça, e a margem amplia a imagem para esconder as bordas."
+      },
+      "framegen": {
+        "label": "Com o Frame Generation.",
+        "body": "{label} A janela mostra os quadros renderizados pelo jogo, não os gerados."
+      },
+      "window": {
+        "label": "A janela.",
+        "body": "{label} Ela nunca tira o foco do teclado do jogo. Fechar a janela a oculta. Use “Mostrar espelho” ou o atalho para exibi-la novamente. O tamanho e a posição dela são lembrados para cada jogo."
+      },
+      "fill": {
+        "label": "Preencher um monitor.",
+        "body": "{label} A imagem pode preencher um monitor ou uma TV, sem bordas, para quem assiste na sala e também para o OBS. Ela cobre tudo o que estiver nesse monitor, inclusive a janela do próprio jogo; por isso, escolha um monitor diferente do monitor do jogo, a menos que seja isso o que você quer. Um monitor preenchido não tem botão de fechar: oculte e mostre a imagem com a atribuição."
+      },
+      "cost": {
+        "label": "Custo pequeno.",
+        "body": "{label} Um desenho pequeno, no tamanho da própria janela, para cada quadro que ela mostra, limitado pelo limite de quadros por segundo. Nunca segura os quadros do jogo."
+      }
+    },
+    "status": {
+      "show": "Mostrar espelho",
+      "hide": "Ocultar espelho",
+      "heading": "Jogos em execução",
+      "unavailable": "O status do runtime está temporariamente indisponível.",
+      "noSession": "Nenhum aplicativo de RV em execução"
+    },
+    "session": {
+      "withReason": "{status} · {reason}",
+      "active": "Janela aberta",
+      "pending": "Aguardando o primeiro quadro",
+      "hidden": "Janela oculta",
+      "unsupported": "Indisponível neste jogo no momento",
+      "failed": "Falhou · sem janela",
+      "off": "Desligado",
+      "needsLayer": "Requer a camada do VectorXR atualizada",
+      "unknown": "Status indisponível"
+    },
+    "binding": {
+      "label": "Mostrar ou ocultar a janela de espelho",
+      "description": "Mostra ou oculta a janela enquanto um jogo está em execução, nos jogos em que a janela de espelho está ligada.",
+      "none": "Nenhuma atribuição definida. A janela abre quando começa um jogo em que ela está ligada."
+    },
+    "defaultProfile": {
+      "heading": "Perfil padrão",
+      "appliesTo": "Aplica-se a jogos sem um perfil personalizado ativado",
+      "toggleOn": "Perfil padrão ligado",
+      "toggleOff": "Perfil padrão desligado",
+      "offNote": "Desligado para jogos sem perfil personalizado. Os perfis personalizados abaixo ainda o ligam para seus jogos."
+    },
+    "customProfiles": {
+      "heading": "Perfis personalizados",
+      "description": "Defina a janela de espelho por jogo. Vale o primeiro perfil ativado correspondente.",
+      "add": "Adicionar perfil",
+      "empty": "Ainda não há perfis personalizados. Adicione um perfil para ligar a janela de espelho em um jogo.",
+      "duplicateApplication": "{application} já é alvo do Perfil {profile}. Vale o primeiro perfil ativo."
+    },
+    "summary": {
+      "plain": "Sem suavização",
+      "smoothing": "Suavização {value}"
+    },
+    "fields": {
+      "stabilization": {
+        "heading": "Estabilização"
+      },
+      "window": {
+        "heading": "Janela"
+      },
+      "smoothing": {
+        "label": "Suavização",
+        "help": "Com que força o tremor da cabeça é suavizado. 0 é um espelho simples, sem estabilização; valores mais altos deixam a imagem mais firme e mais atrasada em giros rápidos da cabeça.",
+        "off": "Desligada"
+      },
+      "levelHorizon": {
+        "label": "Manter o horizonte nivelado",
+        "help": "Tira da imagem a inclinação lateral da cabeça, para que ela continue nivelada quando você inclina a cabeça."
+      },
+      "margin": {
+        "label": "Margem",
+        "help": "Quanto a imagem é ampliada para que as bordas continuem preenchidas enquanto ela é estabilizada. Uma margem maior cobre movimentos de cabeça maiores e mostra menos da visão."
+      },
+      "percent": "{value}%",
+      "valueLabel": "{setting}, valor exato",
+      "eye": {
+        "legend": "Olho a mostrar",
+        "left": {
+          "label": "Olho esquerdo",
+          "description": "A janela mostra a imagem do olho esquerdo."
+        },
+        "right": {
+          "label": "Olho direito",
+          "description": "A janela mostra a imagem do olho direito."
+        }
+      },
+      "aspect": {
+        "label": "Proporção"
+      },
+      "width": {
+        "label": "Largura da imagem (pixels)",
+        "help": "Largura da imagem: a largura da imagem quando a janela abre pela primeira vez, de {min} a {max} pixels. A altura acompanha a proporção.",
+        "opensAt": "A janela abre em {width} × {height}."
+      },
+      "frameRate": {
+        "label": "Limite de quadros por segundo (fps)",
+        "help": "Limite de quadros por segundo: o máximo de quadros por segundo que a janela mostra, de {min} a {max}."
+      },
+      "fillMonitor": {
+        "label": "Preencher um monitor",
+        "help": "A imagem preenche o monitor escolhido, sem bordas, em vez de ficar em uma janela redimensionável, e assume o formato desse monitor. Ela continua sem nunca tirar do jogo o foco do teclado ou a entrada. Os cliques do mouse atravessam a imagem e chegam ao jogo que está por baixo. Se esse monitor não estiver conectado, o espelho abre como uma janela normal.",
+        "sizeUnused": "A proporção e a largura da imagem não são usadas enquanto a imagem preenche um monitor."
+      },
+      "monitor": {
+        "label": "Monitor",
+        "choose": "Escolha um monitor…",
+        "option": "{name} · {width}×{height}",
+        "optionPrimary": "{name} · {width}×{height} · principal",
+        "notConnected": "{name} · não conectado",
+        "none": "Nenhum monitor escolhido. O espelho abre como uma janela normal até você escolher um; um monitor nunca é escolhido automaticamente.",
+        "covers": "A imagem cobre tudo o que estiver nesse monitor, inclusive a janela do próprio jogo. Escolha um monitor diferente do monitor do jogo, a menos que seja isso o que você quer. Oculte e mostre a imagem com a atribuição; um monitor preenchido não tem botão de fechar.",
+        "unavailable": "Os monitores do PC são listados aqui no aplicativo de desktop do VectorXR."
+      }
+    }
+  }
+}

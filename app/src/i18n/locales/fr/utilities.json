@@ -1,0 +1,191 @@
+{
+  "screenshots": {
+    "heading": "Captures d'écran",
+    "intro": "Enregistre l'image de chaque œil telle que le jeu l'a rendue, en pleine résolution, dans un fichier PNG. Le fichier est écrit en arrière-plan : le jeu ne se fige pas.",
+    "binding": {
+      "label": "Prendre une capture d'écran",
+      "description": "Enregistre une capture d'écran à chaque appui, dans tous les jeux.",
+      "none": "Aucune affectation. Les captures d'écran sont désactivées tant qu'une affectation n'est pas ajoutée."
+    },
+    "eyes": {
+      "legend": "Yeux à enregistrer",
+      "both": {
+        "label": "Les deux yeux",
+        "description": "Deux fichiers par capture, se terminant par _L et _R."
+      },
+      "left": {
+        "label": "Œil gauche",
+        "description": "Un fichier, se terminant par _L."
+      },
+      "right": {
+        "label": "Œil droit",
+        "description": "Un fichier, se terminant par _R."
+      }
+    },
+    "folder": {
+      "title": "Dossier des captures d'écran",
+      "defaultLocation": "VectorXR dans le dossier Images",
+      "perGame": "Chaque jeu y reçoit son propre dossier, nommé d'après son fichier programme.",
+      "choose": "Choisir un dossier…",
+      "useDefault": "Utiliser le dossier par défaut",
+      "open": "Ouvrir le dossier",
+      "pickerFailed": "Impossible d'ouvrir le sélecteur de dossiers.",
+      "openFailed": "Impossible d'ouvrir le dossier des captures d'écran."
+    },
+    "notes": {
+      "title": "Bon à savoir",
+      "names": "Les fichiers portent le nom du jeu, suivi de la date et de l'heure de la capture.",
+      "api": "Fonctionne dans les jeux D3D11 et D3D12. Les jeux Vulkan ne sont pas encore pris en charge.",
+      "quadviews": "Avec Quadviews, la capture est l'image complète que VectorXR assemble pour chaque œil.",
+      "framegen": "Avec Frame Generation, la capture est toujours une image rendue par le jeu, jamais une image générée.",
+      "feedback": "Si le son d'une affectation est activé, il est joué quand la capture est enregistrée. Si aucune capture ne peut être prise, c'est le son de désactivation qui est joué et le journal en indique la raison. Le journal indique le nom de chaque fichier."
+    }
+  },
+  "mirror": {
+    "heading": "Fenêtre miroir stabilisée",
+    "intro": "Ouvre sur le bureau une fenêtre VectorXR qui affiche l'image d'un œil en lissant les tremblements de la tête, pour la diffusion en direct et l'enregistrement. L'image du casque n'est pas modifiée. Activez-la pour tous les jeux ou par jeu.",
+    "liveNote": "Les modifications s'appliquent dans un jeu en cours dès l'enregistrement ; la fenêtre est redimensionnée quand le format d'image ou la largeur change.",
+    "notes": {
+      "title": "Bon à savoir",
+      "summary": "OBS, jeux pris en charge et ce qui est lissé",
+      "obs": {
+        "label": "Diffusion et enregistrement.",
+        "body": "{label} Dans OBS, ajoutez une source « Capture de fenêtre » et choisissez la fenêtre dont le nom commence par « VectorXR Mirror », suivi du nom du jeu."
+      },
+      "hdr": {
+        "label": "Écrans HDR.",
+        "body": "{label} Si le miroir est sur un écran HDR et que le jeu est en SDR, l'image enregistrée par OBS peut paraître délavée ou trop claire. Cochez « Forcer le SDR » (Force SDR) dans les propriétés de la source « Capture de fenêtre »."
+      },
+      "separate": {
+        "label": "Pourquoi une fenêtre à part.",
+        "body": "{label} Le miroir du logiciel du casque (la vue VR de SteamVR, le miroir de Meta ou d'Oculus, Virtual Desktop, Pimax) et la fenêtre de bureau du jeu affichent exactement ce que reçoit le casque et ne peuvent pas être stabilisés séparément."
+      },
+      "support": {
+        "label": "Jeux pris en charge.",
+        "body": "{label} Fonctionne dans les jeux D3D11, D3D12 et Vulkan. Pour un jeu Vulkan, activez cette fonction avant de lancer le jeu."
+      },
+      "smoothing": {
+        "label": "Ce qui est lissé.",
+        "body": "{label} La rotation de la tête, c'est-à-dire ses tremblements. Les oscillations de position ne sont pas lissées. Un lissage plus fort suit avec plus de retard les mouvements rapides de la tête, et la marge agrandit l'image pour masquer ses bords."
+      },
+      "framegen": {
+        "label": "Avec Frame Generation.",
+        "body": "{label} La fenêtre affiche les images rendues par le jeu, pas les images générées."
+      },
+      "window": {
+        "label": "La fenêtre.",
+        "body": "{label} Elle ne prend jamais le focus clavier au jeu. La fermer la masque. Utilisez « Afficher le miroir » ou le raccourci pour la réafficher. Sa taille et sa position sont mémorisées pour chaque jeu."
+      },
+      "fill": {
+        "label": "Remplir un écran.",
+        "body": "{label} L'image peut remplir un écran ou un téléviseur, sans bordure, pour les personnes qui regardent dans la pièce comme pour OBS. Elle recouvre tout ce qui se trouve sur cet écran, y compris la fenêtre du jeu : choisissez donc un autre écran que celui du jeu, sauf si c'est ce que vous voulez. Un écran rempli n'a pas de bouton de fermeture : masquez et affichez l'image avec l'affectation."
+      },
+      "cost": {
+        "label": "Coût réduit.",
+        "body": "{label} Un petit rendu à la taille de la fenêtre pour chaque image qu'elle affiche, plafonné par la limite d'images par seconde. Il ne retarde jamais les images du jeu."
+      }
+    },
+    "status": {
+      "show": "Afficher le miroir",
+      "hide": "Masquer le miroir",
+      "heading": "Jeux en cours",
+      "unavailable": "L’état du runtime est temporairement indisponible.",
+      "noSession": "Aucune application VR en cours"
+    },
+    "session": {
+      "withReason": "{status} · {reason}",
+      "active": "Fenêtre ouverte",
+      "pending": "En attente de la première image",
+      "hidden": "Fenêtre masquée",
+      "unsupported": "Indisponible dans ce jeu pour le moment",
+      "failed": "Échec · aucune fenêtre",
+      "off": "Désactivé",
+      "needsLayer": "Nécessite la couche VectorXR mise à jour",
+      "unknown": "État indisponible"
+    },
+    "binding": {
+      "label": "Afficher ou masquer la fenêtre miroir",
+      "description": "Affiche ou masque la fenêtre pendant un jeu, dans les jeux où la fenêtre miroir est activée.",
+      "none": "Aucune affectation. La fenêtre s'ouvre au lancement d'un jeu pour lequel elle est activée."
+    },
+    "defaultProfile": {
+      "heading": "Profil par défaut",
+      "appliesTo": "S’applique aux jeux sans profil personnalisé activé",
+      "toggleOn": "Profil par défaut activé",
+      "toggleOff": "Profil par défaut désactivé",
+      "offNote": "Désactivé pour les jeux sans profil personnalisé. Les profils personnalisés ci-dessous l’activent toujours pour leurs jeux."
+    },
+    "customProfiles": {
+      "heading": "Profils personnalisés",
+      "description": "Réglez la fenêtre miroir par jeu. Le premier profil activé correspondant l'emporte.",
+      "add": "Ajouter un profil",
+      "empty": "Aucun profil personnalisé pour l'instant. Ajoutez un profil pour activer la fenêtre miroir dans un jeu.",
+      "duplicateApplication": "{application} est déjà ciblée par le profil {profile}. Le premier profil actif l’emporte."
+    },
+    "summary": {
+      "plain": "Sans lissage",
+      "smoothing": "Lissage {value}"
+    },
+    "fields": {
+      "stabilization": {
+        "heading": "Stabilisation"
+      },
+      "window": {
+        "heading": "Fenêtre"
+      },
+      "smoothing": {
+        "label": "Lissage",
+        "help": "La force avec laquelle les tremblements de la tête sont lissés. 0 donne un simple miroir sans stabilisation ; des valeurs plus élevées donnent une image plus stable, qui suit avec plus de retard les mouvements rapides de la tête.",
+        "off": "Désactivée"
+      },
+      "levelHorizon": {
+        "label": "Garder l'horizon droit",
+        "help": "Retire de l'image l'inclinaison latérale de la tête : elle reste droite quand vous penchez la tête."
+      },
+      "margin": {
+        "label": "Marge",
+        "help": "De combien l'image est agrandie pour que ses bords restent remplis pendant la stabilisation. Une marge plus grande couvre des mouvements de tête plus amples et montre une moindre partie de la vue."
+      },
+      "percent": "{value} %",
+      "valueLabel": "{setting}, valeur exacte",
+      "eye": {
+        "legend": "Œil affiché",
+        "left": {
+          "label": "Œil gauche",
+          "description": "La fenêtre affiche l'image de l'œil gauche."
+        },
+        "right": {
+          "label": "Œil droit",
+          "description": "La fenêtre affiche l'image de l'œil droit."
+        }
+      },
+      "aspect": {
+        "label": "Format d'image"
+      },
+      "width": {
+        "label": "Largeur de l'image (pixels)",
+        "help": "Largeur de l'image : la largeur de l'image à la première ouverture de la fenêtre, de {min} à {max} pixels. La hauteur découle du format d'image.",
+        "opensAt": "La fenêtre s'ouvre en {width} × {height}."
+      },
+      "frameRate": {
+        "label": "Limite d'images par seconde (fps)",
+        "help": "Limite d'images par seconde : le nombre maximal d'images par seconde que la fenêtre affiche, de {min} à {max}."
+      },
+      "fillMonitor": {
+        "label": "Remplir un écran",
+        "help": "L'image remplit l'écran choisi, sans bordure, au lieu d'être dans une fenêtre redimensionnable, et prend le format de cet écran. Elle ne prend toujours jamais le focus clavier ni les entrées du jeu. Les clics de souris traversent l'image et arrivent au jeu en dessous. Si cet écran n'est pas connecté, le miroir s'ouvre comme une fenêtre normale.",
+        "sizeUnused": "Le format d'image et la largeur de l'image ne sont pas utilisés tant que l'image remplit un écran."
+      },
+      "monitor": {
+        "label": "Écran",
+        "choose": "Choisir un écran…",
+        "option": "{name} · {width}×{height}",
+        "optionPrimary": "{name} · {width}×{height} · principal",
+        "notConnected": "{name} · non connecté",
+        "none": "Aucun écran choisi. Le miroir s'ouvre comme une fenêtre normale tant que vous n'en choisissez pas ; aucun écran n'est jamais choisi automatiquement.",
+        "covers": "L'image recouvre tout ce qui se trouve sur cet écran, y compris la fenêtre du jeu. Choisissez un autre écran que celui du jeu, sauf si c'est ce que vous voulez. Masquez-la et affichez-la avec l'affectation ; un écran rempli n'a pas de bouton de fermeture.",
+        "unavailable": "Les écrans du PC sont listés ici dans l'application de bureau VectorXR."
+      }
+    }
+  }
+}

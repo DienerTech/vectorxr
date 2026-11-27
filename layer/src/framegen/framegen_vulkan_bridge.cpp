@@ -420,10 +420,12 @@ struct VulkanBridge::Impl {
         ComPtr<ID3D12Resource> resource; // the twin's shape, the bridge's alone
         std::vector<ComPtr<ID3D12CommandAllocator>> allocators;
         std::vector<ComPtr<ID3D12GraphicsCommandList>> lists; // by image: its twin into `resource`
+        std::vector<UINT64> list_done;                        // by image: its list's last execution's done value
         bool resource_failed{false};
         std::optional<std::uint32_t> handed; // the image the last hand-over named
         bool fresh{false};                   // `resource` holds a copy no hand-over took yet
         std::uint64_t copies{0};             // into `resource`
+        std::uint64_t skipped{0};            // acquires not copied: the image's list was still queued
         std::uint64_t used{0};               // hand-overs that copied `resource`
         std::uint64_t engagements{0};
         std::uint64_t bytes{0};
@@ -451,6 +453,11 @@ struct VulkanBridge::Impl {
         bool unordered_access{false};
         VkImageAspectFlags aspect{VK_IMAGE_ASPECT_COLOR_BIT};
         VkImageLayout layout{VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}; // the attachment layout
+        // kPrivate: why the depth stays the game's own (it is multisampled,
+        // the switch rules the bridge's depth out, or the game's device
+        // cannot import it: `import_refused`).
+        std::string private_reason;
+        bool import_refused{false};
     };
     struct Swapchain {
         Plan plan;
@@ -494,6 +501,10 @@ struct VulkanBridge::Impl {
     struct Importable {
         bool plain{false};
         bool mutable_format{false};
+        // A depth format the device cannot import, but can make images of
+        // its own in: its swapchains are private (the runtime gets no depth
+        // from them), which a game that insists on depth can still use.
+        bool private_depth{false};
         VkImageFormatProperties properties{};
     };
 
@@ -569,7 +580,9 @@ struct VulkanBridge::Impl {
     bool check_wanted{false}; // WantDepthTimingCheck
     bool check_always{false}; // VECTORXR_VULKAN_BRIDGE_DEPTH_CHECK=always
     bool check_reported{false};
+    bool import_private_reported{false}; // depth kept private because it cannot be imported (reported once)
     std::uint64_t late_copies{0};
+    std::uint64_t late_skips{0}; // LateDepth::skipped, of every swapchain
     // The CPU time of each hand-over (Released), all of it: its submissions,
     // the copy queued and the hand-back.
     std::vector<double> handover_us;
@@ -973,7 +986,7 @@ struct VulkanBridge::Impl {
                    << ", depthChecks=" << late.at_end_checks << "/" << late.late_only_checks << "/"
                    << late.neither_checks << " (at the hand-over/only at the next acquire/neither)"
                    << ", lateCopies=" << late.copies << ", lateUsed=" << late.used
-                   << ", lateTaken=" << late.engagements;
+                   << ", lateTaken=" << late.engagements << ", lateSkipped=" << late.skipped;
             if (late.bytes) stream << ", lateMiB=" << MiB(late.bytes);
         }
         if (!chain.private_reason.empty()) {
@@ -1025,10 +1038,13 @@ struct VulkanBridge::Impl {
             reason = "VkFormat " + std::to_string(info.format) + " has no Direct3D 12 equivalent";
             return false;
         }
+        // A depth format that cannot be imported goes on when the device can
+        // make private images of it (decided below, with the plan's mode).
         const auto table = importable.find(info.format);
-        if (table == importable.end() || !table->second.plain) {
-            reason = "the game's Vulkan device cannot import VkFormat " + std::to_string(info.format) +
-                     " from Direct3D 12";
+        const std::string unimportable = "the game's Vulkan device cannot import VkFormat " +
+                                         std::to_string(info.format) + " from Direct3D 12";
+        if (table == importable.end() || !(table->second.plain || table->second.private_depth)) {
+            reason = unimportable;
             return false;
         }
         refusal = XR_ERROR_FEATURE_UNSUPPORTED;
@@ -1122,6 +1138,9 @@ struct VulkanBridge::Impl {
         plan.usage = usage | (depth ? kDepthUsage : kColorUsage);
         if (depth) {
             plan.mode = plan.sample_count > 1 ? Mode::kPrivate : Mode::kTwinDepth;
+            if (plan.mode == Mode::kPrivate) {
+                plan.private_reason = "it is multisampled";
+            }
             plan.aspect = VK_IMAGE_ASPECT_DEPTH_BIT | (HasStencil(plan.format) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
             plan.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             plan.storage = plan.dxgi;
@@ -1139,18 +1158,39 @@ struct VulkanBridge::Impl {
                    plan.array_size <= properties.maxArrayLayers && mips <= properties.maxMipLevels;
         };
         VkImageFormatProperties properties{};
+        std::string no_twin; // why the images cannot be twins (empty: they can)
         if (plan.mode == Mode::kTwin || plan.mode == Mode::kTwinDepth) {
-            if (!QueryImport(plan.format, plan.flags, plan.usage, plan.view_formats, properties)) {
-                reason = "the game's Vulkan device cannot import its images (VkFormat " +
-                         std::to_string(info.format) + ", usage " + Hex(plan.usage) + ", flags " + Hex(plan.flags) +
-                         ")";
-                return false;
+            if (!table->second.plain) {
+                no_twin = unimportable;
+            } else if (!QueryImport(plan.format, plan.flags, plan.usage, plan.view_formats, properties)) {
+                no_twin = "the game's Vulkan device cannot import its images (VkFormat " +
+                          std::to_string(info.format) + ", usage " + Hex(plan.usage) + ", flags " + Hex(plan.flags) +
+                          ")";
+            } else if (!fits(properties, plan.mip_count)) {
+                no_twin = "its size, layers or mips exceed what the game's Vulkan device imports";
             }
-            if (!fits(properties, plan.mip_count)) {
-                reason = "its size, layers or mips exceed what the game's Vulkan device imports";
-                return false;
+            if (plan.mode == Mode::kTwin) {
+                reason = no_twin;
+                return no_twin.empty();
             }
-            return true;
+            // Depth is the one kind of image that may stay the game's own
+            // (the runtime then gets no depth from the swapchain, and the
+            // caller keeps it out of submitted frames): where the switch
+            // rules the bridge's depth out, and where the game's device
+            // cannot import it, rather than refusing a swapchain a game may
+            // insist on. Only depth that is private for want of an import
+            // must pass the check of private images below.
+            if (depth_timing == DepthTiming::kPrivate) {
+                plan.mode = Mode::kPrivate;
+                plan.private_reason = depth_private_reason;
+            } else if (!no_twin.empty()) {
+                plan.mode = Mode::kPrivate;
+                plan.private_reason = "the game's Vulkan device cannot import its depth images from Direct3D 12";
+                plan.import_refused = true;
+            }
+            if (no_twin.empty()) {
+                return true;
+            }
         }
         if (plan.mode == Mode::kResolve) {
             if (!QueryImport(plan.format, 0, kColorUsage, {}, properties) || !fits(properties, 1)) {
@@ -1162,8 +1202,9 @@ struct VulkanBridge::Impl {
                                                          VK_IMAGE_TILING_OPTIMAL, plan.usage, plan.flags,
                                                          &properties) != VK_SUCCESS ||
             (properties.sampleCounts & plan.sample_count) != plan.sample_count || !fits(properties, plan.mip_count)) {
-            reason = "the game's Vulkan device cannot make its " + std::to_string(plan.sample_count) +
-                     "-sample images";
+            reason = !no_twin.empty() ? no_twin
+                                      : "the game's Vulkan device cannot make its " +
+                                            std::to_string(plan.sample_count) + "-sample images";
             return false;
         }
         return true;
@@ -1298,6 +1339,28 @@ struct VulkanBridge::Impl {
         const bool imported = ImportTwin(plan, image, handle, desc.MipLevels, reason);
         CloseHandle(handle);
         return imported;
+    }
+
+    // Before the session is the bridge's: one small colour twin made as a
+    // swapchain's are (a shared Direct3D 12 texture, imported into the game's
+    // device and bound) and let go at once. What the device says it imports
+    // is only asked until then; once the runtime's session is Direct3D 12, a
+    // twin that cannot be made leaves the game without swapchains. Nothing is
+    // submitted to either queue and nothing of it is kept.
+    bool ProbeTwin(std::string& reason) {
+        Swapchain chain;
+        Plan& plan = chain.plan;
+        plan.mode = Mode::kTwin;
+        plan.format = VK_FORMAT_R8G8B8A8_SRGB;
+        plan.dxgi = static_cast<DXGI_FORMAT>(RuntimeFormat(plan.format));
+        plan.storage = plan.dxgi; // typed, as a swapchain's that is not mutable
+        plan.width = 16;
+        plan.height = 16;
+        plan.usage = kColorUsage;
+        chain.images.emplace_back();
+        const bool made = MakeTwin(chain, chain.images.back(), reason);
+        DestroyVulkan(chain);
+        return made;
     }
 
     bool ImportTwin(const Plan& plan, Image& image, HANDLE handle, std::uint32_t mips, std::string& reason) {
@@ -2094,6 +2157,7 @@ struct VulkanBridge::Impl {
                                                        nullptr, IID_PPV_ARGS(&late.resource));
         late.allocators.assign(chain.images.size(), nullptr);
         late.lists.assign(chain.images.size(), nullptr);
+        late.list_done.assign(chain.images.size(), 0);
         for (std::size_t i = 0; SUCCEEDED(hr) && i < chain.images.size(); ++i) {
             hr = device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&late.allocators[i]));
             if (SUCCEEDED(hr)) {
@@ -2123,6 +2187,7 @@ struct VulkanBridge::Impl {
             late.resource.Reset();
             late.allocators.clear();
             late.lists.clear();
+            late.list_done.clear();
             late.resource_failed = true;
             late.engaged = false;
             Info(Failure("Making the late depth copy", hr) + ": the game's depth is taken at the hand-over (" +
@@ -2155,7 +2220,17 @@ struct VulkanBridge::Impl {
         if (image.state != State::kGame || !image.acquire) return;
         const VkCommandBuffer check =
             checking && late.image == *handed ? LateRead(chain, image, *handed, 1) : VK_NULL_HANDLE;
-        const bool copy = late.engaged && EnsureLateResource(chain);
+        bool copy = late.engaged && EnsureLateResource(chain);
+        if (copy && late.list_done[*handed] > done->GetCompletedValue()) {
+            // The image's list is still queued from its last acquire (the
+            // bridge's queue is behind), and Direct3D 12 forbids executing a
+            // command list again before its last execution is done: no copy
+            // this time. The image stays the game's, and its next hand-over
+            // copies the twin, as while depth is not taken from here.
+            copy = false;
+            ++late.skipped;
+            ++late_skips;
+        }
         if (!check && !copy) return;
         std::uint64_t serial = 0;
         if (!copy) {
@@ -2178,6 +2253,9 @@ struct VulkanBridge::Impl {
         }
         written_value = written_next;
         image.state = State::kExternal;
+        // Its release's giving back (Image::handed_back) is undone: should
+        // the giving back below be refused, its next acquire must submit.
+        image.handed_back = false;
         chain.last_serial = serial;
         if (check) {
             late.step = LateDepth::Step::kQueued;
@@ -2188,6 +2266,7 @@ struct VulkanBridge::Impl {
         queue->ExecuteCommandLists(1, lists);
         const UINT64 value = ++done_value;
         queue->Signal(done.Get(), value);
+        late.list_done[*handed] = value;
         image.done = value;
         chain.last_done = value;
         late.fresh = true;
@@ -2422,6 +2501,14 @@ const XrSessionCreateInfo* VulkanBridge::Begin(XrInstance instance, const XrSess
         VkImageFormatProperties mutable_properties{};
         entry.mutable_format = impl->QueryImport(static_cast<VkFormat>(format), VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
                                                  usage, {}, mutable_properties);
+        if (!entry.plain && IsDepthFormat(static_cast<VkFormat>(format))) {
+            // Depth the device cannot import can still be the game's own.
+            VkImageFormatProperties own{};
+            entry.private_depth =
+                vk.vkGetPhysicalDeviceImageFormatProperties(impl->physical, static_cast<VkFormat>(format),
+                                                            VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0,
+                                                            &own) == VK_SUCCESS;
+        }
         impl->importable[format] = entry;
     }
     if (!impl->importable[VK_FORMAT_R8G8B8A8_SRGB].plain) {
@@ -2555,6 +2642,12 @@ const XrSessionCreateInfo* VulkanBridge::Begin(XrInstance instance, const XrSess
         }
         impl->free_fences.push_back(fence);
         ++impl->fence_count;
+    }
+
+    // The fences above were imported for real; so is one image, before the
+    // session becomes Direct3D 12 (ProbeTwin).
+    if (!impl->ProbeTwin(why)) {
+        return fail("a shared Direct3D 12 image could not be imported into the game's Vulkan device (" + why + ")");
     }
 
     impl->binding.next = vulkan_binding.next;
@@ -2794,7 +2887,8 @@ std::vector<std::int64_t> VulkanBridge::GameFormats(const std::vector<std::int64
     formats.erase(std::remove_if(formats.begin(), formats.end(),
                                  [&](std::int64_t format) {
                                      const auto it = impl_->importable.find(format);
-                                     return it == impl_->importable.end() || !it->second.plain;
+                                     return it == impl_->importable.end() ||
+                                            !(it->second.plain || it->second.private_depth);
                                  }),
                   formats.end());
     return formats;
@@ -2839,12 +2933,20 @@ bool VulkanBridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateIn
         return false;
     }
     if (chain.plan.mode == Impl::Mode::kPrivate) {
-        chain.private_reason = "it is multisampled";
-    } else if (chain.plan.mode == Impl::Mode::kTwinDepth && impl.depth_timing == Impl::DepthTiming::kPrivate) {
-        // The switch to rule the bridge's depth out (logged once a session,
-        // in the session's line).
-        chain.plan.mode = Impl::Mode::kPrivate;
-        chain.private_reason = impl.depth_private_reason;
+        // Decided with the plan: multisampled, the switch to rule the
+        // bridge's depth out (logged once a session, in the session's line),
+        // or depth the game's device cannot import (reported once here).
+        chain.private_reason = chain.plan.private_reason;
+        bool report = false;
+        if (chain.plan.import_refused) {
+            std::scoped_lock lock(impl.mutex);
+            report = !impl.import_private_reported;
+            impl.import_private_reported = true;
+        }
+        if (report) {
+            impl.Info("a depth swapchain stays private: " + chain.private_reason +
+                      ", so the runtime gets no depth from it (reported once a session).");
+        }
     } else if (chain.plan.mode == Impl::Mode::kTwinDepth) {
         for (const XrSwapchainImageD3D12KHR& image : runtime_images) {
             if (image.texture && (image.texture->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0) {
@@ -2969,6 +3071,20 @@ std::vector<std::uint64_t> VulkanBridge::Images(XrSwapchain swapchain) const {
         for (const Impl::Image& image : chain->images) {
             images.push_back(reinterpret_cast<std::uint64_t>(image.private_image ? image.private_image
                                                                                  : image.twin_image));
+        }
+    }
+    return images;
+}
+
+std::vector<void*> VulkanBridge::SharedImages(XrSwapchain swapchain) const {
+    std::vector<void*> images;
+    if (!impl_) {
+        return images;
+    }
+    std::scoped_lock lock(impl_->mutex);
+    if (const Impl::Swapchain* chain = impl_->Find(swapchain)) {
+        for (const Impl::Image& image : chain->images) {
+            images.push_back(image.twin.Get());
         }
     }
     return images;
@@ -3514,7 +3630,7 @@ std::string VulkanBridge::Summary() const {
            << ", depth=" << Impl::DepthTimingName(impl_->depth_timing)
 
            << ", depthChecks=" << checks[0] << "/" << checks[1] << "/" << checks[2]
-           << ", lateDepthCopies=" << impl_->late_copies
+           << ", lateDepthCopies=" << impl_->late_copies << ", lateDepthSkips=" << impl_->late_skips
 
            << ", liveFences=" << impl_->fence_count
            << ", fenceGrowth=" << impl_->fence_growth << ", unfencedSubmits=" << impl_->unfenced_submits

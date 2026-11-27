@@ -19,6 +19,15 @@
     "compactMetrics": "Wybór kompaktowych wskaźników wydajności OSD jest nieprawidłowy",
     "bodyOrder": "Kolejność wierszy OSD musi zawierać każdy wiersz dokładnie raz"
   },
+  "screenshot": {
+    "eyes": "{field} musi mieć wartość both, left lub right",
+    "folder": "{field} musi być pełną ścieżką folderu, na przykład D:\\Screenshots"
+  },
+  "mirror": {
+    "eye": "{field} musi mieć wartość left lub right",
+    "aspect": "{field} musi mieć wartość {values}",
+    "monitor": "{field} musi być tekstem o długości najwyżej {max} znaków"
+  },
   "binding": {
     "chordEmpty": "{field} musi zawierać co najmniej jeden klawisz",
     "chordUnsupportedKey": "{field} zawiera nieobsługiwany klawisz: {key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field} musi mieć wartość performance, balanced lub quality",
     "motionEstimation": "{field} musi mieć wartość shader lub hardware",
     "frameMultiplier": "{field} musi mieć wartość auto, dynamic, 2x, 3x lub 4x",
+    "autoLowestRate": "{field} musi mieć wartość off lub 2x",
     "diagnosticView": "{field} musi mieć wartość off, flow, confidence lub tint",
     "interpolateFlow": "{field} musi mieć wartość auto, hardware lub shader"
   },
@@ -61,6 +71,8 @@
   "version": "version musi być równe {version}",
   "warnings": {
     "turboFrameGenOverlap": "Turbo i Frame Generation są włączone jednocześnie dla: {targets}. Frame Generation przejmuje taktowanie klatek; Turbo pozostaje wyłączone w sesjach, w których działa Frame Generation.",
+    "mirrorFillNoMonitorDefault": "Stabilizowane okno podglądu: opcja „Wypełnij monitor” jest włączona w profilu domyślnym, ale nie wybrano monitora. Podgląd otwiera się jako zwykłe okno, dopóki monitor nie zostanie wybrany.",
+    "mirrorFillNoMonitorProfile": "Stabilizowane okno podglądu: opcja „Wypełnij monitor” jest włączona w profilu {profile}, ale nie wybrano monitora. Podgląd otwiera się jako zwykłe okno, dopóki monitor nie zostanie wybrany.",
     "moreApplications_one": "jeszcze {count}",
     "moreApplications_few": "jeszcze {count}",
     "moreApplications_many": "jeszcze {count}",

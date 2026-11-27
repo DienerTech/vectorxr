@@ -9,15 +9,19 @@ import manifest from '../../assets/guides/screens/manifest.json'
 import { activeLocale, t } from '../../i18n/index.ts'
 import type { GuideId } from '../../lib/guides'
 
-const props = defineProps<{ guide: GuideId; beat: number; caption: string }>()
+// shot: the picture's name when it is not the guide's own; box: the control to
+// ring in it when a picture has more than one.
+const props = defineProps<{ guide: GuideId; shot?: string; box?: string; beat: number; caption: string }>()
 
 const images = import.meta.glob<string>('../../assets/guides/screens/*/*.jpg', { eager: true, query: '?url', import: 'default' })
 const boxes = manifest.boxes as Record<string, Record<string, number[]>>
 
 // The page in the app's language, or in English for a language without one.
-const lang = computed(() => (boxes[activeLocale.value]?.[props.guide] ? activeLocale.value : 'en'))
-const src = computed(() => images[`../../assets/guides/screens/${lang.value}/${props.guide}.jpg`])
-const box = computed(() => boxes[lang.value]?.[props.guide] ?? [0.4, 0.4, 0.2, 0.1])
+const shotName = computed(() => props.shot ?? props.guide)
+const boxName = computed(() => props.box ?? shotName.value)
+const lang = computed(() => (boxes[activeLocale.value]?.[boxName.value] ? activeLocale.value : 'en'))
+const src = computed(() => images[`../../assets/guides/screens/${lang.value}/${shotName.value}.jpg`])
+const box = computed(() => boxes[lang.value]?.[boxName.value] ?? [0.4, 0.4, 0.2, 0.1])
 
 // The screenshot is as wide as the frame and taller, so it is moved to keep the
 // control in view, then zoomed toward it. The frame's size is measured, since
@@ -40,9 +44,14 @@ const imageAspect = manifest.aspect
 const zoom = computed(() => 1 + 0.12 * Math.max(0, 1 - box.value[2] * 2) * Math.min(1, Math.max(0, props.beat - 2) / 8))
 const centre = computed(() => ({ x: box.value[0] + box.value[2] / 2, y: box.value[1] + box.value[3] / 2 }))
 // Pixels to move the image up so the control's centre sits mid-frame, kept within the image.
+// A control taller than the frame starts at its top and moves down to its bottom on beats 4-9.
 const shift = computed(() => {
   const imageHeight = frameSize.value.w * imageAspect
-  return Math.max(0, Math.min(imageHeight - frameSize.value.h, centre.value.y * imageHeight - frameSize.value.h / 2))
+  const over = box.value[3] * imageHeight + 16 - frameSize.value.h
+  const target = over > 0
+    ? box.value[1] * imageHeight - 8 + over * Math.min(1, Math.max(0, (props.beat - 4) / 5))
+    : centre.value.y * imageHeight - frameSize.value.h / 2
+  return Math.max(0, Math.min(imageHeight - frameSize.value.h, target))
 })
 const imageStyle = computed(() => ({
   transform: `translateY(${-shift.value}px) scale(${zoom.value})`, // i18n-ignore

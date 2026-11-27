@@ -1,0 +1,191 @@
+{
+  "screenshots": {
+    "heading": "螢幕擷取畫面",
+    "intro": "依遊戲算繪的原樣，以完整解析度將每隻眼睛的影像儲存為 PNG 檔案。檔案會在背景寫入，遊戲不會卡頓。",
+    "binding": {
+      "label": "擷取螢幕畫面",
+      "description": "每按一次就儲存一張螢幕擷取畫面，適用於所有遊戲。",
+      "none": "未指派任何繫結。在新增繫結之前，螢幕擷取功能會保持關閉。"
+    },
+    "eyes": {
+      "legend": "要儲存的眼睛",
+      "both": {
+        "label": "雙眼",
+        "description": "每次擷取會儲存兩個檔案，檔名以 _L 和 _R 結尾。"
+      },
+      "left": {
+        "label": "左眼",
+        "description": "儲存一個檔案，檔名以 _L 結尾。"
+      },
+      "right": {
+        "label": "右眼",
+        "description": "儲存一個檔案，檔名以 _R 結尾。"
+      }
+    },
+    "folder": {
+      "title": "螢幕擷取畫面資料夾",
+      "defaultLocation": "「圖片」資料夾中的 VectorXR",
+      "perGame": "每個遊戲在其中都有自己的資料夾，以其程式檔案命名。",
+      "choose": "選擇資料夾…",
+      "useDefault": "使用預設位置",
+      "open": "開啟資料夾",
+      "pickerFailed": "無法開啟資料夾選擇器。",
+      "openFailed": "無法開啟螢幕擷取畫面資料夾。"
+    },
+    "notes": {
+      "title": "注意事項",
+      "names": "檔案會以遊戲名稱以及擷取的日期和時間命名。",
+      "api": "適用於 D3D11 和 D3D12 遊戲。尚不支援 Vulkan 遊戲。",
+      "quadviews": "使用 Quadviews 時，擷取畫面是 VectorXR 為每隻眼睛合成的完整影像。",
+      "framegen": "使用 Frame Generation 時，擷取畫面一律是遊戲算繪的影格，而不是產生的影格。",
+      "feedback": "如果繫結的音效已開啟，儲存擷取畫面時會播放。如果無法擷取畫面，則會改為播放關閉音效，記錄檔會說明原因。記錄檔會記下每個檔案的名稱。"
+    }
+  },
+  "mirror": {
+    "heading": "防手震鏡像視窗",
+    "intro": "在桌面上開啟一個 VectorXR 視窗，顯示一隻眼睛的影像並平滑頭部晃動，用於直播與錄影。頭戴式裝置中的畫面不變。可為所有遊戲開啟，也可依遊戲開啟。",
+    "liveNote": "儲存後，變更會立即在執行中的遊戲生效；長寬比或寬度變更時，視窗會調整大小。",
+    "notes": {
+      "title": "注意事項",
+      "summary": "OBS、支援的遊戲，以及平滑的內容",
+      "obs": {
+        "label": "直播與錄影。",
+        "body": "{label} 在 OBS 中新增「視窗擷取」來源，然後選擇名稱以「VectorXR Mirror」開頭、後面接著遊戲名稱的視窗。"
+      },
+      "hdr": {
+        "label": "HDR 顯示器。",
+        "body": "{label} 如果鏡像視窗位於 HDR 顯示器上而遊戲是 SDR，OBS 錄下的畫面可能會顯得泛白或過亮。請在「視窗擷取」來源的屬性中勾選「強制 SDR」（Force SDR）。"
+      },
+      "separate": {
+        "label": "為什麼是獨立的視窗。",
+        "body": "{label} 頭戴式裝置軟體本身的鏡像（SteamVR 的 VR 檢視、Meta 或 Oculus 鏡像、Virtual Desktop、Pimax）和遊戲自己的桌面視窗，顯示的就是頭戴式裝置收到的畫面，無法另外穩定。"
+      },
+      "support": {
+        "label": "支援的遊戲。",
+        "body": "{label} 適用於 D3D11、D3D12 和 Vulkan 遊戲。對於 Vulkan 遊戲，請在啟動遊戲前開啟此功能。"
+      },
+      "smoothing": {
+        "label": "平滑的內容。",
+        "body": "{label} 頭部旋轉，也就是頭部晃動。位置的起伏不會被平滑。平滑越強，快速轉頭時畫面落後越多；邊界會放大畫面以隱藏邊緣。"
+      },
+      "framegen": {
+        "label": "使用 Frame Generation 時。",
+        "body": "{label} 視窗顯示的是遊戲算繪的影格，而不是產生的影格。"
+      },
+      "window": {
+        "label": "視窗。",
+        "body": "{label} 它絕不會從遊戲搶走鍵盤焦點。關閉視窗會將其隱藏。點選「顯示鏡像」或按下繫結的按鍵即可重新顯示。它的大小和位置會依遊戲分別記住。"
+      },
+      "fill": {
+        "label": "填滿螢幕。",
+        "body": "{label} 畫面可以無邊框地填滿一台螢幕或電視，既適合在房間裡觀看的人，也適合 OBS。它會蓋住該螢幕上的所有內容，包括遊戲自己的視窗，所以除非這正是你想要的，否則請選擇遊戲所在螢幕以外的螢幕。填滿的螢幕沒有關閉按鈕：請用繫結隱藏和顯示畫面。"
+      },
+      "cost": {
+        "label": "少量負擔。",
+        "body": "{label} 視窗每顯示一個影格，只以視窗本身的大小進行一次小型繪製，並受影格速率上限限制。它絕不會拖住遊戲的影格。"
+      }
+    },
+    "status": {
+      "show": "顯示鏡像",
+      "hide": "隱藏鏡像",
+      "heading": "執行中的遊戲",
+      "unavailable": "執行階段狀態暫時無法使用。",
+      "noSession": "沒有執行中的 VR 應用程式"
+    },
+    "session": {
+      "withReason": "{status} · {reason}",
+      "active": "視窗已開啟",
+      "pending": "正在等待第一個影格",
+      "hidden": "視窗已隱藏",
+      "unsupported": "此遊戲中目前無法使用",
+      "failed": "失敗 · 沒有視窗",
+      "off": "關閉",
+      "needsLayer": "需要更新後的 VectorXR 層",
+      "unknown": "狀態無法使用"
+    },
+    "binding": {
+      "label": "顯示或隱藏鏡像視窗",
+      "description": "在已開啟鏡像視窗的遊戲中，於遊戲執行時顯示或隱藏該視窗。",
+      "none": "未指派任何繫結。在已開啟鏡像視窗的遊戲啟動時，視窗會開啟。"
+    },
+    "defaultProfile": {
+      "heading": "預設設定檔",
+      "appliesTo": "適用於沒有已啟用自訂設定檔的遊戲",
+      "toggleOn": "預設設定檔已開啟",
+      "toggleOff": "預設設定檔已關閉",
+      "offNote": "對沒有自訂設定檔的遊戲關閉。下方的自訂設定檔仍會為其遊戲開啟。"
+    },
+    "customProfiles": {
+      "heading": "自訂設定檔",
+      "description": "依遊戲設定鏡像視窗。第一個符合的已啟用設定檔優先。",
+      "add": "新增設定檔",
+      "empty": "還沒有自訂設定檔。新增設定檔以為某個遊戲開啟鏡像視窗。",
+      "duplicateApplication": "{application} 已被設定檔 {profile} 指定。第一個啟用的設定檔優先。"
+    },
+    "summary": {
+      "plain": "無平滑",
+      "smoothing": "平滑 {value}"
+    },
+    "fields": {
+      "stabilization": {
+        "heading": "穩定"
+      },
+      "window": {
+        "heading": "視窗"
+      },
+      "smoothing": {
+        "label": "平滑",
+        "help": "平滑頭部晃動的強度。0 是沒有穩定功能的一般鏡像；數值越高畫面越穩，快速轉頭時落後也越多。",
+        "off": "關閉"
+      },
+      "levelHorizon": {
+        "label": "保持地平線水平",
+        "help": "從畫面中去除頭部的側傾，歪頭時畫面仍保持水平。"
+      },
+      "margin": {
+        "label": "邊界",
+        "help": "畫面放大的程度，讓穩定時邊緣保持填滿。邊界越大，可涵蓋的頭部動作越大，顯示的視野越小。"
+      },
+      "percent": "{value}%",
+      "valueLabel": "{setting}，精確數值",
+      "eye": {
+        "legend": "要顯示的眼睛",
+        "left": {
+          "label": "左眼",
+          "description": "視窗顯示左眼的影像。"
+        },
+        "right": {
+          "label": "右眼",
+          "description": "視窗顯示右眼的影像。"
+        }
+      },
+      "aspect": {
+        "label": "長寬比"
+      },
+      "width": {
+        "label": "畫面寬度（像素）",
+        "help": "畫面寬度：視窗第一次開啟時的畫面寬度，範圍為 {min} 到 {max} 像素。高度由長寬比決定。",
+        "opensAt": "視窗以 {width} × {height} 開啟。"
+      },
+      "frameRate": {
+        "label": "影格速率上限（fps）",
+        "help": "影格速率上限：視窗每秒最多顯示的影格數，範圍為 {min} 到 {max}。"
+      },
+      "fillMonitor": {
+        "label": "填滿螢幕",
+        "help": "畫面無邊框地填滿所選螢幕，而不是放在可調整大小的視窗裡，並採用該螢幕的形狀。它仍然絕不會從遊戲搶走鍵盤焦點或輸入。滑鼠點擊會穿過畫面，傳給下面的遊戲。如果該螢幕未連接，鏡像會以一般視窗開啟。",
+        "sizeUnused": "畫面填滿螢幕時，不使用長寬比和畫面寬度。"
+      },
+      "monitor": {
+        "label": "螢幕",
+        "choose": "選擇螢幕…",
+        "option": "{name} · {width}×{height}",
+        "optionPrimary": "{name} · {width}×{height} · 主要螢幕",
+        "notConnected": "{name} · 未連接",
+        "none": "尚未選擇螢幕。在你選擇之前，鏡像會以一般視窗開啟；絕不會自動選擇螢幕。",
+        "covers": "畫面會蓋住該螢幕上的所有內容，包括遊戲自己的視窗。除非這正是你想要的，否則請選擇遊戲所在螢幕以外的螢幕。請用繫結隱藏和顯示畫面；填滿的螢幕沒有關閉按鈕。",
+        "unavailable": "在 VectorXR 桌面應用程式中，這裡會列出電腦的螢幕。"
+      }
+    }
+  }
+}

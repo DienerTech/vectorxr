@@ -7,6 +7,8 @@
     "tools": "Exibição e ferramentas"
   },
   "badges": {
+    "new": "Novo",
+    "beta": "Beta",
     "experimental": "Experimental"
   },
   "back": "Todos os guias",
@@ -42,7 +44,13 @@
     "depthPlane": "Plano de profundidade",
     "wait": "Esperando o runtime",
     "render": "O jogo renderiza",
-    "osdPanel": "Painel do OSD"
+    "osdPanel": "Painel do OSD",
+    "mirrorWindow": "Janela de espelho do VectorXR",
+    "smoothedCopy": "Uma cópia, suavizada",
+    "binding": "Sua atribuição",
+    "runtimeMirror": "Espelho do software do headset",
+    "sameImage": "A mesma imagem",
+    "pngFiles": "PNG para cada olho"
   },
   "items": {
     "start": {
@@ -80,7 +88,7 @@
           "heading": "Configure seu primeiro jogo",
           "steps": {
             "1": "Abra o jogo uma vez com o VectorXR instalado e depois feche-o.",
-            "2": "Abra o **Registro de aplicativos**, clique em **Atualizar** e registre o jogo na lista de apps que o VectorXR viu.",
+            "2": "Abra **Aplicativos → Descoberta**, clique em **Atualizar** e registre o jogo na lista de apps que o VectorXR viu.",
             "3": "Abra um aprimoramento na barra lateral, clique em **Adicionar perfil** e escolha o jogo.",
             "4": "Ajuste as configurações e clique em **Salvar alterações**. Alguns aprimoramentos exigem reiniciar o jogo; os guias deles dizem quais."
           }
@@ -285,6 +293,61 @@
           "body": "Desative o OSD na página dele e salve, ou oculte-o durante a sessão com a atribuição dele."
         }
       }
+    },
+    "screenshots": {
+      "title": "Capturas de tela",
+      "summary": "Salve a imagem de cada olho em resolução total como PNG com uma tecla ou botão.",
+      "sections": {
+        "what": {
+          "body": "Uma captura salva a imagem que o jogo envia ao headset, antes da correção das lentes, então ela é mais nítida e maior que uma captura do espelho na área de trabalho. Ela não inclui a exibição na tela nem outras sobreposições. Com o Frame Generation ativado, salva um quadro renderizado pelo jogo, nunca um gerado."
+        },
+        "setup": {
+          "steps": {
+            "1": "Abra **Capturas de tela** e adicione uma atribuição para **Fazer captura de tela**. Não há nenhuma por padrão.",
+            "2": "Escolha **Ambos os olhos**, **Olho esquerdo** ou **Olho direito**.",
+            "3": "Clique em **Salvar alterações** e depois pressione a atribuição no headset."
+          }
+        },
+        "check": {
+          "body": "Os arquivos vão para Imagens\\VectorXR, em uma pasta para cada jogo. Uma imagem grande leva um ou dois segundos para aparecer. Com o som da atribuição ativado, você ouve um aviso quando os arquivos são salvos."
+        },
+        "problems": {
+          "body": "As capturas funcionam em jogos Direct3D 11 e Direct3D 12. Jogos Vulkan ainda não são compatíveis. Se nada for salvo, o log do VectorXR diz o motivo."
+        }
+      }
+    },
+    "mirror": {
+      "title": "Janela de espelho estabilizada",
+      "summary": "Uma janela estabilizada na área de trabalho com a visão de um olho, para transmissão ao vivo e gravação.",
+      "sections": {
+        "what": {
+          "body": "A janela de espelho estabilizada é uma janela do VectorXR na área de trabalho que mostra a imagem de um olho com o tremor da cabeça suavizado. A imagem do headset não muda. O espelho do software do headset e a janela do jogo na área de trabalho mostram exatamente o que o headset recebe, então não podem ser estabilizados separadamente."
+        },
+        "when": {
+          "body": "Use quando você transmite ou grava, ou quando outras pessoas assistem em um monitor ou TV. Funciona em jogos Direct3D 11, Direct3D 12 e Vulkan."
+        },
+        "setup": {
+          "steps": {
+            "1": "Abra **Espelho estabilizado** e ative a janela de espelho: no **Perfil padrão** para todos os jogos, ou em um perfil personalizado para um jogo.",
+            "2": "Clique em **Salvar alterações**. A janela abre quando o jogo mostra o primeiro quadro. Em um jogo Vulkan, ative antes de iniciar o jogo.",
+            "3": "No OBS, adicione uma fonte **Captura de janela** e escolha a janela cujo nome começa com VectorXR Mirror.",
+            "4": "Aumente **Suavização** para uma imagem mais estável, e **Margem** se as bordas da imagem aparecerem em giros rápidos da cabeça. As mudanças valem assim que você salva."
+          }
+        },
+        "check": {
+          "body": "A página Espelho estabilizado lista os jogos em execução, com **Janela aberta** enquanto o espelho está sendo exibido."
+        },
+        "off": {
+          "body": "Desative o perfil e salve, ou oculte a janela com a atribuição **Mostrar ou ocultar a janela de espelho**. Fechar a janela apenas a oculta."
+        },
+        "problems": {
+          "points": {
+            "a": "**A imagem fica atrasada em giros rápidos da cabeça:** reduza Suavização.",
+            "b": "**Sem janela em um jogo Vulkan:** ative a janela de espelho, salve e reinicie o jogo.",
+            "c": "**A imagem cobre a janela do jogo:** em **Preencher um monitor**, escolha um monitor diferente do monitor do jogo."
+          }
+        }
+      }
     }
   },
   "walkthrough": {
@@ -315,7 +378,11 @@
       "biggerWorld": "Olhos mais próximos: um mundo maior",
       "compactWorld": "Olhos mais afastados: um mundo mais compacto",
       "frames_one": "{count} quadro",
-      "frames_other": "{count} quadros"
+      "frames_other": "{count} quadros",
+      "windowCapture": "Captura de janela",
+      "mirror": "Espelho da área de trabalho",
+      "fullRes": "Resolução total",
+      "folder": "Imagens\\VectorXR"
     }
   },
   "walkthroughs": {
@@ -387,6 +454,26 @@
         "3": "Escolha uma predefinição e arraste o painel para onde quiser na prévia.",
         "4": "No jogo, Ctrl+Alt+F10 mostra ou oculta o painel e Ctrl+Alt+F11 troca de layout.",
         "5": "Na página Exibição na tela, ative-a, escolha uma predefinição e salve."
+      }
+    },
+    "screenshots": {
+      "title": "Assista: como as capturas funcionam",
+      "steps": {
+        "1": "Uma captura do espelho da área de trabalho é pequena e mostra a imagem depois da correção das lentes.",
+        "2": "O VectorXR salva a imagem que o jogo envia ao headset, em resolução total e sem sobreposições.",
+        "3": "Pressione sua atribuição e um PNG para cada olho vai para uma pasta do jogo em Imagens\\VectorXR.",
+        "4": "Na página Capturas de tela, adicione uma atribuição para Fazer captura de tela, escolha os olhos e salve."
+      }
+    },
+    "mirror": {
+      "title": "Assista: como a janela de espelho estabilizada funciona",
+      "steps": {
+        "1": "O espelho do software do headset e a janela do jogo na área de trabalho mostram exatamente a imagem que o headset recebe, então cada tremor da sua cabeça aparece na sua transmissão.",
+        "2": "O VectorXR abre uma janela própria com uma cópia da imagem de um olho e suaviza só essa cópia. A imagem do headset não muda.",
+        "3": "No OBS, adicione uma fonte Captura de janela e escolha a janela cujo nome começa com VectorXR Mirror.",
+        "4": "Na página Espelho estabilizado, ative o Perfil padrão para todos os jogos, ou adicione um perfil personalizado para um jogo, e salve. A janela abre com o primeiro quadro do jogo.",
+        "5": "Aumente Suavização para uma imagem mais estável, e Margem se as bordas da imagem aparecerem em giros rápidos da cabeça. Manter o horizonte nivelado tira a inclinação da cabeça.",
+        "6": "Em Janela, escolha o olho, o formato e o tamanho da imagem e um limite de quadros por segundo, ou preencha um monitor. As mudanças valem assim que você salva."
       }
     }
   }

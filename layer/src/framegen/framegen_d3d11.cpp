@@ -6,6 +6,7 @@
 #include <vulkan/vulkan_core.h>
 #include <openxr/openxr_platform.h>
 
+#include "depthxr/d3d11_predication.h"
 #include "depthxr/framegen_gpu.h"
 
 #include <array>
@@ -207,10 +208,9 @@ class D3D11FrameGen final : public FrameGenGpu {
             error.clear();
             return false;
         }
-        SavedState saved;
-        Save(saved);
+        // A capture is just a resource copy. It changes no shader bindings.
+        const ScopedD3D11Unpredicated unpredicated(context_.Get());
         CopySource(view, source, texture);
-        Restore(saved);
         view.capture = {true, source.swapchain, source.image_index, source.array_index, source.rect};
         return true;
     }
@@ -233,6 +233,7 @@ class D3D11FrameGen final : public FrameGenGpu {
             return false;
         }
         SavedState saved;
+        const ScopedD3D11Unpredicated unpredicated(context_.Get());
         Save(saved);
         TimingQuery* timing = BeginTiming();
         bool ok = true;

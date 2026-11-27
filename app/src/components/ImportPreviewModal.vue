@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import I18nText from './I18nText.vue'
 import { t } from '../i18n/index.ts'
+import type { ClearedImportPath } from '../lib/importPaths'
 import type { ModuleId, VectorXRConfig } from '../lib/model'
 
 defineProps<{
   open: boolean
   config: VectorXRConfig | null
   errors: string[]
+  clearedPaths: ClearedImportPath[]
 }>()
 
 defineEmits<{
@@ -49,6 +51,28 @@ const previewModules: ModuleId[] = ['depthxr', 'pivotxr', 'quadviews', 'turbo', 
             >
               <template #state><span class="font-medium" style="color: var(--app-text)">{{ config.modules[moduleId].enabled ? t('common.on') : t('common.off') }}</span></template>
             </I18nText>
+            <!-- The stabilized mirror window: a Capture & Mirror utility with profiles of its own. -->
+            <I18nText
+              tag="li"
+              keypath="app.importPreview.moduleDefault"
+              :params="{ module: t('utilities.mirror.heading'), count: config.modules.mirror.profiles.length }"
+            >
+              <template #state><span class="font-medium" style="color: var(--app-text)">{{ config.modules.mirror.enabled ? t('common.on') : t('common.off') }}</span></template>
+            </I18nText>
+          </ul>
+        </div>
+
+        <div
+          v-if="clearedPaths.length > 0"
+          class="rounded-[1rem] border px-4 py-4 text-sm leading-6 chip-warning"
+          style="border-color: var(--app-border)"
+        >
+          <p class="font-medium">{{ t('app.importPreview.networkPathsTitle') }}</p>
+          <p class="mt-1 text-sm">{{ t('app.importPreview.networkPathsHint') }}</p>
+          <ul class="mt-3 space-y-1.5">
+            <li v-for="entry in clearedPaths" :key="entry.field" class="break-all">
+              <span class="font-medium">{{ entry.field }}</span>: <code>{{ entry.path }}</code>
+            </li>
           </ul>
         </div>
 

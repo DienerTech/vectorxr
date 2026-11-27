@@ -85,12 +85,52 @@ struct FrameGenQueueSubstitution::Impl {
         std::vector<std::uint64_t> released_as;
         // Images whose first wait ordered the game's queue (AfterWait; under `mutex`).
         std::vector<bool> ordered;
-        HANDLE event{nullptr};
-        ~Swapchain() {
-            if (event) CloseHandle(event);
-        }
     };
     std::unordered_map<XrSwapchain, std::shared_ptr<Swapchain>> swapchains;
+    std::vector<HANDLE> events; // reusable auto-reset fence wait events (under `mutex`)
+
+    ~Impl() {
+        for (const HANDLE event : events) {
+            if (event) CloseHandle(event);
+        }
+    }
+
+    HANDLE TakeEvent() {
+        {
+            std::scoped_lock lock(mutex);
+            if (!events.empty()) {
+                const HANDLE event = events.back();
+                events.pop_back();
+                ResetEvent(event);
+                return event;
+            }
+        }
+        return CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    }
+
+    void ReturnEvent(HANDLE event) {
+        if (!event) return;
+        std::scoped_lock lock(mutex);
+        events.push_back(event);
+    }
+
+    // Bounded CPU wait on `released` reaching `value`, using a dedicated event
+    // so concurrent unlocked waits cannot race on or steal an auto-reset signal.
+    // An event returned after a timeout may still fire for its earlier value;
+    // the completion-value loop ignores stale wake-ups.
+    void WaitForRelease(UINT64 value) {
+        const HANDLE event = TakeEvent();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kReleaseWaitMs);
+        if (event && SUCCEEDED(released->SetEventOnCompletion(value, event))) {
+            for (auto now = std::chrono::steady_clock::now();
+                 released->GetCompletedValue() < value && now < deadline;
+                 now = std::chrono::steady_clock::now()) {
+                const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+                WaitForSingleObject(event, static_cast<DWORD>(left.count()));
+            }
+        }
+        ReturnEvent(event);
+    }
 
     std::shared_ptr<Swapchain> Find(XrSwapchain swapchain, bool create) {
         std::scoped_lock lock(mutex);
@@ -127,39 +167,69 @@ struct FrameGenQueueSubstitution::Impl {
         kDone,     // releases whose work has run (and the waits after them)
         kReleases, // every release (the runtime's queue waiting for its work); later waits stay
         kAll,      // everything
-        kOldest,   // through the oldest release, the runtime's queue waiting for its work
+        kAcquire,  // make room for one acquire; only poll subsequent waits
     };
     // Forwards held-back calls from the oldest (holding `state.calls`).
-    // False when a wait the runtime did not return in time stopped it.
-    bool Forward(XrSwapchain swapchain, Swapchain& state, const Calls& next, Until until) {
-        const UINT64 done = released->GetCompletedValue();
+    // A refused call stays at the front for retry. A later call cannot
+    // overtake it in the runtime's acquisition order.
+    XrResult Forward(XrSwapchain swapchain, Swapchain& state, const Calls& next, Until until) {
+        if (state.held_back.empty()) return XR_SUCCESS;
+        UINT64 done = released->GetCompletedValue();
+        // Without an enumerated count, one real release still guarantees room.
+        bool needs_release = until == Until::kAcquire && state.releases &&
+                             (!state.image_count || state.runtime_acquired.size() >= state.image_count);
+        XrResult result = XR_SUCCESS;
         while (!state.held_back.empty()) {
             const Call call = state.held_back.front();
+            const bool optional = until == Until::kAcquire && !needs_release;
             if (call.wait) {
                 if (until == Until::kReleases && state.releases == 0) break;
                 XrSwapchainImageWaitInfo info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-                info.timeout = kHeldBackWaitTimeout;
-                const XrResult result = next.wait(swapchain, &info);
+                // Acquire can get a real index while a separate, earlier wait
+                // is pending if the runtime already has a spare image.
+                info.timeout = optional ? 0 : kHeldBackWaitTimeout;
+                result = next.wait(swapchain, &info);
                 if (result == XR_TIMEOUT_EXPIRED) {
+                    if (optional) return XR_SUCCESS;
+                    // This older image timed out, not the application's
+                    // current wait. Acquire and release have no timeout result.
                     Note(XR_ERROR_RUNTIME_FAILURE, "wait (timed out; retried)");
-                    return false;
+                    return XR_ERROR_RUNTIME_FAILURE;
                 }
                 Note(result, "wait");
+                if (XR_FAILED(result)) break;
                 state.held_back.pop_front();
                 continue;
             }
             if (call.value > done) {
-                if (until == Until::kDone) break;
-                runtime->Wait(released.Get(), call.value);
+                if (until == Until::kDone || optional) break;
+                if (until == Until::kAcquire) {
+                    // The ring is full. Give the oldest release a bounded
+                    // chance to finish before ordering the runtime queue.
+                    WaitForRelease(call.value);
+                    done = released->GetCompletedValue();
+                }
+                if (call.value > done && FAILED(runtime->Wait(released.Get(), call.value))) {
+                    Note(XR_ERROR_RUNTIME_FAILURE, "queue wait before release");
+                    return XR_ERROR_RUNTIME_FAILURE;
+                }
             }
             XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            Note(next.release(swapchain, &info), "release");
+            result = next.release(swapchain, &info);
+            Note(result, "release");
+            if (XR_FAILED(result)) break;
             Released(state);
             state.held_back.pop_front();
             --state.releases;
-            if (until == Until::kOldest) break;
+            needs_release = false;
         }
-        return true;
+        if (until == Until::kAcquire && !needs_release && result != XR_ERROR_SESSION_LOST &&
+            result != XR_ERROR_INSTANCE_LOST && result != XR_ERROR_HANDLE_INVALID) {
+            // A recoverable refusal stays at the head, but the runtime
+            // can still hand out the next available image.
+            return XR_SUCCESS;
+        }
+        return result;
     }
 
     // The runtime got a release (holding `state.calls`): of the image it
@@ -326,25 +396,8 @@ XrResult FrameGenQueueSubstitution::Acquire(XrSwapchain swapchain, std::uint32_t
     if (image_count) {
         state->image_count = image_count;
     }
-    impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
-    // The runtime hands out an image only while the application (to its
-    // knowledge) holds fewer than all of them.
-    for (int forced = 0; state->releases && image_count && state->held + state->releases >= image_count &&
-                         forced < static_cast<int>(image_count);
-         ++forced) {
-        const auto oldest = std::find_if(state->held_back.begin(), state->held_back.end(),
-                                         [](const Impl::Call& call) { return !call.wait; });
-        if (!state->event) state->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (state->event && SUCCEEDED(impl_->released->SetEventOnCompletion(oldest->value, state->event))) {
-            WaitForSingleObject(state->event, kReleaseWaitMs);
-        }
-        // Still running after that: forwarded with the runtime's queue
-        // waiting for it instead.
-        if (!impl_->Forward(swapchain, *state, next, Impl::Until::kOldest)) {
-            break;
-        }
-        impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
-    }
+    const XrResult forwarded = impl_->Forward(swapchain, *state, next, Impl::Until::kAcquire);
+    if (XR_FAILED(forwarded)) return forwarded;
     const XrResult result = next.acquire(swapchain, info, index);
     if (XR_SUCCEEDED(result)) {
         ++state->held;
@@ -362,9 +415,11 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
     const auto state = impl_->Find(swapchain, false);
     // The image waited for: the application's oldest acquired.
     std::uint32_t image = Impl::kUnknownImage;
+    bool had_image = false;
     if (state) {
         std::unique_lock calls(state->calls);
         if (!state->unwaited.empty()) {
+            had_image = true;
             image = state->unwaited.front();
             state->unwaited.pop_front();
         }
@@ -399,19 +454,8 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
             const UINT64 value = image == Impl::kUnknownImage ? newest->value : oldest->value;
             if (Impl::NewestShown(*state, image) && value > impl_->released->GetCompletedValue()) {
                 ++impl_->shown_cpu_waits;
-                if (!state->event) state->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
                 calls.unlock();
-                // The event may still be set for an earlier value: waited
-                // for until this one has passed.
-                const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kReleaseWaitMs);
-                if (state->event && SUCCEEDED(impl_->released->SetEventOnCompletion(value, state->event))) {
-                    for (auto now = std::chrono::steady_clock::now();
-                         impl_->released->GetCompletedValue() < value && now < until;
-                         now = std::chrono::steady_clock::now()) {
-                        const auto left = std::chrono::ceil<std::chrono::milliseconds>(until - now);
-                        WaitForSingleObject(state->event, static_cast<DWORD>(left.count()));
-                    }
-                }
+                impl_->WaitForRelease(value);
                 calls.lock();
                 impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
             }
@@ -423,8 +467,10 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
             }
             impl_->shown_gpu_waits += impl_->Pending(*state);
         }
-        if (!impl_->Forward(swapchain, *state, next, Impl::Until::kAll)) {
-            return XR_ERROR_RUNTIME_FAILURE;
+        const XrResult forwarded = impl_->Forward(swapchain, *state, next, Impl::Until::kAll);
+        if (XR_FAILED(forwarded)) {
+            if (had_image) state->unwaited.push_front(image);
+            return forwarded;
         }
         if (state->direct_waits) {
             --state->direct_waits;
@@ -435,8 +481,9 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
     const XrResult result = next.wait(swapchain, info);
     if (XR_SUCCEEDED(result) && result != XR_TIMEOUT_EXPIRED) {
         impl_->AfterWait(state.get(), image);
-    } else if (state && result == XR_TIMEOUT_EXPIRED) {
-        // Waited for again.
+    } else if (had_image) {
+        // The runtime has not handed this image back. The next wait names
+        // this acquisition again even when more were acquired behind it.
         std::scoped_lock calls(state->calls);
         state->unwaited.push_front(image);
     }
@@ -450,21 +497,24 @@ XrResult FrameGenQueueSubstitution::Release(XrSwapchain swapchain, bool lazy, co
     }
     const auto state = impl_->Find(swapchain, true);
     std::scoped_lock calls(state->calls);
-    state->held = state->held ? state->held - 1 : 0;
     const UINT64 value = impl_->MarkGameWork();
     if (lazy || state->shown_lazily) {
         if (!lazy) ++impl_->shown_releases;
+        if (state->held) --state->held;
         state->held_back.push_back({false, value});
         ++state->releases;
         impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
         return XR_SUCCESS;
     }
-    if (!impl_->Forward(swapchain, *state, next, Impl::Until::kAll)) {
-        return XR_ERROR_RUNTIME_FAILURE;
+    const XrResult forwarded = impl_->Forward(swapchain, *state, next, Impl::Until::kAll);
+    if (XR_FAILED(forwarded)) return forwarded;
+    if (FAILED(impl_->runtime->Wait(impl_->released.Get(), value))) return XR_ERROR_RUNTIME_FAILURE;
+    const XrResult result = next.release(swapchain, info);
+    if (XR_SUCCEEDED(result)) {
+        if (state->held) --state->held;
+        Impl::Released(*state);
     }
-    impl_->runtime->Wait(impl_->released.Get(), value);
-    Impl::Released(*state);
-    return next.release(swapchain, info);
+    return result;
 }
 
 void FrameGenQueueSubstitution::Flush(XrSwapchain swapchain, const Calls& next, bool shown_lazily) {

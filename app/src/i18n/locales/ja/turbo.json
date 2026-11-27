@@ -113,8 +113,6 @@
     "summary": {
       "waitForSubmission": "送信を待機",
       "overlapSubmission": "送信と重複",
-      "sampleAtEntry": "開始時にサンプル",
-      "sampleAtReturn": "復帰時にサンプル",
       "prediction": "予測 {percent}%",
       "fpsCap": "上限 {fps} fps",
       "noCap": "上限なし"
@@ -122,7 +120,6 @@
     "advancedTitle": "高度なタイミング",
     "advancedIntro": "実験用です。ほとんどのプレイヤーは変更しないでください。",
     "waitForOverlap": "重複する送信を待機する",
-    "sampleAtWaitEntry": "待機の開始時に予測タイミングをサンプリングする",
     "predictionLabel": "予測 (%)",
     "frameCapLabel": "フレーム上限 (fps、0 = オフ)",
     "changeNote": "いずれかの値を変更すると、プロファイルはカスタムに切り替わります。予測の調整にはランタイムのクロックのサポートが必要です。"

@@ -9,7 +9,7 @@ import { formatList, t } from '../i18n/index.ts'
 import { isLocaleCode, type LocaleCode } from '../i18n/locales.ts'
 import { en } from '../i18n/locales/en/index.ts'
 
-export type AppTab = 'osd' | 'home' | 'core' | 'registry' | 'layers' | 'guides' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo' | 'framegen'
+export type AppTab = 'osd' | 'home' | 'core' | 'registry' | 'discovery' | 'layers' | 'guides' | 'supporters' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo' | 'framegen' | 'screenshots' | 'mirror'
 // Option values are key names saved in chords; labels are read when shown, so
 // a change of language applies.
 export const keyboardBindingKeyGroups = [
@@ -253,8 +253,37 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
   }
 }
 
+// Full-resolution screenshots (Screenshots page): a binding that works in every
+// game saves each eye's image as the game rendered it. `folder` is an
+// absolute path; absent means Pictures\VectorXR. The layer adds a folder per
+// game under either.
+export const screenshotEyes = ['both', 'left', 'right'] as const
+export type ScreenshotEyes = typeof screenshotEyes[number]
+
+export interface ScreenshotSettings {
+  bindings: InputBinding[]
+  eyes: ScreenshotEyes
+  folder?: string
+}
+
+export function defaultScreenshotSettings(): ScreenshotSettings {
+  return { bindings: [], eyes: 'both' }
+}
+
+// Optional: configs written before screenshots have no screenshot block.
+export function normalizeScreenshotSettings(value: unknown): ScreenshotSettings {
+  const input = isRecord(value) ? value : {}
+  const folder = typeof input.folder === 'string' ? input.folder.trim() : ''
+  return {
+    bindings: normalizeInputBindings(input.bindings),
+    eyes: screenshotEyes.includes(input.eyes as ScreenshotEyes) ? input.eyes as ScreenshotEyes : 'both',
+    ...(folder ? { folder } : {}),
+  }
+}
+
 export interface CoreConfig {
   osd: OsdSettings
+  screenshot: ScreenshotSettings
   enabled: boolean
   logLevel: LogLevel
   logRetentionFiles: number
@@ -603,19 +632,18 @@ export interface TurboExperimentalSettings {
   enabled: boolean
   applicationIds: string[]
   waitForSubmit: boolean
-  sampleAtEntry: boolean
   predictionPercent: number
   frameLimit: number
 }
 
 export function defaultTurboExperimental(): TurboExperimentalSettings {
-  return { enabled: false, applicationIds: [], waitForSubmit: false, sampleAtEntry: false,
+  return { enabled: false, applicationIds: [], waitForSubmit: false,
     predictionPercent: 100, frameLimit: 0 }
 }
 
 export function toolkitInspiredTurboExperimental(applicationIds: string[] = []): TurboExperimentalSettings {
   return { ...defaultTurboExperimental(), applicationIds: [...applicationIds], enabled: true,
-    waitForSubmit: true, sampleAtEntry: true }
+    waitForSubmit: true }
 }
 
 export function normalizeTurboExperimental(value: unknown): TurboExperimentalSettings {
@@ -626,7 +654,6 @@ export function normalizeTurboExperimental(value: unknown): TurboExperimentalSet
     enabled: input.enabled === true,
     applicationIds: Array.isArray(input.applicationIds) ? [...new Set(input.applicationIds.filter((id): id is string => typeof id === 'string' && id.length > 0))] : [],
     waitForSubmit: input.waitForSubmit === true,
-    sampleAtEntry: input.sampleAtEntry === true,
     predictionPercent: integer(input.predictionPercent, 50, 100, 100),
     frameLimit: integer(input.frameLimit, 20, 240, 0),
   }
@@ -706,6 +733,10 @@ export interface FrameGenSettings {
   // when on, like extendHeadPrediction; not in the app's pages until it has
   // flown (set in settings.json), but kept when the app saves.
   edgeFill?: boolean
+  // Fixed Auto's lowest rate (stored only when set): with '2x' Auto keeps
+  // generating even while the game could hold the refresh rate by itself.
+  // Read by the layer only while frameMultiplier is 'auto'.
+  autoLowestRate?: '2x'
   // Use the game's depth. Present only when off (absent means on, here and
   // in the layer). Off, Frame Generation works without depth and the bridges
   // keep a Direct3D 11 or Vulkan game's depth to themselves; the bridges read
@@ -737,7 +768,7 @@ export function defaultFrameGenSettings(): FrameGenSettings {
     motionEstimation: 'shader',
     interpolateFlow: 'auto',
     frameMultiplier: 'dynamic',
-    artifactSuppression: 50,
+    artifactSuppression: 10,
     motionLimitPercent: 10,
   }
 }
@@ -759,9 +790,24 @@ function normalizeFrameGenInteger(value: unknown, limits: { min: number; max: nu
   return Math.min(limits.max, Math.max(limits.min, Math.round(value)))
 }
 
+const frameGenSettingKeys = [
+  'synthesisMode',
+  'flowQuality',
+  'motionEstimation',
+  'interpolateFlow',
+  'frameMultiplier',
+  'artifactSuppression',
+  'motionLimitPercent',
+  'extendHeadPrediction',
+  'edgeFill',
+  'autoLowestRate',
+  'useGameDepth',
+] as const satisfies readonly (keyof FrameGenSettings)[]
+
 export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSettings = defaultFrameGenSettings()): FrameGenSettings {
   const source = isRecord(value) ? value : {}
   return {
+    ...unknownEntries(source, frameGenSettingKeys),
     synthesisMode: frameGenSynthesisModes.includes(source.synthesisMode as FrameGenSynthesisMode)
       ? source.synthesisMode as FrameGenSynthesisMode
       : fallback.synthesisMode,
@@ -783,12 +829,126 @@ export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSett
     // the defaults (new profiles copy the defaults' value when created).
     ...(source.extendHeadPrediction === true ? { extendHeadPrediction: true } : {}),
     ...(source.edgeFill === true ? { edgeFill: true } : {}),
+    ...(source.autoLowestRate === '2x' ? { autoLowestRate: '2x' as const } : {}),
     ...(source.useGameDepth === false ? { useGameDepth: false } : {}),
   }
 }
 
 export function normalizeFrameGenDiagnosticView(value: unknown): FrameGenDiagnosticView {
   return frameGenDiagnosticViews.includes(value as FrameGenDiagnosticView) ? value as FrameGenDiagnosticView : 'off'
+}
+
+// Stabilized mirror window (Stabilized Mirror page): the layer opens its own desktop
+// window in the game's process showing one eye's image with head shake
+// smoothed out, for streaming and recording. The headset picture is unchanged.
+// smoothing is 0-100 (0 = a plain mirror), margin 0-40 percent (how far the
+// picture is zoomed in so the stabilized edges stay filled), width 320-3840
+// pixels (the picture's width when the window first opens; the height follows
+// the aspect), frameRate 15-120 (the most frames per second the window shows).
+// fillMonitor makes the picture fill a monitor, borderless, instead of sitting
+// in a resizable window; monitor is that monitor's device name exactly as the
+// system reports it (\\.\DISPLAY2), empty for none chosen, 64 characters at
+// most. A monitor that is not connected is not an error: the layer opens the
+// normal window. The layer rejects a file with a number out of range or an eye
+// or aspect it does not know, so values are clamped to whole numbers in range
+// on load.
+export const mirrorEyes = ['left', 'right'] as const
+export type MirrorEye = typeof mirrorEyes[number]
+export const mirrorAspects = ['16:9', '16:10', '4:3', '1:1', '21:9'] as const
+export type MirrorAspect = typeof mirrorAspects[number]
+export const mirrorLimits = {
+  smoothing: { min: 0, max: 100 },
+  margin: { min: 0, max: 40 },
+  width: { min: 320, max: 3840 },
+  frameRate: { min: 15, max: 120 },
+} as const
+export const mirrorMonitorMaxLength = 64
+export type MirrorNumberKey = keyof typeof mirrorLimits
+export const mirrorNumberKeys = Object.keys(mirrorLimits) as MirrorNumberKey[]
+
+export interface MirrorSettings {
+  smoothing: number
+  levelHorizon: boolean
+  eye: MirrorEye
+  margin: number
+  aspect: MirrorAspect
+  width: number
+  frameRate: number
+  fillMonitor: boolean
+  monitor: string
+}
+
+export interface MirrorProfileConfig {
+  name: string
+  enabled: boolean
+  applicationIds: string[]
+  settings: MirrorSettings
+}
+
+export interface MirrorModuleConfig {
+  enabled: boolean
+  // Module-wide: any one shows or hides the window in the running game.
+  bindings: InputBinding[]
+  defaults: MirrorSettings
+  profiles: MirrorProfileConfig[]
+}
+
+export function defaultMirrorSettings(): MirrorSettings {
+  return { smoothing: 60, levelHorizon: false, eye: 'left', margin: 15, aspect: '16:9', width: 1280, frameRate: 60, fillMonitor: false, monitor: '' }
+}
+
+export function defaultMirrorModule(): MirrorModuleConfig {
+  return { enabled: false, bindings: [], defaults: defaultMirrorSettings(), profiles: [] }
+}
+
+// Clamps to the setting's range and rounds to a whole number. Not a number: the fallback.
+export function normalizeMirrorNumber(key: MirrorNumberKey, value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback
+  }
+  const { min, max } = mirrorLimits[key]
+  return Math.round(Math.min(max, Math.max(min, value)))
+}
+
+export function normalizeMirrorSettings(value: unknown, fallback: MirrorSettings = defaultMirrorSettings()): MirrorSettings {
+  const source = isRecord(value) ? value : {}
+  return {
+    smoothing: normalizeMirrorNumber('smoothing', source.smoothing, fallback.smoothing),
+    levelHorizon: normalizeBoolean(source.levelHorizon, fallback.levelHorizon),
+    eye: mirrorEyes.includes(source.eye as MirrorEye) ? source.eye as MirrorEye : fallback.eye,
+    margin: normalizeMirrorNumber('margin', source.margin, fallback.margin),
+    aspect: mirrorAspects.includes(source.aspect as MirrorAspect) ? source.aspect as MirrorAspect : fallback.aspect,
+    width: normalizeMirrorNumber('width', source.width, fallback.width),
+    frameRate: normalizeMirrorNumber('frameRate', source.frameRate, fallback.frameRate),
+    fillMonitor: normalizeBoolean(source.fillMonitor, fallback.fillMonitor),
+    monitor: normalizeMirrorMonitor(source.monitor, fallback.monitor),
+  }
+}
+
+// A monitor's device name is kept exactly as written. Not text, or longer than
+// the layer accepts: the fallback.
+export function normalizeMirrorMonitor(value: unknown, fallback = ''): string {
+  return typeof value === 'string' && value.length <= mirrorMonitorMaxLength ? value : fallback
+}
+
+// A monitor's device name as shown: \\.\DISPLAY2 reads DISPLAY2. The full
+// name is what is saved.
+export function monitorDisplayName(name: string): string {
+  return name.startsWith('\\\\.\\') ? name.slice(4) : name
+}
+
+// True when the picture fills a monitor: Fill a monitor is on and one is chosen.
+// The window's aspect and width are then not used.
+export function mirrorFillsMonitor(settings: Pick<MirrorSettings, 'fillMonitor' | 'monitor'>): boolean {
+  return settings.fillMonitor === true && typeof settings.monitor === 'string' && settings.monitor.trim() !== ''
+}
+
+// The window's picture size when first opened: the width, and the height the
+// aspect gives it.
+export function mirrorWindowSize(settings: Pick<MirrorSettings, 'aspect' | 'width'>): { width: number; height: number } {
+  const [horizontal, vertical] = settings.aspect.split(':').map(Number)
+  const height = horizontal > 0 && vertical > 0 ? Math.round(settings.width * vertical / horizontal) : settings.width
+  return { width: settings.width, height }
 }
 
 // One row of the layer-written runtime-pacing.json sidecar: what Auto pacing
@@ -850,6 +1010,7 @@ export interface VectorXRConfig {
     quadviews: QuadViewsModuleConfig
     turbo: TurboModuleConfig
     framegen: FrameGenModuleConfig
+    mirror: MirrorModuleConfig
   }
 }
 
@@ -862,6 +1023,17 @@ type UnknownRecord = Record<string, unknown>
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null
+}
+
+// A record's keys this app does not know, as they are: settings another
+// edition of VectorXR (or a later version) writes are kept when this app
+// saves, not dropped.
+function unknownEntries(source: UnknownRecord, known: readonly string[]): UnknownRecord {
+  const extra: UnknownRecord = {}
+  for (const [key, value] of Object.entries(source)) {
+    if (!known.includes(key)) extra[key] = value
+  }
+  return extra
 }
 
 function normalizeLogLevel(value: unknown): LogLevel {
@@ -917,6 +1089,7 @@ export function defaultCoreConfig(): CoreConfig {
     trackSeenApps: true,
     sound: { volume: 100 },
     osd: defaultOsdSettings(),
+    screenshot: defaultScreenshotSettings(),
   }
 }
 
@@ -1176,6 +1349,7 @@ export function defaultConfig(): VectorXRConfig {
         profiles: [],
       },
       framegen: defaultFrameGenModule(),
+      mirror: defaultMirrorModule(),
     },
   }
 }
@@ -1263,6 +1437,15 @@ export function createQuadViewsProfile(defaultSettings: QuadViewsSettings, appli
 }
 
 export function createFrameGenProfile(defaultSettings: FrameGenSettings, applicationIds: string[] = []): FrameGenProfileConfig {
+  return {
+    name: defaultProfileName(),
+    enabled: true,
+    applicationIds,
+    settings: { ...defaultSettings },
+  }
+}
+
+export function createMirrorProfile(defaultSettings: MirrorSettings, applicationIds: string[] = []): MirrorProfileConfig {
   return {
     name: defaultProfileName(),
     enabled: true,
@@ -1732,6 +1915,8 @@ function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment
   pushBindingAssignments(assignments, 'depth.lock', t('model.actions.depthLock'), config.modules.depthxr.bindings.toggleAnchorBindings)
   pushBindingAssignments(assignments, 'osd.toggle', t('model.actions.osdToggle'), config.core.osd.toggleBindings)
   pushBindingAssignments(assignments, 'osd.cycle', t('model.actions.osdCycle'), config.core.osd.cycleBindings)
+  pushBindingAssignments(assignments, 'screenshot', t('model.actions.screenshot'), config.core.screenshot.bindings)
+  pushBindingAssignments(assignments, 'mirror.toggle', t('model.actions.mirrorToggle'), config.modules.mirror.bindings)
   pushBindingAssignments(assignments, 'turbo.toggle', t('model.actions.turboToggle'), config.modules.turbo.toggleBindings)
   pushBindingAssignments(assignments, 'turbo.metrics', t('model.actions.turboMetrics'), config.modules.turbo.metricsBindings)
   pushBindingAssignments(assignments, 'framegen.toggle', t('model.actions.framegenToggle'), config.modules.framegen.toggleBindings)
@@ -1901,7 +2086,7 @@ function normalizeApplication(value: unknown, fallbackId: string, existing: Regi
   }
 }
 
-function normalizeExeName(value: string): string {
+export function normalizeExeName(value: string): string {
   return value
     .trim()
     .split(/[/\\]/)
@@ -1964,11 +2149,14 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const turbo = isRecord(modules.turbo) ? modules.turbo : {}
   // Optional: configs written before Frame Generation have no framegen block.
   const framegen = isRecord(modules.framegen) ? modules.framegen : {}
+  // Optional: configs written before the stabilized mirror window have no mirror block.
+  const mirror = isRecord(modules.mirror) ? modules.mirror : {}
   const depthProfileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
   const pivotProfileValues = Array.isArray(pivotxr.profiles) ? pivotxr.profiles : []
   const quadViewsProfileValues = Array.isArray(quadviews.profiles) ? quadviews.profiles : []
   const turboProfileValues = Array.isArray(turbo.profiles) ? turbo.profiles : []
   const frameGenProfileValues = Array.isArray(framegen.profiles) ? framegen.profiles : []
+  const mirrorProfileValues = Array.isArray(mirror.profiles) ? mirror.profiles : []
   const legacyTurboExperimental = normalizeTurboExperimental(turbo.experimental)
   const applicationValues = Array.isArray(source.applications) ? source.applications : []
   const applications: RegisteredApplication[] = []
@@ -2004,8 +2192,10 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   }
   const quadViewsDefaults = normalizeQuadViewsSettings(quadviews.defaults, fallback.modules.quadviews.defaults)
   const frameGenDefaults = normalizeFrameGenSettings(framegen.defaults, fallback.modules.framegen.defaults)
+  const mirrorDefaults = normalizeMirrorSettings(mirror.defaults, fallback.modules.mirror.defaults)
 
   return {
+    ...unknownEntries(source, ['version', 'core', 'applications', 'modules']),
     version: 3,
     core: {
       enabled: normalizeBoolean(core.enabled, fallback.core.enabled),
@@ -2014,9 +2204,11 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       trackSeenApps: normalizeBoolean(core.trackSeenApps, fallback.core.trackSeenApps),
       sound: { volume: normalizeVolume(isRecord(core.sound) ? core.sound.volume : undefined) },
       osd: normalizeOsdSettings(core.osd),
+      screenshot: normalizeScreenshotSettings(core.screenshot),
     },
     applications,
     modules: {
+      ...unknownEntries(modules, ['depthxr', 'pivotxr', 'quadviews', 'turbo', 'framegen', 'mirror']),
       depthxr: {
         enabled: normalizeBoolean(depthxr.enabled, fallback.modules.depthxr.enabled),
         defaults: normalizeDepthXRSettings(depthxr.defaults, fallback.modules.depthxr.defaults),
@@ -2160,6 +2352,23 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         profiles: frameGenProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizeFrameGenSettings(profile.settings, frameGenDefaults)
+          const applicationIds = applicationIdsFromProfile(profile, applications)
+
+          return {
+            name: normalizeString(profile.name, defaultProfileName()),
+            enabled: normalizeBoolean(profile.enabled, true),
+            applicationIds,
+            settings,
+          }
+        }),
+      },
+      mirror: {
+        enabled: normalizeBoolean(mirror.enabled, fallback.modules.mirror.enabled),
+        bindings: normalizeInputBindings(mirror.bindings),
+        defaults: mirrorDefaults,
+        profiles: mirrorProfileValues.map((profileValue) => {
+          const profile = isRecord(profileValue) ? profileValue : {}
+          const settings = normalizeMirrorSettings(profile.settings, mirrorDefaults)
           const applicationIds = applicationIdsFromProfile(profile, applications)
 
           return {

@@ -46,8 +46,6 @@ defineEmits<{
   syncQuadViewsProfileName: [index: number];
 }>();
 
-// Open the setup guide for first-time setup; returning users with an enabled profile start with it closed.
-const setupGuideOpen = !(props.config.modules.quadviews.enabled || props.config.modules.quadviews.profiles.some((profile) => profile.enabled));
 const diagnosticBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
   props.config.modules.quadviews.diagnosticVisualizationBinding,
 ]));
@@ -264,7 +262,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
         </button>
       </div>
 
-      <SetupGuide class="mb-3" :title="t('quadviews.tab.setupGuide.title')" :summary="t('quadviews.tab.setupGuide.summary')" :open="setupGuideOpen">
+      <SetupGuide class="mb-3" :title="t('quadviews.tab.setupGuide.title')" :summary="t('quadviews.tab.setupGuide.summary')">
         <p class="text-sm font-semibold">{{ t('quadviews.tab.setupGuide.heading') }}</p>
         <ul class="mt-1.5 list-disc space-y-1 pl-5 text-sm leading-6">
           <I18nText keypath="quadviews.tab.setupGuide.game" tag="li">

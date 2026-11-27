@@ -427,6 +427,15 @@ inline constexpr std::uint32_t kFrameGenFlagFlowPriorWorld = 1u << 25;
 // of by its share of the view (tens of pixels before the tint shows): the
 // sub-pixel motion that moves content between real and generated frames.
 inline constexpr std::uint32_t kFrameGenFlagFlowFine = 1u << 23;
+// Research (FrameGenTuning::flow_shortest), kSearch only: the shortest
+// displacement whose cost is within tuning.y plus tuning.z times the lowest
+// cost of the lowest, the cheaper of equal lengths.
+inline constexpr std::uint32_t kFrameGenFlagFlowShortest = 1u << 28;
+// Research (FrameGenTuning::flow_evidence), the final level's kRefine only:
+// a cell's cost carries how ambiguous its match is, 0 to 1 by how little the
+// costs one texel either way rise above it (full at no rise, none from
+// tuning.w), times the float whose bits are options.x.
+inline constexpr std::uint32_t kFrameGenFlagFlowEvidence = 1u << 29;
 // World motion: samples per side of the fit's grid, and its iterations.
 inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
 // The trust vote's tile side in half-resolution texels (FG_TRUST_TILE):
@@ -849,6 +858,9 @@ struct FrameGenFlowPrior {
     float share{1.0f};
     float margin{0.002f};
     float per_pixel{0.001f};
+    // Only where shader flow measured the motion (kFrameGenFlowPriorDefault):
+    // hardware flow keeps its vectors.
+    bool shader_only{false};
 };
 // "sky" (or "1", any case) for the sky and content without depth, "far" for
 // all world content without a world motion, "sky-still" or "far-still" the
@@ -856,6 +868,73 @@ struct FrameGenFlowPrior {
 // ":<share>,<margin>,<per pixel>" (each 0 to 10; a missing or bad one keeps
 // its default). Anything else is off.
 FrameGenFlowPrior ParseFrameGenFlowPrior(const std::string& value);
+// Research (VECTORXR_FRAMEGEN_FLOW_SHORTEST): the shader flow's coarsest
+// search takes the shortest displacement that matches within `tolerance` of
+// luma plus `share` of the best cost of the best one, not the best itself
+// (kFrameGenFlagFlowShortest). The pair has the head's rotation taken out, so
+// most content moves little; on the luma blurred 32 times, sky, haze and grass
+// match far displacements about as well as their own or better, and the
+// refine levels below keep what it found: DCS captures with the head nearly
+// still had the search's vectors at p95 160 to 200 pixels while the hardware's
+// were 12. (A margin a found vector had to beat the inherited one by, on every
+// level, did worse: it protected those vectors, or, strong enough to stop them,
+// stopped real motion too.)
+struct FrameGenFlowShortest {
+    bool enabled{false};
+    float tolerance{0.002f};
+    float share{0.0f};
+    // Nearest the median of the 3x3 cells' best displacements around instead
+    // of shortest: content that really moves far moves far together (a quad
+    // views capture moving 200 px lost 0.38 points of bad pixels to the
+    // shortest at a tolerance of 0.012).
+    bool toward_neighbours{false};
+};
+// "1" or "on" (any case) for the defaults, or "<tolerance>[,<share>[,median]]"
+// (each 0 to 1; a missing or bad share keeps its default). Anything else is off.
+FrameGenFlowShortest ParseFrameGenFlowShortest(const std::string& value);
+// What FrameGenTuning holds when neither switch is set: the prior
+// (VECTORXR_FRAMEGEN_FLOW_PRIOR=sky:0,0.002,0.0005) with the shortest search
+// toward the neighbours' median (VECTORXR_FRAMEGEN_FLOW_SHORTEST=0.012,0,median).
+// Replays of 15 DCS captures without depth (2026-11-21) had fewer bad pixels
+// with the pair on all 15 (median -0.025 points, none worse), flat-region
+// specks down on 12, MSFS with depth about unchanged; it costs about 0.04 ms
+// per real frame at 4608x3748. The pair together: the shortest search alone
+// lost 0.38 points on a quad views capture moving 200 pixels, and the prior
+// alone lost 0.02 on the fast-turn capture. The prior only where shader flow
+// measured the motion: on hardware flow's vectors it was no better (DCS stereo
+// median unchanged, the fast turn +0.006; an MSFS capture without depth +0.029
+// with more specks, one with depth -0.015).
+inline constexpr FrameGenFlowPrior kFrameGenFlowPriorDefault{
+    .enabled = true, .share = 0.0f, .margin = 0.002f, .per_pixel = 0.0005f, .shader_only = true};
+inline constexpr FrameGenFlowShortest kFrameGenFlowShortestDefault{
+    .enabled = true, .tolerance = 0.012f, .share = 0.0f, .toward_neighbours = true};
+// Research (VECTORXR_FRAMEGEN_FLOW_EVIDENCE): confidence from how distinct a
+// match is, not only how good (kFrameGenFlagFlowEvidence). A flat block
+// matches every vector with a cost near zero, which read as full confidence:
+// synthesis then followed a stray vector across the nearest edge. With it,
+// the final refine adds up to `cost` to a cell's cost as the costs one
+// match-level texel either way rise less than `sharpness` above its minimum;
+// the filter's cost-weighted median then outvotes the cell by neighbours with
+// evidence, and synthesis's cost confidence falls where all are ambiguous.
+struct FrameGenFlowEvidence {
+    bool enabled{false};
+    float sharpness{0.004f};
+    float cost{0.1f};
+};
+// "1" or "on" (any case) for the defaults, or "<sharpness>[,<cost>]" (each 0
+// to 1, the sharpness above 0; a missing or bad cost keeps its default).
+// Anything else is off.
+FrameGenFlowEvidence ParseFrameGenFlowEvidence(const std::string& value);
+// Research (VECTORXR_FRAMEGEN_FLOW_REACH): the coarsest level's search radius
+// in its texels (32 full-resolution pixels each), kFrameGenSearchRadius (6)
+// by default, up to kFrameGenSearchRadiusMost. A DCS capture of a low pass
+// over a river (20261120-215809) moved the ground 300 to 450 pixels between
+// adjacent frames after the head's rotation was taken out (the optical flow
+// hardware's vectors); the shader flow's search stops at 192 a side.
+inline constexpr std::uint32_t kFrameGenSearchRadiusMost = 12;
+// A radius from 1 to kFrameGenSearchRadiusMost; anything else is 0 (the
+// default radius).
+std::uint32_t ParseFrameGenFlowReach(const std::string& value);
 // Whether the application's movement (appSpaceDeltaPose) left the world
 // still for the request's frame: under 5 mm and a rotation's quaternion
 // vector part under 2.5e-4 (0.03 degrees). False where the request has none.
@@ -955,10 +1034,23 @@ struct FrameGenTuning {
     // frames (kFrameGenFlagPropHold).
     FrameGenPropHold prop_hold;
     bool shift_smooth{false};
-    // Research (hypothesis E), set by backends from
-    // VECTORXR_FRAMEGEN_FLOW_PRIOR: the filter keeps content with nothing to
-    // track on the head's predicted motion (kFrameGenFlagFlowPrior).
-    FrameGenFlowPrior flow_prior;
+    // Hypothesis E: the filter keeps content with nothing to track on the
+    // head's predicted motion (kFrameGenFlagFlowPrior), on shader flow by
+    // default (kFrameGenFlowPriorDefault); backends set it from
+    // VECTORXR_FRAMEGEN_FLOW_PRIOR when that is set (off: "off" or "0").
+    FrameGenFlowPrior flow_prior{kFrameGenFlowPriorDefault};
+    // The coarsest search's acceptable displacement nearest its neighbours'
+    // (kFrameGenFlagFlowShortest), on by default (kFrameGenFlowShortestDefault);
+    // backends set it from VECTORXR_FRAMEGEN_FLOW_SHORTEST when that is set
+    // (off: "off").
+    FrameGenFlowShortest flow_shortest{kFrameGenFlowShortestDefault};
+    // Research, set by backends from VECTORXR_FRAMEGEN_FLOW_EVIDENCE: the
+    // final refine's costs carry how ambiguous each match is
+    // (kFrameGenFlagFlowEvidence).
+    FrameGenFlowEvidence flow_evidence;
+    // Research, set by backends from VECTORXR_FRAMEGEN_FLOW_REACH: the
+    // coarsest level's search radius (0: kFrameGenSearchRadius).
+    std::uint32_t flow_reach{0};
     int artifact_suppression{50};
     int motion_limit_percent{10};
     // One entry per generated frame (`generated` of them). Interpolation:

@@ -37,7 +37,7 @@
       },
       "trackSeenApps": {
         "title": "Registrar aplicaciones XR detectadas",
-        "description": "Anota el nombre del ejecutable y la hora en que se vieron por primera y última vez las aplicaciones OpenXR que inicias, para que puedas registrarlas fácilmente desde el Registro de aplicaciones. Todos los datos se guardan localmente en este equipo."
+        "description": "Anota el nombre del ejecutable y la hora en que se vieron por primera y última vez las aplicaciones OpenXR que inicias, para que puedas registrarlas fácilmente desde la página Detección. Todos los datos se guardan localmente en este equipo."
       }
     },
     "logging": {

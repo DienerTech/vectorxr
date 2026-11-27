@@ -720,6 +720,8 @@ struct Recorder {
     PFN_vkGetPhysicalDeviceProperties2KHR real_properties2_khr{nullptr};
     PFN_vkGetFenceStatus real_get_fence_status{nullptr};
     PFN_vkResetFences real_reset_fences{nullptr};
+    PFN_vkGetMemoryWin32HandlePropertiesKHR real_memory_handle{nullptr};
+    PFN_vkGetPhysicalDeviceImageFormatProperties2 real_image_format2{nullptr}; // by whichever name the bridge got it
     std::unordered_map<VkCommandBuffer, std::vector<Command>> recorded;
     std::vector<Submission> submissions;
     std::atomic<bool> in_call{false}; // inside Acquired or Released
@@ -728,6 +730,8 @@ struct Recorder {
     int fail_submits{0}; // the next ones fail with `fail_result`
     VkResult fail_result{VK_SUCCESS};
     bool fail_import{false};
+    bool fail_memory_handle{false};  // a shared texture's handle is refused (no image is imported)
+    bool refuse_depth_import{false}; // the device says it imports no depth format from Direct3D 12
     VkResult fence_status_result{VK_SUCCESS}; // else returned for every fence instead of its status
     VkResult reset_fences_result{VK_SUCCESS}; // else returned instead of resetting
     std::uint64_t device_functions{0}; // device functions the bridge resolved through the getter
@@ -839,6 +843,28 @@ VKAPI_ATTR VkResult VKAPI_CALL RecordingImport(VkDevice device, const VkImportSe
     return g_recorder.real_import(device, info);
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL RecordingMemoryHandle(VkDevice device, VkExternalMemoryHandleTypeFlagBits type,
+                                                     HANDLE handle, VkMemoryWin32HandlePropertiesKHR* properties) {
+    if (g_recorder.fail_memory_handle) return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+    return g_recorder.real_memory_handle(device, type, handle, properties);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL RecordingImageFormat2(VkPhysicalDevice physical,
+                                                     const VkPhysicalDeviceImageFormatInfo2* info,
+                                                     VkImageFormatProperties2* properties) {
+    const bool depth = info->format == VK_FORMAT_D16_UNORM || info->format == VK_FORMAT_X8_D24_UNORM_PACK32 ||
+                       info->format == VK_FORMAT_D32_SFLOAT || info->format == VK_FORMAT_D16_UNORM_S8_UINT ||
+                       info->format == VK_FORMAT_D24_UNORM_S8_UINT || info->format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+    if (g_recorder.refuse_depth_import && depth) {
+        for (auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next; next = next->pNext) {
+            if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO) {
+                return VK_ERROR_FORMAT_NOT_SUPPORTED;
+            }
+        }
+    }
+    return g_recorder.real_image_format2(physical, info, properties);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL RecordingGetFenceStatus(VkDevice device, VkFence fence) {
     if (g_recorder.fence_status_result != VK_SUCCESS) return g_recorder.fence_status_result;
     return g_recorder.real_get_fence_status(device, fence);
@@ -868,6 +894,9 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL RecordingGetDeviceProcAddr(VkDevice dev
     }
     if (function == "vkGetFenceStatus") { RECORD(real_get_fence_status, RecordingGetFenceStatus, PFN_vkGetFenceStatus) }
     if (function == "vkResetFences") { RECORD(real_reset_fences, RecordingResetFences, PFN_vkResetFences) }
+    if (function == "vkGetMemoryWin32HandlePropertiesKHR") {
+        RECORD(real_memory_handle, RecordingMemoryHandle, PFN_vkGetMemoryWin32HandlePropertiesKHR)
+    }
 #undef RECORD
     return real;
 }
@@ -883,6 +912,15 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL RecordingGetInstanceProcAddr(VkInstance
             reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2KHR>(g_get_instance_proc_addr(instance, name));
         return g_recorder.real_properties2_khr ? reinterpret_cast<PFN_vkVoidFunction>(&RecordingProperties2Khr)
                                                : nullptr;
+    }
+    if (std::strcmp(name, "vkGetPhysicalDeviceImageFormatProperties2KHR") == 0 ||
+        std::strcmp(name, "vkGetPhysicalDeviceImageFormatProperties2") == 0) {
+        // The bridge asks for the second name only when the first is not there.
+        const auto real =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceImageFormatProperties2>(g_get_instance_proc_addr(instance, name));
+        if (!real) return nullptr;
+        g_recorder.real_image_format2 = real;
+        return reinterpret_cast<PFN_vkVoidFunction>(&RecordingImageFormat2);
     }
     if (std::strcmp(name, "vkGetDeviceProcAddr") == 0) {
         g_recorder.real_get_device_proc_addr =
@@ -1538,6 +1576,18 @@ void TestBeginFailureCleanup(Game& game) {
               Contains(reason, "Importing"),
           "an import refused fails Begin: " + reason);
     g_recorder.fail_import = false;
+    // The fences import, and the one small shared image Begin makes to see
+    // that images do is refused: no bridge, and nothing of it is left.
+    g_recorder.fail_memory_handle = true;
+    Check(!bridge.Begin(XR_NULL_HANDLE, &session.info, FakeGetInstanceProcAddr, Recording(true), reason, description) &&
+              Contains(reason, "could not be imported") && !bridge.Active(),
+          "a shared image that cannot be imported fails Begin: " + reason);
+    g_recorder.fail_memory_handle = false;
+    // With it imported, the same device is bridged.
+    Check(bridge.Begin(XR_NULL_HANDLE, &session.info, FakeGetInstanceProcAddr, Recording(true), reason, description) !=
+              nullptr,
+          "the session is bridged once the shared image imports: " + reason);
+    bridge.End();
     DestroyDevice(device_game);
     CheckClean(nullptr, "begin failure cleanup");
 }
@@ -2916,6 +2966,61 @@ void TestPrivateDepth(Game& game) {
     CheckClean(nullptr, "private depth (End)");
 }
 
+// Depth the game's device does not import from Direct3D 12 (its answer is
+// refused here) is still offered and made, private: the game gets its
+// swapchain, the runtime no depth, and it is reported once. Colour is shared
+// as ever.
+void TestUnimportableDepth(Game& game) {
+    g_recorder.refuse_depth_import = true;
+    VulkanBridge bridge;
+    Session session(game);
+    BeginBridge(game, bridge, session);
+    const std::vector<std::int64_t> runtime{DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_D32_FLOAT,
+                                            DXGI_FORMAT_D24_UNORM_S8_UINT};
+    Check(bridge.GameFormats(runtime) == VulkanBridge::TranslatedFormats(runtime),
+          "depth formats that cannot be imported are still offered");
+    XrResult refusal = XR_SUCCESS;
+    std::string reason;
+    Check(bridge.CheckSwapchain(DepthInfo(32, 32), refusal, reason), "depth that cannot be imported is accepted: " + reason);
+    Check(bridge.CheckSwapchain(ColorInfo(32, 32), refusal, reason), "colour is accepted: " + reason);
+    Check(!bridge.CheckSwapchain(DepthInfo(1u << 17, 32), refusal, reason) &&
+              refusal == XR_ERROR_FEATURE_UNSUPPORTED && Contains(reason, "cannot import"),
+          "depth the device cannot make either is refused: " + reason);
+    ID3D12Device* device = BridgeDevice(bridge);
+    const XrSwapchain swapchains[] = {Handle(0x58), Handle(0x59)};
+    for (const XrSwapchain swapchain : swapchains) {
+        MakeRuntimeImages(device, 2, 32, 32, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth); // never touched
+        Check(bridge.AddSwapchain(swapchain, DepthInfo(32, 32), FakeEnumerate, reason),
+              "depth that cannot be imported is bridged: " + reason);
+        Check(bridge.Bridged(swapchain) && bridge.Unmirrored(swapchain) &&
+                  Contains(bridge.Describe(swapchain),
+                           "private because the game's Vulkan device cannot import its depth images"),
+              "and stays private: " + bridge.Describe(swapchain));
+    }
+    Check(g_log.size() == 1 && Contains(g_log[0], "stays private"), "which is reported once");
+    g_log.clear();
+    const VkImage image = GameImages(bridge, swapchains[0])[0];
+    for (int frame = 0; frame < 2; ++frame) {
+        Acquire(bridge, swapchains[0], 0);
+        ClearDepth(game, image, VK_IMAGE_ASPECT_DEPTH_BIT, 0.5f, 0);
+        Check(Release(bridge, swapchains[0]), "a private release is no skipped copy");
+    }
+    Check(SummaryValue(bridge.Summary(), "copies") == 0, "no copies of private depth: " + bridge.Summary());
+    MakeRuntimeImages(device, 2, 32, 32, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+    const XrSwapchain color = Handle(0x5a);
+    Check(bridge.AddSwapchain(color, ColorInfo(32, 32), FakeEnumerate, reason) && !bridge.Unmirrored(color),
+          "colour is a twin: " + reason);
+    GameIdle(game);
+    for (const XrSwapchain swapchain : swapchains) {
+        Check(bridge.RemoveSwapchain(swapchain), "depth removes at once");
+    }
+    Check(bridge.RemoveSwapchain(color), "colour removes at once");
+    CheckClean(&bridge, "unimportable depth");
+    bridge.End();
+    g_recorder.refuse_depth_import = false;
+    CheckClean(nullptr, "unimportable depth (End)");
+}
+
 // Releases without acquires are counted, not copied.
 void TestUnmatched(Game& game) {
     VulkanBridge bridge;
@@ -3017,6 +3122,110 @@ void TestSkippedCopy(Game& game) {
     CheckClean(&bridge, "skipped copy");
     bridge.End();
     CheckClean(nullptr, "skipped copy (End)");
+}
+
+// Depth taken late (VECTORXR_VULKAN_BRIDGE_DEPTH=late) with the bridge's queue
+// stalled and the same image every frame: an acquire whose image's late copy
+// is still queued from the acquire before makes no other (Direct3D 12 removes
+// the device when a command list is executed again before its last execution
+// is done) and says so in its figures; the image stays the game's and its
+// hand-over is copied all the same. Once the queue moves, acquires copy again.
+void TestLateCopyPending(Game& game) {
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "late");
+    VulkanBridge bridge;
+    Session session(game);
+    BeginBridge(game, bridge, session);
+    ComPtr<ID3D12Device> device = BridgeDevice(bridge);
+    MakeRuntimeImages(device.Get(), 1, 32, 32, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth);
+    const XrSwapchain swapchain = Handle(0xa9);
+    std::string reason;
+    Check(bridge.AddSwapchain(swapchain, DepthInfo(32, 32), FakeEnumerate, reason), "bridged: " + reason);
+    const auto figures = [&](std::uint64_t copies, std::uint64_t skipped) {
+        const std::string described = bridge.Describe(swapchain);
+        return SummaryValue(described, "lateCopies") == copies && SummaryValue(described, "lateSkipped") == skipped &&
+               SummaryValue(bridge.Summary(), "lateDepthSkips") == skipped;
+    };
+    Acquire(bridge, swapchain, 0);
+    Check(Release(bridge, swapchain), "the first frame is copied");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    Check(figures(0, 0), "nothing is handed over before the first acquire: " + bridge.Describe(swapchain));
+    {
+        Gate gate(device.Get(), game);
+        gate.HoldQueue(BridgeQueue(bridge));
+        Acquire(bridge, swapchain, 0);
+        Check(figures(1, 0), "the acquire copies the image handed over last: " + bridge.Describe(swapchain));
+        Check(Release(bridge, swapchain), "its frame is copied");
+        for (std::uint64_t held = 1; held <= 2; ++held) {
+            Acquire(bridge, swapchain, 0);
+            Check(figures(1, held), "with its late copy still queued, acquire " + std::to_string(held) +
+                                        " makes no other: " + bridge.Describe(swapchain));
+            Check(Release(bridge, swapchain), "and its frame is copied all the same");
+        }
+    }
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    Check(device->GetDeviceRemovedReason() == S_OK, "the held late copy removes nothing");
+    Acquire(bridge, swapchain, 0);
+    Check(figures(2, 2), "acquires copy again once the queue moved: " + bridge.Describe(swapchain));
+    Check(Release(bridge, swapchain), "copied");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    Check(TakeLog("holds").size() == 1, "the late copy's memory is logged");
+    TakeLog("depth timing check");
+    Check(bridge.RemoveSwapchain(swapchain), "removed");
+    CheckClean(&bridge, "late copy pending");
+    bridge.End();
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "");
+    CheckClean(nullptr, "late copy pending (End)");
+}
+
+// Depth taken late, images in turn: the acquire that copies the image handed
+// over last gives it back to the game's queue, and that submission is refused.
+// The image stays the bridge's until its own next acquire, which gives it
+// back, so its release hands it over and is copied.
+void TestLateHandBackRefused(Game& game) {
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "late");
+    VulkanBridge bridge;
+    Session session(game);
+    BeginBridge(game, bridge, session);
+    ID3D12Device* device = BridgeDevice(bridge);
+    MakeRuntimeImages(device, 2, 32, 32, DXGI_FORMAT_D32_FLOAT, 1, RuntimeKind::kDepth);
+    const XrSwapchain swapchain = Handle(0xaa);
+    std::string reason;
+    Check(bridge.AddSwapchain(swapchain, DepthInfo(32, 32), FakeEnumerate, reason), "bridged: " + reason);
+    Acquire(bridge, swapchain, 0);
+    Check(Release(bridge, swapchain), "image 0's frame is copied");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    // Image 1's acquire copies image 0 late: its release goes through, its
+    // giving back is refused.
+    g_recorder.pass_submits = 1;
+    g_recorder.fail_submits = 1;
+    g_recorder.fail_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    Acquire(bridge, swapchain, 1);
+    Check(g_recorder.fail_submits == 0 && SummaryValue(bridge.Summary(), "failedSubmits") == 1 &&
+              SummaryValue(bridge.Describe(swapchain), "lateCopies") == 1,
+          "the late copy's giving back was refused: " + bridge.Summary());
+    Check(TakeLog("refused").size() == 1, "the refusal is reported");
+    Check(Release(bridge, swapchain), "image 1's frame is copied");
+    // Image 0's next acquire: image 1's late copy (its release, its giving
+    // back), then image 0 given back.
+    g_recorder.Take();
+    Acquire(bridge, swapchain, 0);
+    const std::vector<Submission> acquired = g_recorder.Take();
+    Check(acquired.size() == 3 && acquired[2].commands.size() == 1,
+          "image 0's next acquire gives it back: " + std::to_string(acquired.size()) + " submissions");
+    Check(Release(bridge, swapchain), "and its frame is handed over and copied");
+    Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
+    GameIdle(game);
+    Check(SummaryValue(bridge.Summary(), "failedSubmits") == 1, "nothing else was refused: " + bridge.Summary());
+    Check(TakeLog("holds").size() == 1, "the late copy's memory is logged");
+    TakeLog("depth timing check");
+    Check(bridge.RemoveSwapchain(swapchain), "removed");
+    CheckClean(&bridge, "late hand-back refused");
+    bridge.End();
+    _putenv_s("VECTORXR_VULKAN_BRIDGE_DEPTH", "");
+    CheckClean(nullptr, "late hand-back refused (End)");
 }
 
 // The game's queue held back over many frames of a stereo colour+depth set:
@@ -4345,6 +4554,18 @@ bool ValidationCanary(Game& game) {
 } // namespace
 
 int main(int argc, char** argv) {
+    // Isolate LOCALAPPDATA so device-lost engine motion tests never write into
+    // the developer's or user's real %LOCALAPPDATA%\VectorXR folder.
+    {
+        wchar_t exe_path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+        const std::filesystem::path app_data =
+            std::filesystem::path(exe_path).parent_path() / "vulkan_bridge_tests_appdata";
+        std::error_code ignored;
+        std::filesystem::create_directories(app_data, ignored);
+        _wputenv_s(L"LOCALAPPDATA", app_data.c_str());
+        SetEnvironmentVariableW(L"LOCALAPPDATA", app_data.c_str());
+    }
     const char* no_stall = std::getenv("FG_TEST_NO_STALL");
     const bool skip_negative_controls = no_stall && std::string(no_stall) == "1";
     // `binary`: the cases run in both semaphore modes run in binary mode only.
@@ -4432,6 +4653,7 @@ int main(int argc, char** argv) {
 
     TestMismatch(game);
     TestPrivateDepth(game);
+    TestUnimportableDepth(game);
     TestUnmatched(game);
     if (!skip_negative_controls) {
         TestQfotRecorded(game);
@@ -4447,6 +4669,8 @@ int main(int argc, char** argv) {
         TestFenceDeviceLost(game);
         TestStalledQueue(game);
         TestSkippedCopy(game);
+        TestLateCopyPending(game);
+        TestLateHandBackRefused(game);
         TestRingStall(game);
         if (!binary_only) TestDrainPastGame(game, true);
         TestDrainPastGame(game, false);

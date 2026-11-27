@@ -125,6 +125,7 @@
     "format": "{mode} · {rate} · {motion}",
     "dynamic": "Dynamisch",
     "fixedAuto": "Fest Auto",
+    "fixedAutoLowest": "Fest Auto, mindestens 2x",
     "fixed": "Fest {multiplier}"
   },
   "howItWorks": {
@@ -179,8 +180,10 @@
         "description": "Hält das Spiel für eine gleichmäßige Taktung bei einem festen Bruchteil der Bildwiederholrate und füllt den Rest mit generierten Bildern."
       },
       "fixedRate": "Feste Rate",
+      "lowestRate": "Niedrigste Rate",
       "rates": {
         "auto": "Wählt je nach Bedarf des Spiels 2x, 3x oder 4x und generiert nichts, solange das Spiel allein mithält.",
+        "autoLowest": "Wählt je nach Bedarf des Spiels 2x, 3x oder 4x und generiert mit 2x weiter, auch wenn das Spiel allein mithalten könnte.",
         "x2": "Das Spiel läuft mit bis zu 1/2 der Bildwiederholrate, etwa 45 fps bei 90 Hz. Darunter ist die Taktung weniger gleichmäßig.",
         "x3": "Das Spiel läuft mit bis zu 1/3 der Bildwiederholrate, etwa 30 fps bei 90 Hz. Darunter ist die Taktung weniger gleichmäßig.",
         "x4": "Das Spiel läuft mit bis zu 1/4 der Bildwiederholrate, etwa 22,5 fps bei 90 Hz. Die meisten Artefakte; für die anspruchsvollsten Spiele."

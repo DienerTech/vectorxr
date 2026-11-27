@@ -202,6 +202,12 @@ cbuffer FrameGenFillBuffer : register(b1) {
 // from 2 pixels (sub-pixel motion shows), instead of by its share of the
 // view.
 #define FG_FLAG_FLOW_FINE 8388608u
+// Research (kFrameGenFlagFlowShortest), FG_PASS_SEARCH: the shortest
+// displacement within a tolerance of the best match (see ShortestScan).
+#define FG_FLAG_FLOW_SHORTEST 268435456u
+// Research (kFrameGenFlagFlowEvidence), the final level's FG_PASS_REFINE: a
+// cell's cost carries how ambiguous its match is (see FlowAmbiguity).
+#define FG_FLAG_FLOW_EVIDENCE 536870912u
 // Research (kFrameGenFlagPropHold, set on still-world frames with depth): the
 // plan runs synthesis as the passes built with FG_SYNTH_PROP then, so the
 // flag itself is not read; see Synthesize.
@@ -485,12 +491,25 @@ float MatchTerm(float current, float previous) {
 float MotionTerm(int2 d, int2 extent) {
     return FG_MOTION_PENALTY * length(float2(d) / float2(extent));
 }
+
+// Research (FG_FLAG_FLOW_EVIDENCE): how little a cell's match says, 0 (a
+// distinct minimum) to 1 (none), from how much the costs one texel either way
+// rise above it (`center`): under tuning.w of luma on average, the vector
+// is as good as its neighbours, and on flat content as good as any. A low
+// cost alone read as full confidence there, and synthesis carried what lay
+// tens of pixels along a stray vector into the flat region.
+float FlowAmbiguity(float center, float left, float right, float up, float down) {
+    const float sharpness = 0.25 * (left + right + up + down) - center;
+    return saturate(1.0 - sharpness / max(g.tuning.w, 1e-6));
+}
 #endif
 
 #if defined(FG_PASS_SEARCH)
 // The previous frame's luma around one thread group's cells, as far as any
 // candidate patch reaches: every candidate of every cell reads from here.
-#define FG_SEARCH_MAX_RADIUS 6
+// options.x is the radius (kFrameGenSearchRadius, 6; research,
+// FrameGenTuning::flow_reach, up to this).
+#define FG_SEARCH_MAX_RADIUS 12
 #define FG_SEARCH_APRON (FG_SEARCH_MAX_RADIUS + FG_PATCH_RADIUS)
 #define FG_SEARCH_TILE (8 + 2 * FG_SEARCH_APRON)
 #define FG_PATCH_SIDE (2 * FG_PATCH_RADIUS + 1)
@@ -537,6 +556,91 @@ float InsidePatchCost(Patch patch, int2 corner, int2 d, int2 extent, float count
     return sum / max(count, 1.0) + MotionTerm(d, extent);
 }
 
+// Research (FG_FLAG_FLOW_SHORTEST): of the displacements that match within
+// tuning.y of luma (plus tuning.z of the cost) of the best one, the shortest,
+// the cheaper of equal lengths. The pair has the head's rotation taken out
+// already (FG_PASS_LUMA), so most content moves little; blurred 32 times, sky,
+// haze and grass match some displacement up to the search's reach about as
+// well as their own or better (DCS replays: a scene whose content moved 12 px
+// at the hardware's p95 had the search's at 201 px, aliases 170 to 220 px long
+// costing 0.004 where the real 10 px motion cost 0.025, and the refine levels
+// keep a parent's vector unless one near it matches better). Textured content
+// that really moves matches clearly better only near its own motion, so the
+// shortest within the tolerance is still its own.
+groupshared float g_short_length[FG_SEARCH_SLICES * 64];
+groupshared int g_first[64]; // the first scan's choice per cell
+
+// The median of nine integers: the one with at most four below it and at
+// least five at or below it.
+int Median9(int values[9]) {
+    int median = values[0];
+    [unroll]
+    for (int i = 0; i < 9; ++i) {
+        int below = 0;
+        int at = 0;
+        [unroll]
+        for (int j = 0; j < 9; ++j) {
+            below += values[j] < values[i] ? 1 : 0;
+            at += values[j] <= values[i] ? 1 : 0;
+        }
+        if (below <= 4 && at >= 5) {
+            median = values[i];
+        }
+    }
+    return median;
+}
+
+// The acceptable displacement nearest `target` of the cell's slice of the
+// scan: FG_FLAG_FLOW_SHORTEST's second scan, from the lowest cost the first
+// found.
+void ShortestScan(int2 cell, int2 origin, int2 extent, int slice, int radius, float lowest, float2 target,
+                  out float shortest, out float shortest_cost, out int shortest_index) {
+    Patch patch;
+    float count = 0.0;
+    [unroll]
+    for (int i = 0; i < FG_PATCH_SIDE * FG_PATCH_SIDE; ++i) {
+        const int2 q = cell + int2(i % FG_PATCH_SIDE, i / FG_PATCH_SIDE) - FG_PATCH_RADIUS;
+        patch.valid[i] = all(q >= 0) && all(q < extent);
+        patch.luma[i] = patch.valid[i] ? g_luma_current.Load(int3(q, 0)).r : 0.0;
+        count += patch.valid[i] ? 1.0 : 0.0;
+    }
+    const int2 corner = cell - origin - FG_PATCH_RADIUS;
+    const bool inside = all(cell >= FG_PATCH_RADIUS) && all(cell + FG_PATCH_RADIUS < extent);
+    const float allowed = lowest + g.tuning.y + g.tuning.z * lowest;
+    const int side = 2 * radius + 1;
+    shortest = 1e30;
+    shortest_cost = 1e30;
+    shortest_index = -2; // none in this slice
+    if (slice == 0) {
+        // No motion, ahead of the scan as the first scan has it.
+        const float zero = inside ? InsidePatchCost(patch, corner, int2(0, 0), extent, count)
+                                  : PatchCost(patch, corner, int2(0, 0), extent);
+        if (zero <= allowed) {
+            shortest = dot(target, target);
+            shortest_cost = zero;
+            shortest_index = -1;
+        }
+    }
+    int2 d = int2(uint(slice) % uint(side), uint(slice) / uint(side)) - radius;
+    [loop]
+    for (int j = slice; j < side * side; j += FG_SEARCH_SLICES) {
+        const float cost = inside ? InsidePatchCost(patch, corner, d, extent, count) : PatchCost(patch, corner, d, extent);
+        const float2 apart = float2(d) - target;
+        const float length2 = dot(apart, apart);
+        if (cost <= allowed && (length2 < shortest || (length2 == shortest && cost < shortest_cost))) {
+            shortest = length2;
+            shortest_cost = cost;
+            shortest_index = j;
+        }
+        d.x += FG_SEARCH_SLICES;
+        [loop]
+        while (d.x > radius) {
+            d.x -= side;
+            ++d.y;
+        }
+    }
+}
+
 // Exhaustive search on the coarsest level, in scan order (rows, then
 // columns, from -radius). Each slice scans every FG_SEARCH_SLICES-th
 // candidate from the zero displacement's cost with strict <, as the scan
@@ -548,14 +652,21 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thre
             uint index : SV_GroupIndex) {
     const int2 extent = MatchExtent();
     const int2 origin = int2(group.xy) * 8 - FG_SEARCH_APRON;
+    const int radius = min(int(g.options.x), FG_SEARCH_MAX_RADIUS);
+    // Only as far as this radius reaches: the tile is sized for the research
+    // radius (FG_SEARCH_MAX_RADIUS), and loading all of it at the default one
+    // read 36x36 texels a group where 24x24 are used.
+    const int unused = FG_SEARCH_MAX_RADIUS - max(radius, 0);
     for (uint t = index; t < FG_SEARCH_TILE * FG_SEARCH_TILE; t += 64 * FG_SEARCH_SLICES) {
-        g_tile[t] = PreviousLuma(origin + int2(t % FG_SEARCH_TILE, t / FG_SEARCH_TILE), extent);
+        const int2 p = int2(t % FG_SEARCH_TILE, t / FG_SEARCH_TILE);
+        if (all(p >= unused) && all(p < FG_SEARCH_TILE - unused)) {
+            g_tile[t] = PreviousLuma(origin + p, extent);
+        }
     }
     GroupMemoryBarrierWithGroupSync();
     const bool active = all(id.xy < g.size.xy);
     const int2 cell = int2(id.xy);
     const int slice = int(thread.z);
-    const int radius = min(int(g.options.x), FG_SEARCH_MAX_RADIUS);
     const int side = 2 * radius + 1;
     const int candidates = radius >= 0 ? side * side : 0;
     float best_cost = 0.0;
@@ -611,7 +722,79 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 thre
     g_best_cost[slice * 64 + slot] = best_cost;
     g_best_index[slice * 64 + slot] = best_index;
     GroupMemoryBarrierWithGroupSync();
+    // Research (FG_FLAG_FLOW_SHORTEST): a second scan for the shortest
+    // displacement within the tolerance of the lowest cost of all four slices
+    // (ShortestScan). Its barriers stand outside any flow control, every
+    // thread of the group reaching each: WARP, the software adapter, crashed
+    // running the pass with them inside the flag's branch (2026-11-21), and
+    // other drivers may be as strict.
+    const bool shortest_scan = (g.options.y & FG_FLAG_FLOW_SHORTEST) != 0u;
+    float lowest = g_best_cost[slot];
+    int first = g_best_index[slot];
+    [unroll]
+    for (int k = 1; k < FG_SEARCH_SLICES; ++k) {
+        const float cost = g_best_cost[k * 64 + slot];
+        const int candidate = g_best_index[k * 64 + slot];
+        if (cost < lowest || (cost == lowest && candidate < first)) {
+            lowest = cost;
+            first = candidate;
+        }
+    }
+    if (shortest_scan && slice == 0) {
+        g_first[slot] = active ? first : -1;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    float shortest = 1e30;
+    float shortest_cost = 1e30;
+    int shortest_index = -2;
+    [branch]
+    if (shortest_scan) {
+        // tuning.w 1: shortest from the median of the first scan's choices
+        // of the 3x3 cells around (within the thread group), not from no
+        // motion: content that really moves far moves far together.
+        float2 target = float2(0.0, 0.0);
+        [branch]
+        if (g.tuning.w > 0.5) {
+            int xs[9];
+            int ys[9];
+            [unroll]
+            for (int n = 0; n < 9; ++n) {
+                const int2 q = clamp(int2(thread.xy) + int2(n % 3, n / 3) - 1, int2(0, 0), int2(7, 7));
+                const int chosen = g_first[q.y * 8 + q.x];
+                const int2 v = chosen < 0 ? int2(0, 0) : int2(uint(chosen) % uint(side), uint(chosen) / uint(side)) - radius;
+                xs[n] = v.x;
+                ys[n] = v.y;
+            }
+            target = float2(Median9(xs), Median9(ys));
+        }
+        if (active) {
+            ShortestScan(cell, origin, extent, slice, radius, lowest, target, shortest, shortest_cost, shortest_index);
+        }
+        // Every slice read the first scan's results before the barrier above.
+        g_short_length[slice * 64 + slot] = shortest;
+        g_best_cost[slice * 64 + slot] = shortest_cost;
+        g_best_index[slice * 64 + slot] = shortest_index;
+    }
+    GroupMemoryBarrierWithGroupSync();
     if (!active || slice != 0) {
+        return;
+    }
+    [branch]
+    if (shortest_scan) {
+        [unroll]
+        for (int r = 1; r < FG_SEARCH_SLICES; ++r) {
+            const float length2 = g_short_length[r * 64 + slot];
+            const float cost = g_best_cost[r * 64 + slot];
+            if (length2 < shortest || (length2 == shortest && cost < shortest_cost)) {
+                shortest = length2;
+                shortest_cost = cost;
+                shortest_index = g_best_index[r * 64 + slot];
+            }
+        }
+        // Nothing within the tolerance (NaN costs): no motion.
+        const int2 nearest = shortest_index < 0 ? int2(0, 0)
+                                                : int2(uint(shortest_index) % uint(side), uint(shortest_index) / uint(side)) - radius;
+        g_flow[id.xy] = float4(float2(nearest) / float2(extent), shortest_index >= -1 ? shortest_cost : lowest, 1.0);
         return;
     }
     [unroll]
@@ -795,9 +978,30 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         Consider(block, int2(round(g_temporal.SampleLevel(g_linear, uv, 0.0).xy * g.tuning.x * match)), best, best_cost);
     }
     StepSearch(block, scale, best, best_cost);
-    const float2 sub = SubTexelAt(block, best, best_cost);
+    float2 sub;
+    float ambiguity = 0.0;
+    [branch]
+    if ((g.options.y & FG_FLAG_FLOW_EVIDENCE) != 0u) {
+        // Research: the costs around the minimum also say how distinct it is.
+        const float left = BlockCost(block, best - int2(1, 0));
+        const float right = BlockCost(block, best + int2(1, 0));
+        const float up = BlockCost(block, best - int2(0, 1));
+        const float down = BlockCost(block, best + int2(0, 1));
+        sub = float2(SubTexel(left, best_cost, right), SubTexel(up, best_cost, down));
+        ambiguity = FlowAmbiguity(best_cost, left, right, up, down);
+    } else {
+        sub = SubTexelAt(block, best, best_cost);
+    }
+    const float2 flow = (float2(best) + sub) / match;
+    float cost = best_cost;
+    // Research: an ambiguous cell's cost carries its ambiguity (see
+    // FlowAmbiguity), so the filter's median outvotes it and synthesis trusts
+    // its vector less. options.x: the cost a fully ambiguous cell adds.
+    if ((g.options.y & FG_FLAG_FLOW_EVIDENCE) != 0u) {
+        cost += ambiguity * asfloat(g.options.x);
+    }
     // w: the cost of no motion (FG_PASS_FILTER's rigid test).
-    g_flow[id.xy] = float4((float2(best) + sub) / match, best_cost, ZeroCost(block));
+    g_flow[id.xy] = float4(flow, cost, ZeroCost(block));
 }
 #endif
 
@@ -1952,8 +2156,13 @@ float2 SourceUv(float2 position, float fraction) {
 // content is in the newest frame (uv units), false where it has none. A map
 // built for another frame of the same real frame (FrameGenTuning::
 // engine_map_reuse: its time in options.w's high half; 0, this frame's own)
-// is scaled to `fraction`.
+// is scaled to `fraction`. Outside the image it has none (a read out of
+// bounds returns 0, which would decode as content that has not moved).
 bool MotionMapBack(float2 uv, float fraction, out float2 back) {
+    back = float2(0.0, 0.0);
+    if (any(uv < 0.0) || any(uv >= 1.0)) {
+        return false;
+    }
     uint width, height;
     g_motion.GetDimensions(width, height);
     const float2 size = float2(width, height);
@@ -2580,7 +2789,11 @@ float4 PSMain(float4 position : SV_Position) : SV_Target {
             const float3 low = min(focus.rgb, min(min(n, s), min(e, w)));
             const float3 high = max(focus.rgb, max(max(n, s), max(e, w)));
             const float3 range = max(high - low, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
-            focus.rgb = saturate(focus.rgb + clamp((focus.rgb - average) * (sharpen * 2.0), -range * 0.5, range * 0.5));
+            // Up to 1.0, or where the neighbourhood is brighter than that (a float,
+            // HDR target) as far as the detail reaches, as the compositor's does.
+            const float3 ceiling = 1.0 + saturate(sign(high - 1.0)) * (high + range * 0.5 - 1.0);
+            focus.rgb = clamp(focus.rgb + clamp((focus.rgb - average) * (sharpen * 2.0), -range * 0.5, range * 0.5),
+                              0.0, ceiling);
         }
         composed = lerp(composed, focus, alpha);
     }
@@ -4333,7 +4546,11 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         }
         source = texel;
     }
-    uint packed = 0u;
+    // A gap nothing reached from either side: the eye-shift map keeps the
+    // newest frame unshifted there (0, read as FG_SHIFT_NONE is); the motion
+    // maps have no entry, so their reader keeps its chosen vector rather than
+    // taking the content there as not having moved.
+    uint packed = MotionMap() ? FG_SHIFT_NONE : 0u;
     if (ahead_key != 0u || behind_key != 0u) {
         const uint neighbour = g_shift[source];
         const float2 back = (neighbour == FG_SHIFT_NONE ? float2(0.0, 0.0)

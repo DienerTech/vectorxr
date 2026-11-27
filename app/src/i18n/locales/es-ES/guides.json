@@ -7,6 +7,8 @@
     "tools": "Pantalla y herramientas"
   },
   "badges": {
+    "new": "Nuevo",
+    "beta": "Beta",
     "experimental": "Experimental"
   },
   "back": "Todas las guías",
@@ -42,7 +44,13 @@
     "depthPlane": "Plano de profundidad",
     "wait": "Esperando al entorno",
     "render": "El juego renderiza",
-    "osdPanel": "Panel OSD"
+    "osdPanel": "Panel OSD",
+    "mirrorWindow": "Ventana espejo de VectorXR",
+    "smoothedCopy": "Una copia, suavizada",
+    "binding": "Tu asignación",
+    "runtimeMirror": "Espejo del software del visor",
+    "sameImage": "La misma imagen",
+    "pngFiles": "PNG por cada ojo"
   },
   "items": {
     "start": {
@@ -80,7 +88,7 @@
           "heading": "Configura tu primer juego",
           "steps": {
             "1": "Inicia el juego una vez con VectorXR instalado y ciérralo.",
-            "2": "Abre **Registro de aplicaciones**, pulsa **Actualizar** y registra el juego desde la lista de apps que VectorXR ha visto.",
+            "2": "Abre **Aplicaciones → Detección**, pulsa **Actualizar** y registra el juego desde la lista de apps que VectorXR ha visto.",
             "3": "Abre una mejora en la barra lateral, pulsa **Añadir perfil** y elige el juego.",
             "4": "Ajusta los valores y pulsa **Guardar cambios**. Algunas mejoras necesitan reiniciar el juego; sus guías indican cuáles."
           }
@@ -285,6 +293,61 @@
           "body": "Desactiva el OSD en su página y guarda, u ocúltalo durante la sesión con su asignación."
         }
       }
+    },
+    "screenshots": {
+      "title": "Capturas de pantalla",
+      "summary": "Guarda la imagen de cada ojo a resolución completa como PNG con una tecla o un botón.",
+      "sections": {
+        "what": {
+          "body": "Una captura guarda la imagen que el juego envía al visor, antes de la corrección de las lentes, así que es más nítida y grande que una captura del espejo del escritorio. No incluye la información en pantalla ni otras superposiciones. Con Frame Generation activado, guarda un fotograma renderizado por el juego, nunca uno generado."
+        },
+        "setup": {
+          "steps": {
+            "1": "Abre **Capturas de pantalla** y añade una asignación para **Hacer captura de pantalla**. No hay ninguna por defecto.",
+            "2": "Elige **Ambos ojos**, **Ojo izquierdo** u **Ojo derecho**.",
+            "3": "Pulsa **Guardar cambios** y luego pulsa la asignación en el visor."
+          }
+        },
+        "check": {
+          "body": "Los archivos van a Imágenes\\VectorXR, en una carpeta por juego. Una imagen grande tarda uno o dos segundos en aparecer. Con el sonido de la asignación activado, oyes un aviso cuando se guardan los archivos."
+        },
+        "problems": {
+          "body": "Las capturas funcionan en juegos Direct3D 11 y Direct3D 12. Los juegos Vulkan aún no son compatibles. Si no se guarda nada, el registro de VectorXR indica el motivo."
+        }
+      }
+    },
+    "mirror": {
+      "title": "Ventana espejo estabilizada",
+      "summary": "Una ventana de escritorio estabilizada con la vista de un ojo, para emitir en directo y grabar.",
+      "sections": {
+        "what": {
+          "body": "La ventana espejo estabilizada es una ventana de VectorXR en tu escritorio que muestra la imagen de un ojo con el temblor de la cabeza suavizado. La imagen del visor no cambia. El espejo del software del visor y la ventana de escritorio del juego muestran exactamente lo que recibe el visor, así que no se pueden estabilizar por separado."
+        },
+        "when": {
+          "body": "Úsala cuando emitas en directo o grabes, o cuando otras personas miren en un monitor o un televisor. Funciona en juegos Direct3D 11, Direct3D 12 y Vulkan."
+        },
+        "setup": {
+          "steps": {
+            "1": "Abre **Espejo estabilizado** y activa la ventana espejo: en el **Perfil predeterminado** para todos los juegos, o en un perfil personalizado para un juego.",
+            "2": "Pulsa **Guardar cambios**. La ventana se abre cuando el juego muestra su primer fotograma. En un juego Vulkan, actívala antes de iniciar el juego.",
+            "3": "En OBS, añade una fuente **Captura de ventana** y elige la ventana cuyo nombre empieza por VectorXR Mirror.",
+            "4": "Sube **Suavizado** para una imagen más estable, y **Margen** si se ven los bordes de la imagen en giros rápidos de cabeza. Los cambios se aplican en cuanto guardas."
+          }
+        },
+        "check": {
+          "body": "La página Espejo estabilizado muestra los juegos en ejecución, con **Ventana abierta** mientras se muestra el espejo."
+        },
+        "off": {
+          "body": "Desactiva el perfil y guarda, u oculta la ventana con la asignación **Mostrar u ocultar la ventana espejo**. Cerrar la ventana solo la oculta."
+        },
+        "problems": {
+          "points": {
+            "a": "**La imagen va por detrás en giros rápidos de cabeza:** baja Suavizado.",
+            "b": "**No hay ventana en un juego Vulkan:** activa la ventana espejo, guarda y reinicia el juego.",
+            "c": "**La imagen tapa la ventana del juego:** con **Llenar un monitor**, elige un monitor distinto al del juego."
+          }
+        }
+      }
     }
   },
   "walkthrough": {
@@ -315,7 +378,11 @@
       "biggerWorld": "Ojos más juntos: un mundo más grande",
       "compactWorld": "Ojos más separados: un mundo más compacto",
       "frames_one": "{count} fotograma",
-      "frames_other": "{count} fotogramas"
+      "frames_other": "{count} fotogramas",
+      "windowCapture": "Captura de ventana",
+      "mirror": "Espejo del escritorio",
+      "fullRes": "Resolución completa",
+      "folder": "Imágenes\\VectorXR"
     }
   },
   "walkthroughs": {
@@ -387,6 +454,26 @@
         "3": "Elige un preajuste y arrastra el panel hasta donde lo quieras en la vista previa.",
         "4": "En el juego, Ctrl+Alt+F10 lo muestra u oculta y Ctrl+Alt+F11 cambia de diseño.",
         "5": "En la página Información en pantalla, actívala, elige un preajuste y guarda."
+      }
+    },
+    "screenshots": {
+      "title": "Mira: cómo funcionan las capturas",
+      "steps": {
+        "1": "Una captura del espejo del escritorio es pequeña y muestra la imagen tras la corrección de las lentes.",
+        "2": "VectorXR guarda la imagen que el juego envía al visor, a resolución completa y sin superposiciones.",
+        "3": "Pulsa tu asignación y un PNG por cada ojo llega a una carpeta del juego en Imágenes\\VectorXR.",
+        "4": "En la página Capturas de pantalla, añade una asignación para Hacer captura de pantalla, elige los ojos y guarda."
+      }
+    },
+    "mirror": {
+      "title": "Mira: cómo funciona la ventana espejo estabilizada",
+      "steps": {
+        "1": "El espejo del software del visor y la ventana de escritorio del juego muestran exactamente la imagen que recibe el visor, así que cada temblor de tu cabeza sale en tu directo.",
+        "2": "VectorXR abre su propia ventana con una copia de la imagen de un ojo y suaviza solo esa copia. La imagen del visor no cambia.",
+        "3": "En OBS, añade una fuente Captura de ventana y elige la ventana cuyo nombre empieza por VectorXR Mirror.",
+        "4": "En la página Espejo estabilizado, activa el Perfil predeterminado para todos los juegos, o añade un perfil personalizado para un juego, y guarda. La ventana se abre con el primer fotograma del juego.",
+        "5": "Sube Suavizado para una imagen más estable, y Margen si se ven los bordes de la imagen en giros rápidos de cabeza. Mantener el horizonte nivelado quita la inclinación de la cabeza.",
+        "6": "En Ventana, elige el ojo, la forma y el tamaño de la imagen y un límite de fotogramas, o llena un monitor. Los cambios se aplican en cuanto guardas."
       }
     }
   }

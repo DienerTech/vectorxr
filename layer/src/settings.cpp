@@ -344,6 +344,43 @@ std::optional<FrameGenMultiplier> ParseFrameGenMultiplier(const std::string& val
     return std::nullopt;
 }
 
+const char* ToString(MirrorEye eye) {
+    return eye == MirrorEye::Right ? "right" : "left";
+}
+
+std::optional<MirrorEye> ParseMirrorEye(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+    if (normalized == "left") return MirrorEye::Left;
+    if (normalized == "right") return MirrorEye::Right;
+    return std::nullopt;
+}
+
+const char* ToString(MirrorAspect aspect) {
+    switch (aspect) {
+    case MirrorAspect::k16x10:
+        return "16:10";
+    case MirrorAspect::k4x3:
+        return "4:3";
+    case MirrorAspect::k1x1:
+        return "1:1";
+    case MirrorAspect::k21x9:
+        return "21:9";
+    case MirrorAspect::k16x9:
+    default:
+        return "16:9";
+    }
+}
+
+std::optional<MirrorAspect> ParseMirrorAspect(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+    if (normalized == "16:9") return MirrorAspect::k16x9;
+    if (normalized == "16:10") return MirrorAspect::k16x10;
+    if (normalized == "4:3") return MirrorAspect::k4x3;
+    if (normalized == "1:1") return MirrorAspect::k1x1;
+    if (normalized == "21:9") return MirrorAspect::k21x9;
+    return std::nullopt;
+}
+
 const char* ToString(ProfileMode mode) {
     switch (mode) {
     case ProfileMode::Custom:

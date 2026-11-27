@@ -16,7 +16,7 @@ import {
 import { errorText } from '../lib/errors'
 import { t } from '../i18n/index.ts'
 import { createTaskQueue } from '../lib/taskQueue'
-import { cloneConfig, createApplication, createFrameGenProfile, createProfile, createPivotProfile, createQuadViewsProfile, duplicatePivotProfile as clonePivotProfile, createTurboProfile, defaultConfig, defaultProfileName, isDefaultProfileName } from '../lib/model'
+import { cloneConfig, createApplication, createFrameGenProfile, createMirrorProfile, createProfile, createPivotProfile, createQuadViewsProfile, duplicatePivotProfile as clonePivotProfile, createTurboProfile, defaultConfig, defaultProfileName, isDefaultProfileName } from '../lib/model'
 import type { AppTab, ModuleId, RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
@@ -440,6 +440,29 @@ export function useConfigStore() {
     }
   }
 
+  function addMirrorProfile() {
+    const defaultApplicationId = state.config.applications[0]?.id
+    state.config.modules.mirror.profiles.push(
+      createMirrorProfile(state.config.modules.mirror.defaults, defaultApplicationId ? [defaultApplicationId] : []),
+    )
+  }
+
+  function removeMirrorProfile(index: number) {
+    state.config.modules.mirror.profiles.splice(index, 1)
+  }
+
+  function syncMirrorProfileName(index: number) {
+    const profile = state.config.modules.mirror.profiles[index]
+    if (!profile) {
+      return
+    }
+
+    if (!profile.name.trim() || isDefaultProfileName(profile.name)) {
+      const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
+      profile.name = firstApplication?.name || defaultProfileName()
+    }
+  }
+
   // Registry shortcut: create a profile pre-assigned to one application and jump to the module tab.
   function addModuleProfileForApplication(moduleId: ModuleId, applicationId: string) {
     const application = state.config.applications.find((candidate) => candidate.id === applicationId)
@@ -524,6 +547,9 @@ export function useConfigStore() {
     for (const profile of state.config.modules.framegen.profiles) {
       profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
     }
+    for (const profile of state.config.modules.mirror.profiles) {
+      profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
+    }
   }
 
   return {
@@ -559,6 +585,9 @@ export function useConfigStore() {
     addFrameGenProfile,
     removeFrameGenProfile,
     syncFrameGenProfileName,
+    addMirrorProfile,
+    removeMirrorProfile,
+    syncMirrorProfileName,
     addModuleProfileForApplication,
     addApplication,
     addSeenApplication,

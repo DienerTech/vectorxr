@@ -7,6 +7,8 @@
     "tools": "Affichage et outils"
   },
   "badges": {
+    "new": "Nouveau",
+    "beta": "Bêta",
     "experimental": "Expérimental"
   },
   "back": "Tous les guides",
@@ -42,7 +44,13 @@
     "depthPlane": "Plan de profondeur",
     "wait": "Attente du runtime",
     "render": "Le jeu fait son rendu",
-    "osdPanel": "Panneau OSD"
+    "osdPanel": "Panneau OSD",
+    "mirrorWindow": "Fenêtre miroir VectorXR",
+    "smoothedCopy": "Une copie, lissée",
+    "binding": "Votre affectation",
+    "runtimeMirror": "Miroir du logiciel du casque",
+    "sameImage": "La même image",
+    "pngFiles": "Un PNG par œil"
   },
   "items": {
     "start": {
@@ -80,7 +88,7 @@
           "heading": "Configurer votre premier jeu",
           "steps": {
             "1": "Lancez le jeu une fois avec VectorXR installé, puis quittez-le.",
-            "2": "Ouvrez le **Registre des applications**, cliquez sur **Actualiser** et enregistrez le jeu depuis la liste des applications vues par VectorXR.",
+            "2": "Ouvrez **Applications → Découverte**, cliquez sur **Actualiser** et enregistrez le jeu depuis la liste des applications vues par VectorXR.",
             "3": "Ouvrez une amélioration dans la barre latérale, cliquez sur **Ajouter un profil** et choisissez le jeu.",
             "4": "Ajustez les réglages, puis cliquez sur **Enregistrer les modifications**. Certaines améliorations demandent de redémarrer le jeu ; leurs guides indiquent lesquelles."
           }
@@ -285,6 +293,61 @@
           "body": "Désactivez l'OSD sur sa page et enregistrez, ou masquez-le pour la session avec son affectation."
         }
       }
+    },
+    "screenshots": {
+      "title": "Captures d'écran",
+      "summary": "Enregistrer l'image de chaque œil en pleine résolution au format PNG avec une touche ou un bouton.",
+      "sections": {
+        "what": {
+          "body": "Une capture enregistre l'image que le jeu envoie au casque, avant la correction des lentilles : elle est donc plus nette et plus grande qu'une capture du miroir du bureau. Elle n'inclut ni l'affichage à l'écran ni les autres superpositions. Avec Frame Generation, elle enregistre une image rendue par le jeu, jamais une image générée."
+        },
+        "setup": {
+          "steps": {
+            "1": "Ouvrez **Captures d'écran** et ajoutez une affectation pour **Prendre une capture d'écran**. Il n'y en a aucune par défaut.",
+            "2": "Choisissez **Les deux yeux**, **Œil gauche** ou **Œil droit**.",
+            "3": "Cliquez sur **Enregistrer les modifications**, puis appuyez sur l'affectation dans le casque."
+          }
+        },
+        "check": {
+          "body": "Les fichiers vont dans Images\\VectorXR, dans un dossier par jeu. Une grande image met une ou deux secondes à apparaître. Avec le son de l'affectation activé, un signal retentit quand les fichiers sont enregistrés."
+        },
+        "problems": {
+          "body": "Les captures fonctionnent dans les jeux Direct3D 11 et Direct3D 12. Les jeux Vulkan ne sont pas encore pris en charge. Si rien n'est enregistré, le journal de VectorXR indique pourquoi."
+        }
+      }
+    },
+    "mirror": {
+      "title": "Fenêtre miroir stabilisée",
+      "summary": "Une fenêtre de bureau stabilisée montrant la vue d'un œil, pour la diffusion en direct et l'enregistrement.",
+      "sections": {
+        "what": {
+          "body": "La fenêtre miroir stabilisée est une fenêtre VectorXR sur votre bureau qui affiche l'image d'un œil en lissant les tremblements de la tête. L'image du casque n'est pas modifiée. Le miroir du logiciel du casque et la fenêtre de bureau du jeu montrent exactement ce que reçoit le casque ; ils ne peuvent donc pas être stabilisés séparément."
+        },
+        "when": {
+          "body": "Utilisez-la pour diffuser ou enregistrer, ou quand d'autres personnes regardent sur un écran ou un téléviseur. Elle fonctionne dans les jeux Direct3D 11, Direct3D 12 et Vulkan."
+        },
+        "setup": {
+          "steps": {
+            "1": "Ouvrez **Miroir stabilisé** et activez la fenêtre miroir : dans le **Profil par défaut** pour tous les jeux, ou dans un profil personnalisé pour un jeu.",
+            "2": "Cliquez sur **Enregistrer les modifications**. La fenêtre s'ouvre quand le jeu affiche sa première image. Pour un jeu Vulkan, activez-la avant de lancer le jeu.",
+            "3": "Dans OBS, ajoutez une source **Capture de fenêtre** et choisissez la fenêtre dont le nom commence par VectorXR Mirror.",
+            "4": "Augmentez **Lissage** pour une image plus stable, et **Marge** si les bords de l'image apparaissent lors des rotations rapides de la tête. Les changements s'appliquent dès l'enregistrement."
+          }
+        },
+        "check": {
+          "body": "La page Miroir stabilisé liste les jeux en cours, avec **Fenêtre ouverte** tant que le miroir est affiché."
+        },
+        "off": {
+          "body": "Désactivez le profil et enregistrez, ou masquez la fenêtre avec l'affectation **Afficher ou masquer la fenêtre miroir**. Fermer la fenêtre ne fait que la masquer."
+        },
+        "problems": {
+          "points": {
+            "a": "**L'image est en retard lors des rotations rapides de la tête :** réduisez Lissage.",
+            "b": "**Pas de fenêtre dans un jeu Vulkan :** activez la fenêtre miroir, enregistrez et redémarrez le jeu.",
+            "c": "**L'image recouvre la fenêtre du jeu :** avec **Remplir un écran**, choisissez un autre écran que celui du jeu."
+          }
+        }
+      }
     }
   },
   "walkthrough": {
@@ -315,7 +378,11 @@
       "biggerWorld": "Yeux plus proches : un monde plus grand",
       "compactWorld": "Yeux plus écartés : un monde plus compact",
       "frames_one": "{count} image",
-      "frames_other": "{count} images"
+      "frames_other": "{count} images",
+      "windowCapture": "Capture de fenêtre",
+      "mirror": "Miroir du bureau",
+      "fullRes": "Pleine résolution",
+      "folder": "Images\\VectorXR"
     }
   },
   "walkthroughs": {
@@ -387,6 +454,26 @@
         "3": "Choisissez un préréglage, puis faites glisser le panneau à l’endroit voulu dans l’aperçu.",
         "4": "En jeu, Ctrl+Alt+F10 l’affiche ou le masque, et Ctrl+Alt+F11 change de disposition.",
         "5": "Sur la page Affichage à l’écran, activez-le, choisissez un préréglage et enregistrez."
+      }
+    },
+    "screenshots": {
+      "title": "Regarder : comment fonctionnent les captures",
+      "steps": {
+        "1": "Une capture du miroir du bureau est petite et montre l’image après la correction des lentilles.",
+        "2": "VectorXR enregistre l’image que le jeu envoie au casque, en pleine résolution et sans superpositions.",
+        "3": "Appuyez sur votre affectation, et un PNG par œil arrive dans un dossier du jeu dans Images\\VectorXR.",
+        "4": "Sur la page Captures d'écran, ajoutez une affectation Prendre une capture d’écran, choisissez les yeux et enregistrez."
+      }
+    },
+    "mirror": {
+      "title": "Regarder : comment fonctionne la fenêtre miroir stabilisée",
+      "steps": {
+        "1": "Le miroir du logiciel du casque et la fenêtre de bureau du jeu montrent exactement l'image que reçoit le casque : chaque tremblement de votre tête se voit donc dans votre stream.",
+        "2": "VectorXR ouvre sa propre fenêtre avec une copie de l'image d'un œil, et ne lisse que cette copie. L'image du casque n'est pas modifiée.",
+        "3": "Dans OBS, ajoutez une source Capture de fenêtre et choisissez la fenêtre dont le nom commence par VectorXR Mirror.",
+        "4": "Sur la page Miroir stabilisé, activez le Profil par défaut pour tous les jeux, ou ajoutez un profil personnalisé pour un jeu, puis enregistrez. La fenêtre s'ouvre à la première image du jeu.",
+        "5": "Augmentez Lissage pour une image plus stable, et Marge si les bords de l'image apparaissent lors des rotations rapides de la tête. Garder l'horizon droit retire l'inclinaison de la tête.",
+        "6": "Sous Fenêtre, choisissez l'œil, la forme et la taille de l'image et une limite d'images par seconde, ou remplissez un écran. Les changements s'appliquent dès l'enregistrement."
       }
     }
   }

@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 
 import logoUrl from '../assets/logo.png'
-import { t } from '../i18n/index.ts'
+import { t, type MessageKey } from '../i18n/index.ts'
 import type { AppTab } from '../lib/model'
 
 const props = defineProps<{
@@ -26,59 +26,128 @@ defineEmits<{
   showUpdates: []
 }>()
 
-const primaryTabs = computed(() => props.tabs.filter((tab) => tab.id === 'home' || tab.id === 'core' || tab.id === 'osd' || tab.id === 'registry' || tab.id === 'layers' || tab.id === 'guides' || tab.id === 'about'))
-const moduleTabs = computed(() => {
-  const moduleOrder: AppTab[] = ['quadviews', 'turbo', 'framegen', 'pivotxr', 'depthxr']
-  return moduleOrder
-    .map((id) => props.tabs.find((tab) => tab.id === id))
-    .filter((tab): tab is NonNullable<typeof tab> => tab !== undefined)
-})
-
-function moduleDotClass(tab: { enhancementActive?: boolean }): string {
-  return tab.enhancementActive ? 'nav-dot-on' : 'nav-dot-off'
+interface SidebarGroup {
+  id: string
+  label?: MessageKey
+  aggregateStatus?: boolean
+  tabs: AppTab[]
 }
+
+const sections: { label: MessageKey; groups: SidebarGroup[] }[] = [
+  {
+    label: 'app.sidebar.appSettings',
+    groups: [
+      { id: 'app-settings', tabs: ['home', 'guides', 'core'] },
+      { id: 'applications', label: 'app.sidebar.applications', tabs: ['registry', 'discovery'] },
+      { id: 'app-info', tabs: ['supporters', 'about'] },
+    ],
+  },
+  {
+    label: 'app.sidebar.openxrUtilities',
+    groups: [
+      { id: 'openxr-utilities', tabs: ['osd', 'layers'] },
+      { id: 'capture', label: 'app.sidebar.capture', tabs: ['screenshots', 'mirror'], aggregateStatus: true },
+    ],
+  },
+  {
+    label: 'app.sidebar.enhancements',
+    groups: [
+      { id: 'performance', label: 'app.sidebar.performance', tabs: ['quadviews', 'turbo', 'framegen'] },
+      { id: 'look-and-feel', label: 'app.sidebar.lookAndFeel', tabs: ['depthxr', 'pivotxr'] },
+    ],
+  },
+]
+
+const nav = ref<HTMLElement | null>(null)
+const collapsibleGroups = sections.flatMap(section => section.groups).filter(group => group.label)
+const storageKey = 'vectorxr-sidebar-collapsed'
+function loadCollapsed(): Set<string> {
+  try {
+    const saved: unknown = JSON.parse(window.localStorage.getItem(storageKey) ?? '[]')
+    if (Array.isArray(saved)) return new Set(collapsibleGroups.filter(group => saved.includes(group.id)).map(group => group.id))
+  } catch { /* Storage may be unavailable. */ }
+  return new Set()
+}
+
+const collapsed = reactive(loadCollapsed())
+const revealed = ref<string | null>(null)
+const tabsById = computed(() => new Map(props.tabs.map(tab => [tab.id, tab])))
+
+function tabsFor(group: SidebarGroup) {
+  return group.tabs.map(id => tabsById.value.get(id)).filter((tab): tab is NonNullable<typeof tab> => tab !== undefined)
+}
+
+function groupActive(group: SidebarGroup) {
+  return tabsFor(group).some(tab => tab.enhancementActive)
+}
+
+function isCollapsed(id: string) {
+  return collapsed.has(id) && revealed.value !== id
+}
+
+function toggleGroup(id: string) {
+  if (isCollapsed(id)) collapsed.delete(id)
+  else collapsed.add(id)
+  if (revealed.value === id) revealed.value = null
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify([...collapsed]))
+  } catch { /* The disclosure still works for this session. */ }
+}
+
+// Reveal a destination selected from another page without changing the user's saved groups.
+watch(() => props.activeTab, async id => {
+  revealed.value = collapsibleGroups.find(group => group.tabs.includes(id))?.id ?? null
+  await nextTick()
+  nav.value?.querySelector<HTMLElement>('[data-tab="' + id + '"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+}, { immediate: true })
 </script>
 
 <template>
-  <nav class="side-nav flex h-full w-56 shrink-0 flex-col border-r px-3 py-4">
-    <p class="side-nav-group-label px-2">{{ t('app.sidebar.appSettings') }}</p>
-    <div class="mt-1.5 grid gap-1">
-      <button
-        v-for="tab in primaryTabs"
-        :key="tab.id"
-        class="side-nav-item flex items-center justify-between gap-2 rounded-[0.65rem] px-3 py-2 text-left text-sm font-medium transition"
-        :class="activeTab === tab.id ? 'side-nav-item-active' : ''"
-        type="button"
-        :data-tab="tab.id"
-        :title="tab.subtitle"
-        @click="$emit('select', tab.id)"
-      >
-        <span>{{ tab.label }}</span>
-        <span v-if="tab.id === 'core' && tab.statusWarning" class="nav-dot nav-dot-warn" :title="t('app.sidebar.suiteOff')" />
-        <span v-else-if="tab.id === 'osd'" class="nav-dot" :class="moduleDotClass(tab)" :title="tab.status" />
-      </button>
-    </div>
+  <nav ref="nav" class="side-nav flex h-full min-h-0 w-56 shrink-0 flex-col overflow-y-auto border-r px-3 py-4">
+    <section v-for="section in sections" :key="section.label" class="mb-4 shrink-0">
+      <h2 class="side-nav-group-label px-2">{{ t(section.label) }}</h2>
+      <div v-for="group in section.groups" :key="group.id" class="mt-1">
+        <h3 v-if="group.label">
+          <button
+            class="side-nav-disclosure flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold"
+            type="button"
+            :aria-controls="'side-nav-' + group.id"
+            :aria-expanded="!isCollapsed(group.id)"
+            @click="toggleGroup(group.id)"
+          >
+            <span class="min-w-0 flex-1">{{ t(group.label) }}</span>
+            <span v-if="group.aggregateStatus" class="nav-dot" :class="groupActive(group) ? 'nav-dot-on' : 'nav-dot-off'">
+              <span class="sr-only">{{ groupActive(group) ? t('common.active') : t('common.inactive') }}</span>
+            </span>
+            <span aria-hidden="true" class="side-nav-chevron" />
+          </button>
+        </h3>
+        <div
+          v-show="!isCollapsed(group.id)"
+          :id="'side-nav-' + group.id"
+          class="grid gap-0.5"
+          :class="{ 'side-nav-children': group.label }"
+        >
+          <button
+            v-for="tab in tabsFor(group)"
+            :key="tab.id"
+            class="side-nav-item flex items-center justify-between gap-2 rounded-[0.65rem] px-3 py-1.5 text-left text-sm font-medium transition"
+            :class="activeTab === tab.id ? 'side-nav-item-active' : ''"
+            type="button"
+            :data-tab="tab.id"
+            :title="group.label ? t('app.sidebar.moduleTitle', { subtitle: tab.subtitle, status: tab.status }) : tab.subtitle"
+            :aria-current="activeTab === tab.id ? 'page' : undefined"
+            @click="$emit('select', tab.id)"
+          >
+            <span>{{ tab.label }}</span>
+            <span v-if="tab.id === 'core' && tab.statusWarning" class="nav-dot nav-dot-warn" :title="t('app.sidebar.suiteOff')" />
+            <span v-else-if="tab.enhancementActive !== undefined" class="nav-dot" :class="tab.enhancementActive ? 'nav-dot-on' : 'nav-dot-off'" :title="tab.status" />
+          </button>
+        </div>
+      </div>
+    </section>
 
-    <p class="side-nav-group-label mt-5 px-2">{{ t('app.sidebar.enhancements') }}</p>
-    <div class="mt-1.5 grid gap-1">
-      <button
-        v-for="tab in moduleTabs"
-        :key="tab.id"
-        class="side-nav-item flex items-center justify-between gap-2 rounded-[0.65rem] px-3 py-2 text-left text-sm font-medium transition"
-        :class="activeTab === tab.id ? 'side-nav-item-active' : ''"
-        type="button"
-        :data-tab="tab.id"
-        :title="t('app.sidebar.moduleTitle', { subtitle: tab.subtitle, status: tab.status })"
-        @click="$emit('select', tab.id)"
-      >
-        <span class="flex items-center gap-1.5">
-          {{ tab.label }}
-        </span>
-        <span class="nav-dot" :class="moduleDotClass(tab)" :title="tab.status" />
-      </button>
-    </div>
-
-    <div class="mt-auto px-2 pt-4">
+    <div class="mt-auto shrink-0 px-2">
       <p class="text-[0.68rem] leading-4 text-soft">{{ t('app.sidebar.saveHint') }}</p>
 
       <div class="mt-4 flex items-center gap-2.5 border-t pt-3" style="border-color: var(--app-border)">

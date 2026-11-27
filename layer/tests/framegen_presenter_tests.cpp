@@ -70,6 +70,9 @@ int g_creates = 0;
 std::vector<XrSwapchain> g_destroyed; // swapchains the layer destroyed
 int g_wait_timeouts = 0; // number of upcoming output waits that time out
 int g_wait_timeouts_on_create = 0; // g_wait_timeouts once the next output swapchain is made
+std::function<XrResult(XrSwapchain, XrDuration)> g_output_wait;
+std::function<XrResult(XrSwapchain)> g_output_release;
+std::function<void(XrSwapchain)> g_output_destroy; // each swapchain the layer destroys, under g_xr_mutex
 // Each output image wait takes this long (the runtime slow to hand images
 // back): the presenter thread writes its refresh that much later.
 std::atomic<std::chrono::microseconds> g_wait_image_delay{std::chrono::microseconds(0)};
@@ -102,6 +105,7 @@ XrResult XRAPI_PTR Create(XrSession, const XrSwapchainCreateInfo* info, XrSwapch
 }
 XrResult XRAPI_PTR Destroy(XrSwapchain swapchain) {
     std::scoped_lock lock(g_xr_mutex);
+    if (g_output_destroy) g_output_destroy(swapchain);
     g_images.erase(swapchain);
     g_destroyed.push_back(swapchain);
     return XR_SUCCESS;
@@ -117,11 +121,15 @@ XrResult XRAPI_PTR Acquire(XrSwapchain swapchain, const XrSwapchainImageAcquireI
     images.acquired.push_back(*index);
     return XR_SUCCESS;
 }
-XrResult XRAPI_PTR WaitImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo*) {
+XrResult XRAPI_PTR WaitImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* info) {
     if (const std::chrono::microseconds delay = g_wait_image_delay.load(); delay.count() > 0) {
         SleepPrecise(std::chrono::steady_clock::now() + delay);
     }
     std::scoped_lock lock(g_xr_mutex);
+    if (g_output_wait) {
+        const XrResult result = g_output_wait(swapchain, info->timeout);
+        if (result != XR_SUCCESS) return result;
+    }
     if (g_wait_timeouts > 0) {
         --g_wait_timeouts;
         return XR_TIMEOUT_EXPIRED;
@@ -136,6 +144,10 @@ XrResult XRAPI_PTR Release(XrSwapchain swapchain, const XrSwapchainImageReleaseI
     if (images.acquired.empty() || images.waited == 0) {
         g_release_violation = true;
         return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    if (g_output_release) {
+        const XrResult result = g_output_release(swapchain);
+        if (XR_FAILED(result)) return result;
     }
     images.acquired.pop_front();
     --images.waited;
@@ -395,6 +407,8 @@ struct GpuLog {
     // Writes refused because newer captures replaced the images they needed
     // in a view's history ring (FrameGenGpu::Writable said so beforehand).
     std::atomic<int> ring_refusals{0};
+    // Let the game analyze another frame before the next attempted JIT write.
+    std::atomic<bool> hold_outputs{false};
     // Analyses whose source images were not captured at their release.
     std::atomic<int> execute_uncaptured{0};
     // Game waits held for the GPU: (mark, the newest begun frame's mark
@@ -691,6 +705,7 @@ class FakeGpu final : public FrameGenGpu {
         return it == analyzed_.end() || std::chrono::steady_clock::now() >= it->measured_at;
     }
     bool Writable(std::uint64_t frame, bool exact) const override {
+        if (log_->hold_outputs) return false;
         std::scoped_lock lock(analyzed_mutex_);
         const auto it = std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == frame; });
         return it != analyzed_.end() && WritableLocked(*it, exact);
@@ -1469,6 +1484,55 @@ struct Runtime {
     std::vector<Submission> log;
 };
 
+// All observations use the dispatch mutex, including the runtime's log.
+struct RefusedOutputRelease {
+    Runtime& runtime;
+    XrSwapchain eye;
+    int remaining;
+    int attempts{0};
+    std::uint32_t cursor{0};
+    int prior_releases{0};
+    std::size_t first{0};
+    std::size_t past{0};
+    bool recovered{false};
+
+    XrResult operator()(XrSwapchain swapchain) {
+        if (swapchain != eye || recovered) return XR_SUCCESS;
+        const auto& images = g_images.at(eye);
+        if (attempts++ == 0) {
+            first = runtime.log.size();
+            cursor = images.cursor;
+            prior_releases = g_releases[eye];
+        }
+        Check(images.cursor == cursor && images.acquired.size() == 1 && images.waited == 1 &&
+                  g_written[eye].size() == 1,
+              "refused release: retry the same written image without acquiring, waiting or writing again");
+        if (remaining > 0) {
+            --remaining;
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+        recovered = true;
+        past = runtime.log.size();
+        return XR_SUCCESS;
+    }
+
+    void CheckSubmissions() const {
+        Check(recovered && attempts >= 2, "refused release: the runtime accepted the retry");
+        for (std::size_t i = first; i < past; ++i) {
+            const auto& used = runtime.log[i].swapchains;
+            Check(std::find(used.begin(), used.end(), eye) == used.end(),
+                  "refused release: no submission names the incomplete pair, even to repeat its old views");
+        }
+        bool fresh = false;
+        for (std::size_t i = past; i < runtime.log.size(); ++i) {
+            const auto& submission = runtime.log[i];
+            fresh = fresh || (submission.swapchains.size() == 2 && submission.swapchains[1] == eye &&
+                               submission.releases[1] > prior_releases + 1);
+        }
+        Check(fresh, "refused release: a fresh stereo write is presented after the retry on the same outputs");
+    }
+};
+
 // --- application ------------------------------------------------------------------
 
 const XrSwapchain kLeft = reinterpret_cast<XrSwapchain>(0x11);
@@ -1617,6 +1681,25 @@ FrameGenDynamicPolicy GuardDynamic() {
     return policy;
 }
 
+// Every rule off: Auto as it judged before them.
+FrameGenAutoRules AutoRulesOff() {
+    FrameGenAutoRules rules;
+    rules.cadence_filter = false;
+    rules.engage_below = false;
+    rules.reach = false;
+    rules.cause_backoff = false;
+    return rules;
+}
+
+// The rules a presenter starts with here. Off: the tests written before the
+// rules assert what Auto did then, and with every rule off it must still do
+// exactly that. The rules' own tests set them (AutoGame), and the probe
+// tests run a second time with them on (main).
+FrameGenAutoRules g_auto_rules = AutoRulesOff();
+// ...and the Dynamic policy, where not QuickDynamic: with the rules on Auto
+// takes its rate thresholds and times from it.
+std::optional<FrameGenDynamicPolicy> g_start_dynamic_policy;
+
 void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesisMode mode,
                     std::int64_t format = kFormat, XrSwapchainUsageFlags usage = kAppUsage,
                     FrameGenMultiplier multiplier = FrameGenMultiplier::k2, Logger* logger = nullptr) {
@@ -1626,9 +1709,10 @@ void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesis
     settings.multiplier = multiplier;
     presenter.Configure(settings);
     presenter.SetEngagementPolicy(3, 0ms);
-    presenter.SetDynamicPolicy(QuickDynamic());
+    presenter.SetDynamicPolicy(g_start_dynamic_policy ? *g_start_dynamic_policy : QuickDynamic());
     presenter.Start(kSession, nullptr, Dispatch(), logger, nullptr,
                     [&](const void*, std::string&) { return std::make_unique<FakeGpu>(&gpu); });
+    presenter.SetAutoRules(g_auto_rules);
     presenter.TrackSwapchain(kLeft, format, 1, usage);
     presenter.TrackSwapchain(kRight, format, 1, usage);
     std::scoped_lock lock(g_xr_mutex);
@@ -1744,6 +1828,42 @@ void TestExtrapolationPacing() {
 
 bool IsAppImage(const std::vector<XrSwapchain>& swapchains) {
     return swapchains.size() == 2 && swapchains[0] == kLeft && swapchains[1] == kRight;
+}
+
+// Both ways the batch backend releases its outputs: inline after writing
+// them, and on the game's slot when the presenter thread interpolates.
+void TestBatchOutputReleaseRefusal() {
+    for (bool threaded : {false, true}) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        gpu.threaded = runtime.paced = threaded;
+        StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+        App app(presenter, runtime);
+        app.eye_speed = 0.5;
+        for (int i = 0; i < 12; ++i) app.Frame();
+        const auto warm = runtime.Snapshot();
+        const auto generated = std::find_if(warm.rbegin(), warm.rend(), [](const Submission& entry) {
+            return entry.swapchains.size() == 2 && !IsAppImage(entry.swapchains);
+        });
+        Check(generated != warm.rend(), "batch release: generated outputs were presented first");
+        RefusedOutputRelease fault{runtime, generated->swapchains[1], 1};
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = std::ref(fault);
+        }
+        for (int i = 0; i < 12; ++i) app.Frame();
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = {};
+            fault.CheckSubmissions();
+            Check(fault.past > fault.first && IsAppImage(runtime.log[fault.first].swapchains),
+                  "batch release: the rejected batch yields its slot to the game frame");
+        }
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation && runtime.mismatched_images == 0,
+              "batch release: ordered calls and every eye image matches its submitted pose");
+    }
 }
 
 void TestTripleInterpolation() {
@@ -2432,10 +2552,12 @@ struct HorizonLog {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
     }
-    // Closes the log: call once the presenter has stopped.
+    // The log so far, flushed. The logger stays: a presenter still running
+    // (or stopped later) writes to it, and one destroyed under it was used
+    // after its end (SessionLog::Lines).
     std::vector<std::string> Summaries() {
         const std::filesystem::path path = logger->ActiveLogPath();
-        logger.reset(); // flushed
+        logger->FlushAtProcessExit();
         std::ifstream file(path);
         std::vector<std::string> lines;
         for (std::string line; std::getline(file, line);) {
@@ -2468,13 +2590,15 @@ struct SessionLog {
         std::error_code ignored;
         std::filesystem::remove_all(directory, ignored);
     }
-    // The lines holding `text` (closes the log: call once the presenter has
-    // stopped). Later calls read the closed log again.
+    // The lines holding `text` in the log so far, flushed. The logger stays
+    // until the SessionLog goes: this used to destroy it, and a test that
+    // read its log before stopping its presenter (TestRuntimeHalvingPush)
+    // left the presenter writing its session summary through a destroyed
+    // logger: one run in a few ended in "resource deadlock would occur" from
+    // its mutex, or an access violation.
     std::vector<std::string> Lines(const std::string& text) {
-        if (logger) {
-            path = logger->ActiveLogPath();
-            logger.reset(); // flushed
-        }
+        path = logger->ActiveLogPath();
+        logger->FlushAtProcessExit();
         std::ifstream file(path);
         std::vector<std::string> lines;
         for (std::string line; std::getline(file, line);) {
@@ -3341,6 +3465,46 @@ void TestJitWaitsForNoGameFrame() {
           "jit unready: refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
               std::to_string(status.output_fps) + " fps, " + std::to_string(exhausted) + "/s ring exhausted)");
     Check(!runtime.ordering_violation && !g_release_violation, "jit unready: calls stayed ordered");
+    presenter.Stop();
+}
+
+// Between the first threaded wait and the game's first threaded end the
+// presenter repeats the last passthrough frame. Its color is still current
+// while the game has released just the new depth image.
+void TestJitDropsReplacedDepthAtStartup() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const XrFrameState state = app->Wait();
+    app->Begin();
+    Check(presenter.Status().threaded, "startup depth: a threaded frame is open");
+    // Allow an in-flight submission to finish before inspecting the next.
+    const auto repeated_depth = [&] {
+        const std::size_t target = runtime.Submissions() + 2;
+        const auto deadline = std::chrono::steady_clock::now() + 1s;
+        while (runtime.Submissions() < target && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(1ms);
+        }
+        std::scoped_lock lock(g_xr_mutex);
+        Check(runtime.submitted_depth.size() >= target && IsAppImage(runtime.submitted_swapchains.back()),
+              "startup depth: the presenter repeats the game's colors while it renders");
+        return static_cast<bool>(runtime.submitted_depth.back());
+    };
+    Check(repeated_depth(), "startup depth: the current depth accompanies its colors");
+    const auto image = (app->image + 1) % 3;
+    presenter.NoteRelease(kDepthChain, image);
+    presenter.CaptureOnRelease(kDepthChain, image);
+    Check(!repeated_depth(), "startup depth: newer depth never accompanies the previous colors");
+    for (auto color : {kLeft, kRight}) {
+        presenter.NoteRelease(color, image);
+        presenter.CaptureOnRelease(color, image);
+    }
+    Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "startup depth: game end");
     presenter.Stop();
 }
 
@@ -7530,6 +7694,39 @@ void TestNoExtrapolationAcrossPauses() {
     }
 }
 
+// Interpolating just in time, a real frame is needed from the refresh after
+// the frame before it, for the frames between them. Not after a pause:
+// nothing is generated across it, so the first frame after it is needed in
+// its own refresh. Needed a refresh after the last frame before the pause,
+// it ended that whole pause late, and counted against the lead.
+void TestInterpolatePauseIsNotLate() {
+    const std::string name = "interpolate pause";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 1000ms, kLightWork);
+    Check(presenter.Status().threaded, name + ": presents from its own thread");
+    // Longer than a pause is at any pace.
+    SleepPrecise(std::chrono::steady_clock::now() + 1200ms);
+    const FrameGenStatus before = presenter.Status();
+    RunWork(*app, 1ms, kLightWork); // the first frame after the pause
+    const FrameGenStatus after = presenter.Status();
+    Check(after.late_cpu == before.late_cpu,
+          name + ": the first frame after it is not late (" + std::to_string(after.late_cpu - before.late_cpu) +
+              " counted)");
+    Check(after.lead_slots <= before.lead_slots,
+          name + ": ...and the lead does not step up (" + std::to_string(before.lead_slots) + " -> " +
+              std::to_string(after.lead_slots) + ")");
+    RunWork(*app, 300ms, kLightWork);
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
 // Passing frames straight through captures nothing (Auto at full rate,
 // Dynamic standing by); the first engaged frame is still captured at its
 // release, so generation starts from captured history.
@@ -9795,16 +9992,46 @@ void TestQuadOutputsResized() {
     const std::size_t first = runtime.Submissions();
     const std::vector<XrSwapchain> old_outputs = runtime.Snapshot().back().swapchains;
     Check(ShowsFrameGenOutputs(runtime.Snapshot().back()), "resized: composing first");
+    std::vector<std::pair<XrSwapchain, XrDuration>> waits;
+    std::size_t destroyed_while_shown = 0;
     {
-        // The new images are not handed back at once: the last frame
-        // written is shown again meanwhile.
+        // The first new eye takes part of the refresh and the second
+        // times out. The presenter must retry that same image next time.
         std::scoped_lock lock(g_xr_mutex);
-        g_wait_timeouts_on_create = 2;
+        g_output_wait = [&](XrSwapchain swapchain, XrDuration timeout) {
+            if (std::find(old_outputs.begin(), old_outputs.end(), swapchain) != old_outputs.end() ||
+                waits.size() >= 3) return XR_SUCCESS;
+            waits.emplace_back(swapchain, timeout);
+            if (waits.size() == 1) SleepPrecise(std::chrono::steady_clock::now() + 2ms);
+            if (waits.size() == 2) return XR_TIMEOUT_EXPIRED;
+            if (waits.size() == 3) {
+                Check(g_images[swapchain].acquired.size() == 1 && g_releases[waits[0].first] == 0,
+                      "resized: the first eye stays waited and neither eye is released or reacquired on timeout");
+            }
+            return XR_SUCCESS;
+        };
+        // An old output destroyed while the runtime's last frame names it.
+        g_output_destroy = [&](XrSwapchain swapchain) {
+            if (std::find(old_outputs.begin(), old_outputs.end(), swapchain) == old_outputs.end() ||
+                runtime.log.empty()) return;
+            const std::vector<XrSwapchain>& last = runtime.log.back().swapchains;
+            destroyed_while_shown += std::find(last.begin(), last.end(), swapchain) != last.end() ? 1 : 0;
+        };
     }
     app.canvas = {1400, 1300};
     app.Run(600ms);
     {
         std::scoped_lock lock(g_xr_mutex);
+        g_output_wait = {};
+        g_output_destroy = {};
+        Check(destroyed_while_shown == 0,
+              "resized: the old outputs are destroyed only once the runtime has a frame showing the new ones (" +
+                  std::to_string(destroyed_while_shown) + " while still shown)");
+        Check(waits.size() == 3 && waits[0].first != waits[1].first && waits[1].first == waits[2].first,
+              "resized: only the timed-out eye is waited again");
+        Check(waits[0].second <= kPeriod && waits[1].second >= 0 && waits[1].second <= kPeriod - 1'000'000 &&
+                  waits[2].second == 0,
+              "resized: the eyes share one refresh of wait time, then the held image is polled");
         Check(g_creates == 4 && g_create_sizes[2].first == 1400 && g_create_sizes[3].second == 1300,
               "resized: each eye's output is made anew once, at the new size (" + std::to_string(g_creates) + " made)");
         Check(std::count(g_destroyed.begin(), g_destroyed.end(), old_outputs[0]) == 1 &&
@@ -9833,6 +10060,126 @@ void TestQuadOutputsResized() {
                                   std::to_string(old_after_new) + ")");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "resized: calls stayed ordered");
+}
+
+// A 2x stereo game can supply a successful analysis between each refusal.
+// Only a complete output write resolves a persistent output failure.
+void TestStereoJitOutputReleasePause() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    presenter.SetRetryPolicy(300ms, 1);
+    app->eye_speed = 0.5;
+    for (int i = 0; i < 12; ++i) app->Frame();
+    const auto warm = runtime.Snapshot();
+    const auto generated = std::find_if(warm.rbegin(), warm.rend(), [](const Submission& entry) {
+        return entry.swapchains.size() == 2 && !IsAppImage(entry.swapchains);
+    });
+    Check(generated != warm.rend(), "stereo JIT release: generated a complete pair first");
+    for (const bool persistent : {false, true}) {
+        const auto before = presenter.Status();
+        RefusedOutputRelease fault{runtime, generated->swapchains[1], persistent ? 100000 : 2};
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = [&](XrSwapchain chain) {
+                const XrResult released = fault(chain);
+                if (XR_FAILED(released)) gpu.hold_outputs = true;
+                return released;
+            };
+        }
+        const unsigned strikes = persistent ? 3 : 2;
+        for (unsigned strike = 1; strike <= strikes; ++strike) {
+            gpu.hold_outputs = false;
+            for (int i = 0; i < 12 && presenter.Status().failures < before.failures + strike; ++i) app->Frame();
+            const auto status = presenter.Status();
+            Check(status.failures == before.failures + strike, "stereo JIT release: one failure per refusal");
+            if (strike == 3) {
+                Check(status.state == FrameGenState::kPaused && status.retry_pending,
+                      "stereo JIT release: the third refusal pauses despite a successful analysis between refusals");
+            } else {
+                Check(status.state == FrameGenState::kActive, "stereo JIT release: one or two refusals stay active");
+                const int analyzed = gpu.analyzes;
+                for (int i = 0; i < 12 && gpu.analyzes == analyzed; ++i) app->Frame();
+                Check(gpu.analyzes > analyzed, "stereo JIT release: another game frame analyzed while release is pending");
+            }
+        }
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            fault.remaining = 0;
+        }
+        gpu.hold_outputs = false;
+        for (int i = 0; i < 120; ++i) {
+            app->Frame();
+            std::scoped_lock lock(g_xr_mutex);
+            const auto& entry = runtime.log.back();
+            if (fault.recovered && entry.swapchains == generated->swapchains &&
+                entry.releases[1] > fault.prior_releases + 1) break;
+        }
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = {};
+            fault.CheckSubmissions();
+        }
+        Check(presenter.Status().state == FrameGenState::kActive && presenter.Status().threaded,
+              "stereo JIT release: generation recovered on the same outputs");
+    }
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation && runtime.mismatched_images == 0,
+          "stereo JIT release: calls stayed ordered and every eye image matches its submitted pose");
+}
+
+// The first eye's new image is already the one visible to xrEndFrame
+// when the second release fails on the same outputs used last refresh.
+void TestJitOutputReleaseRefusal() {
+    for (bool persistent : {false, true}) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        presenter.SetQuadDecline(300ms, 300ms);
+        QuadApp app(presenter, runtime);
+        for (int i = 0; i < 3; ++i) app.Frame();
+        app.Run(400ms);
+        const auto last = runtime.Snapshot().back();
+        Check(ShowsFrameGenOutputs(last), "JIT release: presented a complete pair before the refusal");
+        RefusedOutputRelease fault{runtime, last.swapchains[1], persistent ? 100000 : 2};
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = std::ref(fault);
+        }
+        if (persistent) {
+            app.Run(2000ms, 4000us, [&] {
+                const auto status = presenter.Status();
+                return status.quad_declining && !status.threaded;
+            });
+            const auto status = presenter.Status();
+            Check(status.quad_declining && !status.threaded, "JIT release: repeated refusal returns quad views to the layer");
+            std::scoped_lock lock(g_xr_mutex);
+            Check(!fault.recovered && fault.attempts >= 10, "JIT release: the stopped run still owns the refused image");
+            fault.remaining = 0;
+        }
+        // Also exercise recovery across a stopped compositor whose cleanup
+        // was refused. Wait for a complete new pair to reach the runtime.
+        app.Run(2000ms, 4000us, [&] {
+            std::scoped_lock lock(g_xr_mutex);
+            const auto& entry = runtime.log.back();
+            return fault.recovered && entry.swapchains == last.swapchains && entry.releases[1] > fault.prior_releases + 1;
+        });
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            g_output_release = {};
+            fault.CheckSubmissions();
+        }
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation && runtime.mismatched_images == 0 &&
+                  runtime.not_stereo == 0 && !runtime.used_destroyed,
+              "JIT release: calls stayed ordered and both eyes show the images written for their poses");
+    }
 }
 
 // Frames the layer composes one after another (the claim finds every frame
@@ -11824,6 +12171,81 @@ void TestRuntimeHalvingRecovers() {
     }
 }
 
+// A runtime already at half rate when Dynamic engages (Frame Generation was
+// off while the game ran below the refresh rate: Pimax Play's Smart Smoothing,
+// 2026-11-20), and slow to return: full rate only after 120 frames in a row
+// on time, about 2.7 s at half rate, longer than the halving window. The game
+// (2.6 refreshes a frame) is late at half rate too, so standing by never gets
+// it back. Without a push Dynamic stands down a second after engaging and
+// the runtime stays at half rate; pushing through for 4 s
+// (VECTORXR_FRAMEGEN_HALVING_PUSH), it returns, the report clears, and Dynamic
+// stays engaged at every refresh.
+void TestRuntimeHalvingPush() {
+    for (const bool push : {false, true}) {
+        const std::string name = push ? "halving push" : "halving, no push";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.throttle = Runtime::Throttle::kPeriod;
+        SessionLog log(push ? "halving-push" : "halving-no-push");
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kDynamic, app, owned, log.logger.get());
+        presenter.SetHalvingPush(push ? 4000ms : 0ms);
+        // At full rate first, the game holding it: standing by.
+        RunWork(*app, 600ms, kLightWork);
+        Check(presenter.Status().standby, name + ": a game holding the refresh rate stands by");
+        // Turned off; the game slows, and the runtime drops to half rate and
+        // stays there for it.
+        Check(!presenter.Toggle(), name + ": turned off");
+        const auto work = PeriodsOfWork(kPeriod, 2.6);
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            runtime.throttle_on_after = 5;
+            runtime.throttle_off_after = 120;
+            runtime.throttled = true;
+        }
+        RunWork(*app, 1500ms, work);
+        Check(presenter.Toggle(), name + ": turned on again");
+        RunWork(*app, 4000ms, work, [&](const XrFrameState&) { return Engaged(presenter); });
+        Check(Engaged(presenter), name + ": Dynamic engages for the game at a third of the refresh rate");
+        RunWork(*app, 6000ms, work, [&](const XrFrameState&) {
+            return push ? !runtime.throttled && !presenter.Status().runtime_halving : presenter.Status().standby;
+        });
+        if (!push) {
+            RunWork(*app, 1500ms, work);
+            const FrameGenStatus status = presenter.Status();
+            if (std::getenv("FG_TEST_STATS")) {
+                std::cerr << name << ": throttled " << runtime.throttled << ", switches " << runtime.ThrottleSwitches()
+                          << ", stand-downs " << status.dynamic_stand_downs << "\n";
+            }
+            Check(status.standby && status.dynamic_stand_downs >= 1 && runtime.throttled &&
+                      status.dynamic_reason == kHalvingStandDown,
+                  name + ": Dynamic stands down and the runtime stays at half rate (" + status.dynamic_reason + ")");
+            Check(log.Lines("keeps presenting at full rate").empty(), name + ": no push logged");
+        } else {
+            RunWork(*app, 1500ms, work);
+            const double output = SubmissionRate(*app, 800ms, work);
+            const FrameGenStatus status = presenter.Status();
+            const double refresh = 1e9 / static_cast<double>(kPeriod);
+            if (std::getenv("FG_TEST_STATS")) {
+                std::cerr << name << ": throttled " << runtime.throttled << ", switches " << runtime.ThrottleSwitches()
+                          << ", stand-downs " << status.dynamic_stand_downs << ", output " << output << "\n";
+            }
+            Check(!runtime.throttled && Engaged(presenter) && status.dynamic_stand_downs == 0 &&
+                      !status.runtime_halving,
+                  name + ": the runtime returns to full rate and Dynamic stays engaged (" + status.dynamic_reason +
+                      ", " + std::to_string(status.dynamic_stand_downs) + " stand-downs)");
+            Check(output > 0.85 * refresh, name + ": every refresh gets a frame (" + std::to_string(output) + " fps)");
+            Check(log.Lines("keeps presenting at full rate for up to 4 s").size() == 1 &&
+                      log.Lines("the runtime returned to full rate").size() == 1,
+                  name + ": the push and the return are logged once each");
+        }
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // Nothing is reported against a runtime giving every refresh: engaged at 72,
 // 90 and 120 Hz with a game at its own rate below the refresh rate, or at a
 // third of it; with a third of the presenter's waits missing a refresh; with
@@ -12319,8 +12741,9 @@ void TestAutoHalvingHoldRunsOut() {
     });
     const auto stood_down = std::chrono::steady_clock::now();
     FrameGenStatus status = presenter.Status();
-    Check(status.runtime_halving && status.full_rate && status.multiplier == 1,
-          name + ": reported, Auto goes back to full rate (" + std::to_string(status.multiplier) + "x)");
+    Check(status.runtime_halving && status.full_rate && status.multiplier == 1 && status.halving_retry_s > 0.0,
+          name + ": reported, Auto goes back to full rate with retry countdown (" +
+              std::to_string(status.multiplier) + "x, retry=" + std::to_string(status.halving_retry_s) + "s)");
     runtime.throttled = false;
     bool engaged = false;
     bool cleared = false;
@@ -12727,6 +13150,43 @@ void TestEchoRuntimeClearsHalving() {
     Check(!status.runtime_halving && took < 2.0 && status.standby && presenter.OsdDetailText() != kHalvingDetail,
           name + ": the slow game's waits clear it (" + std::to_string(took) + " s; " + presenter.OsdDetailText() +
               ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// That runtime with Auto at full rate: a game at about 51 fps passes its
+// frames through, asks for each wait late, and is told its own interval as
+// the period, two refreshes, the runtime holding nothing. Judged against
+// that period its frames would never read as late and Auto would stay at
+// full rate; judged against the refresh period, Auto steps up for it.
+// Nothing is reported as halving.
+void TestAutoStepsUpOnEchoRuntime() {
+    const std::string name = "auto steps up on an echo runtime";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.echo = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kAuto, app, owned, nullptr);
+    // No probing down: only the step up is judged.
+    presenter.SetAutoPolicy(200ms, 30s, 600ms, 300ms);
+    // The refresh period is learned at full refresh first.
+    RunWork(*app, 600ms, kLightWork);
+    Check(presenter.Status().multiplier == 1 && !presenter.Status().threaded,
+          name + ": a game holding the refresh rate stays at full rate");
+    const int echoed = runtime.echoed_multiples;
+    const auto work = PeriodsOfWork(kPeriod, 1.75); // 19.4 ms of work: about 51 fps
+    RunWork(*app, 3000ms, work, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        return now.multiplier >= 2 && now.threaded;
+    });
+    const int multiples = runtime.echoed_multiples - echoed;
+    const FrameGenStatus status = presenter.Status();
+    Check(multiples >= 8, name + ": the runtime reported the game's own interval as the period (" +
+                              std::to_string(multiples) + " waits)");
+    Check(status.multiplier >= 2 && status.threaded && !status.runtime_halving,
+          name + ": the game below the refresh rate steps Auto up (" + std::to_string(status.multiplier) + "x)");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
@@ -13582,6 +14042,810 @@ void TestAutoProbeAllowsLatencyAndShortHitch() {
     }
 }
 
+// The "automatic multiplier" lines a session logged, for a failing check.
+std::string AutoLines(SessionLog& log) {
+    std::string said;
+    for (const std::string& line : log.Lines("Frame Generation")) {
+        if (line.find("automatic multiplier") != std::string::npos || line.find("Frame Generation engaged") != std::string::npos) {
+            said += " | " + line.substr(line.find("Frame Generation"));
+        }
+    }
+    return said;
+}
+
+// Turning Frame Generation off and on is how a user asks Auto for a fresh
+// look (Star Citizen, 2026-11-21: three presses 14 s after a step to 4x each
+// engaged again at 4x, the 80 s back-off still running). Auto starts over as
+// at session start: full rate, then the multiplier the game needs now, with
+// the first back-off before its first probe.
+void TestAutoToggleStartsFresh() {
+    const std::string name = "auto toggle";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    SessionLog log("auto-toggle");
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kAuto, app, runtime, owned,
+             log.logger.get());
+    presenter.SetAutoPolicy(300ms, 500ms, 600ms, 300ms);
+    // Probes by the back-off alone, so the back-off's reset shows: with the
+    // game's measured work taken into account, full rate that failed is not
+    // probed again at the same work.
+    FrameGenAutoRules rules;
+    rules.reach = false;
+    rules.swapchain_settle = 0ms; // the test starts where a session's swapchains were just made
+    presenter.SetAutoRules(rules);
+    // 1.1 refreshes of work a frame: 2x, within reach of full rate (0.94),
+    // where a paced runtime holds it to two refreshes a frame. Every probe
+    // fails, and the back-off doubles to its longest (2.4 s).
+    const auto fails_probes = PeriodsOfWork(kPeriod, 1.1);
+    RunWork(*app, 6000ms, fails_probes);
+    const std::uint32_t engaged = presenter.Status().multiplier;
+    // A heavy scene: up to 4x.
+    RunWork(*app, 8000ms, PeriodsOfWork(kPeriod, 4.0), [&](const XrFrameState&) {
+        return presenter.Status().multiplier == 4 && presenter.Status().threaded;
+    });
+    const std::uint32_t climbed = presenter.Status().multiplier;
+    Check(!presenter.Toggle(), name + ": turned off");
+    RunWork(*app, 300ms, kLightWork);
+    Check(!presenter.Status().threaded, name + ": turned off, frames pass straight through");
+    Check(presenter.Toggle(), name + ": turned on");
+    const std::uint32_t fresh = presenter.Status().multiplier;
+    // The game as it was before the heavy scene: 2x again, never above it,
+    // and probed as soon as a fresh back-off allows (settle, steady and 0.3 s,
+    // not the 2.4 s the failed probes had left).
+    std::uint32_t highest = 0;
+    std::optional<TimePoint> at_2x;
+    double probed_after = -1.0;
+    RunWork(*app, 5000ms, fails_probes, [&](const XrFrameState&) {
+        const std::uint32_t multiplier = presenter.Status().multiplier;
+        const auto now = std::chrono::steady_clock::now();
+        highest = std::max(highest, multiplier);
+        if (!at_2x && multiplier == 2) at_2x = now;
+        if (at_2x && multiplier == 1) {
+            probed_after = Seconds(now - *at_2x);
+            return true;
+        }
+        return false;
+    });
+    presenter.Stop();
+    const std::string said = AutoLines(log);
+    if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": probed after " << probed_after << " s" << said << "\n";
+    Check(engaged == 2 && climbed == 4,
+          name + ": the game engaged at 2x and a heavy scene took it to 4x (" + std::to_string(engaged) + "x, " +
+              std::to_string(climbed) + "x" + said + ")");
+    Check(fresh == 1, name + ": turned on again, Auto is back at full rate (" + std::to_string(fresh) + "x)");
+    Check(at_2x && highest == 2,
+          name + ": it engages at the multiplier the game needs now, not the one from before (" +
+              std::to_string(highest) + "x at the highest" + said + ")");
+    Check(probed_after > 0.0 && probed_after < 1.9,
+          name + ": and probes after the first back-off, not the one failed probes had left (" +
+              std::to_string(probed_after) + " s" + said + ")");
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// A game on Frame rate "Auto" against a paced runtime, presenting just in
+// time, with a log of its own.
+struct AutoGame {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    SessionLog log;
+    std::unique_ptr<App> owned;
+    App* app{nullptr};
+
+    AutoGame(const std::string& log_name, const FrameGenAutoRules& rules,
+             FrameGenSynthesisMode mode = FrameGenSynthesisMode::kInterpolate)
+        : log(log_name) {
+        runtime.paced = true;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kAuto, app, runtime, owned, log.logger.get());
+        presenter.SetAutoRules(rules);
+        // As in a session: Auto judges the game's frames once its swapchains
+        // have been there a while, not the frames right after they were made.
+        presenter.SetEngagementPolicy(3, 2500ms);
+    }
+    std::uint32_t Multiplier() { return presenter.Status().multiplier; }
+};
+
+// As RunWork, ending each frame with its projection layer or with no layer
+// at all (a loading screen, a menu).
+int RunGame(App& app, std::chrono::milliseconds duration, const std::vector<std::chrono::microseconds>& work,
+            bool layers, const std::function<bool(const XrFrameState&)>& each = {}) {
+    const auto start = std::chrono::steady_clock::now();
+    int frames = 0;
+    while (std::chrono::steady_clock::now() - start < duration) {
+        const XrFrameState state = app.Wait();
+        app.Begin();
+        SleepPrecise(std::chrono::steady_clock::now() + work[static_cast<std::size_t>(frames) % work.size()]);
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime, layers)), "game: end");
+        ++frames;
+        if (each && each(state)) break;
+    }
+    return frames;
+}
+
+// Frames that say nothing about the game's load stay out of Auto's cadence
+// (Star Citizen, 2026-11-21: four switches to theater mode and back, quads
+// only for 5 to 25 s each, cost a step to 3x and 80 s at 24 fps each): a
+// stretch of frames without a projection layer, late at 2x, does not step
+// Auto up, and the game returning from it keeps the multiplier it had. Nor
+// do the first frame after a pause, or frames late while the game makes
+// swapchains. With the rule off each steps up as before.
+void TestAutoCadenceLeavesOutUnrelatedFrames() {
+    const XrSwapchain extra = reinterpret_cast<XrSwapchain>(0x7717);
+    struct Scenario {
+        const char* name;
+        std::vector<std::chrono::microseconds> work; // the stretch's frames
+        bool layers;
+        int swapchain_every; // frames between swapchains made (0: none)
+    };
+    const std::vector<Scenario> scenarios = {
+        // Over three refreshes of work a frame: late at 2x.
+        {"no projection layer", PeriodsOfWork(kPeriod, 3.4), false, 0},
+        // A pause is 250 ms or longer here; three a second, the frames
+        // between on time.
+        {"pauses", {256ms, 2ms, 2ms}, true, 0},
+        // Two frames of 150 ms (no pause) as each swapchain is made.
+        {"swapchains", {150ms, 150ms, 2ms, 2ms}, true, 4},
+    };
+    for (const Scenario& scenario : scenarios) {
+        for (const bool filter : {true, false}) {
+            const std::string name =
+                std::string("auto cadence, ") + scenario.name + (filter ? "" : ", rule off");
+            FrameGenAutoRules rules = AutoRulesOff();
+            rules.cadence_filter = filter;
+            AutoGame game("auto-cadence", rules);
+            // No probe down by itself within the test.
+            game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 30s);
+            game.presenter.SetSummaryInterval(500ms);
+            const auto holds_2x = PeriodsOfWork(kPeriod, 1.6);
+            RunWork(*game.app, 5000ms, holds_2x);
+            const std::uint32_t engaged = game.Multiplier();
+            std::uint32_t highest = engaged;
+            int frames = 0;
+            RunGame(*game.app, 3000ms, scenario.work, scenario.layers, [&](const XrFrameState&) {
+                highest = std::max(highest, game.Multiplier());
+                if (scenario.swapchain_every && ++frames % scenario.swapchain_every == 0) {
+                    game.presenter.TrackSwapchain(extra, kFormat, 1, kAppUsage);
+                }
+                return false;
+            });
+            // Back in the scene it left.
+            std::uint32_t highest_after = game.Multiplier();
+            RunWork(*game.app, 1500ms, holds_2x, [&](const XrFrameState&) {
+                highest_after = std::max(highest_after, game.Multiplier());
+                return false;
+            });
+            const FrameGenStatus status = game.presenter.Status();
+            game.presenter.Stop();
+            const std::string said = AutoLines(game.log);
+            const std::string left = std::to_string(status.auto_left_no_projection) + "/" +
+                                     std::to_string(status.auto_left_pause) + "/" +
+                                     std::to_string(status.auto_left_swapchain);
+            if (std::getenv("FG_TEST_STATS")) {
+                std::cerr << name << ": highest " << highest << "x, then " << highest_after << "x, left out " << left
+                          << said << "\n";
+            }
+            Check(engaged == 2, name + ": the game engages at 2x (" + std::to_string(engaged) + "x" + said + ")");
+            if (filter) {
+                Check(highest == 2 && highest_after == 2,
+                      name + ": the stretch does not step Auto up, and it resumes at the multiplier it had (" +
+                          std::to_string(highest) + "x, then " + std::to_string(highest_after) + "x" + said + ")");
+                const std::uint64_t counted = !scenario.layers          ? status.auto_left_no_projection
+                                              : scenario.swapchain_every ? status.auto_left_swapchain
+                                                                         : status.auto_left_pause;
+                Check(counted >= 5, name + ": its frames are counted as left out (" + left + ")");
+                // The 30 s line says how many, by reason.
+                bool summarized = false;
+                for (const std::string& line : game.log.Lines("Frame Generation: multiplier=")) {
+                    const std::size_t at = line.find(", autoLeftOut=");
+                    if (at == std::string::npos) continue;
+                    const std::string counts = line.substr(at + 14, line.find_first_of(",.", at + 14) - at - 14);
+                    summarized = summarized || counts != "0/0/0";
+                }
+                Check(summarized, name + ": the summary counts them");
+                if (!scenario.layers) {
+                    Check(!game.log.Lines(", noProjection=").empty() &&
+                              std::any_of(game.log.Lines(", noProjection=").begin(), game.log.Lines(", noProjection=").end(),
+                                          [](const std::string& line) {
+                                              return line.find(", noProjection=0,") == std::string::npos;
+                                          }),
+                          name + ": and the frames without a projection layer");
+                }
+            } else {
+                Check(highest >= 3,
+                      name + ": every frame counted, the stretch steps Auto up (" + std::to_string(highest) + "x" +
+                          said + ")");
+                Check(status.auto_left_no_projection + status.auto_left_pause + status.auto_left_swapchain == 0,
+                      name + ": nothing is left out (" + left + ")");
+            }
+            Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+        }
+    }
+}
+
+// Auto's judgements about the game's rate, quick: below the refresh rate
+// 0.6 s engages, after a 0.25 s settle.
+FrameGenDynamicPolicy QuickAutoRate() {
+    FrameGenDynamicPolicy policy;
+    policy.engage_after = 600ms;
+    policy.settle = 250ms;
+    return policy;
+}
+
+// Auto stood by while the game ran below the refresh rate without any frame
+// taking over 1.25 refreshes (Star Citizen at 53 to 67 fps on a 72 Hz
+// headset, 2026-11-21: six minutes with 30 s of generated frames, the log
+// saying "the application holds full refresh"). It engages below 90% of the
+// refresh rate as Dynamic does: a game at 86% (one frame in six takes two
+// refreshes, 17% late) gets 2x. With the rule off it stands by as before,
+// and the log no longer says it holds full refresh.
+void TestAutoEngagesBelowRefresh() {
+    struct Scenario {
+        const char* name;
+        std::vector<int> ticks;
+        bool engage_below;
+    };
+    const std::vector<Scenario> scenarios = {
+        {"86% of the refresh rate", {1, 1, 1, 1, 1, 2}, true},
+        {"86% of the refresh rate, rule off", {1, 1, 1, 1, 1, 2}, false},
+        {"the refresh rate", {1}, true},
+    };
+    for (const Scenario& scenario : scenarios) {
+        const std::string name = std::string("auto below refresh, ") + scenario.name;
+        FrameGenAutoRules rules = AutoRulesOff();
+        rules.engage_below = scenario.engage_below;
+        AutoGame game("auto-below", rules);
+        game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 30s);
+        game.presenter.SetDynamicPolicy(QuickAutoRate());
+        // Standing by begins once the game's rate is known (and its
+        // swapchains have been there a while, as for every AutoGame).
+        std::uint32_t highest = 0;
+        std::optional<TimePoint> engaged;
+        const auto started = std::chrono::steady_clock::now();
+        // The status file's threshold at full rate: 90% of the refresh rate
+        // with the rule, 80% (frames of 1.25 refreshes) without.
+        game.app->Frame();
+        const FrameGenStatus first = game.presenter.Status();
+        const double grid_hz = first.grid_period_ns > 0 ? 1e9 / static_cast<double>(first.grid_period_ns) : 0.0;
+        Check(std::abs(first.auto_step_up_below_fps - grid_hz * (scenario.engage_below ? 0.9 : 0.8)) < 0.01,
+              name + ": at full rate the status says it steps up below " +
+                  std::to_string(first.auto_step_up_below_fps) + " fps");
+        // A frame of one refresh does 4 ms of work, not the refresh less
+        // 3 ms (RunTicks): on a loaded machine (a CI runner) those came in
+        // late too, over 30% of frames in all, and Auto engaged for lateness
+        // before the game's rate was judged. Only the frame of two refreshes
+        // is late.
+        std::vector<std::chrono::microseconds> work;
+        for (const int tick : scenario.ticks) {
+            work.push_back(tick == 1 ? std::chrono::microseconds(4ms)
+                                     : std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::nanoseconds(tick * game.app->runtime.period)) -
+                                           3ms);
+        }
+        RunWork(*game.app, 6000ms, work, [&](const XrFrameState&) {
+            const std::uint32_t multiplier = game.Multiplier();
+            highest = std::max(highest, multiplier);
+            if (!engaged && multiplier >= 2) engaged = std::chrono::steady_clock::now();
+            return false;
+        });
+        const FrameGenStatus status = game.presenter.Status();
+        game.presenter.Stop();
+        const std::string said = AutoLines(game.log);
+        const bool slow = scenario.ticks.size() > 1;
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": highest " << highest << "x"
+                      << (engaged ? " after " + std::to_string(Seconds(*engaged - started)) + " s" : std::string()) << said
+                      << "\n";
+            for (const std::string& line : game.log.Lines("standing by")) std::cerr << "  " << line << "\n";
+        }
+        if (slow && scenario.engage_below) {
+            Check(highest == 2 && status.multiplier == 2 && status.threaded,
+                  name + ": Auto engages at 2x and stays (" + std::to_string(highest) + "x" + said + ")");
+            Check(game.log.Lines("the game ran at").size() == 1 && game.log.Lines("% of frames late").empty(),
+                  name + ": the log says the game's rate was why" + said);
+        } else {
+            Check(highest == 1, name + ": Auto stands by (" + std::to_string(highest) + "x" + said + ")");
+        }
+        // "holds full refresh" only for a game that does.
+        const std::size_t holds = game.log.Lines("the application holds full refresh").size();
+        const std::size_t runs = game.log.Lines("standing by: the application runs at").size();
+        Check(slow ? holds == 0 : holds >= 1 && runs == 0,
+              name + ": the stand-by line says what the game does (" + std::to_string(holds) + " hold, " +
+                  std::to_string(runs) + " run at)");
+        if (slow && !scenario.engage_below) {
+            Check(runs >= 1, name + ": standing by below the refresh rate, the log gives the game's rate");
+        }
+        Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// As RunTicks while Auto is at full rate (each frame takes ticks[i % size]
+// refreshes against the paced runtime); held at a multiplier the game has
+// room to spare and its frames take `held` each, evenly.
+int RunTicksAtFullRate(AutoGame& game, std::chrono::milliseconds duration, const std::vector<int>& ticks,
+                       std::chrono::microseconds held, const std::function<bool(const XrFrameState&)>& each = {}) {
+    const auto start = std::chrono::steady_clock::now();
+    int frames = 0;
+    while (std::chrono::steady_clock::now() - start < duration) {
+        const XrFrameState state = game.app->Wait();
+        game.app->Begin();
+        const int tick = ticks[static_cast<std::size_t>(frames) % ticks.size()];
+        const auto work = game.Multiplier() >= 2
+                              ? held
+                              : std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::nanoseconds(tick * game.runtime.period)) -
+                                    3ms;
+        SleepPrecise(std::chrono::steady_clock::now() + work);
+        game.app->Release();
+        Check(XR_SUCCEEDED(game.app->End(state.predictedDisplayTime)), "ticks at full rate: end");
+        ++frames;
+        if (each && each(state)) break;
+    }
+    return frames;
+}
+
+// Frames stalled around a swapchain change are not the game's rate either: a
+// game below the refresh rate while it makes a swapchain every second (a
+// switch of modes, its swapchains made over a few seconds) is not engaged for
+// while that lasts. One that keeps at it past swapchain_churn_max is judged as
+// any game: making swapchains is then how it runs, not a switch.
+void TestAutoRateWaitsForSwapchains() {
+    const std::string name = "auto below refresh, swapchains being made";
+    const XrSwapchain extra = reinterpret_cast<XrSwapchain>(0x7718);
+    FrameGenAutoRules rules = AutoRulesOff();
+    rules.cadence_filter = true;
+    rules.engage_below = true;
+    rules.swapchain_churn_max = 6000ms;
+    AutoGame game("auto-below-swapchains", rules);
+    game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 30s);
+    game.presenter.SetDynamicPolicy(QuickAutoRate());
+    const auto started = std::chrono::steady_clock::now();
+    auto made = started;
+    std::optional<TimePoint> engaged;
+    // 86% of the refresh rate throughout, a swapchain every 900 ms.
+    RunTicks(*game.app, 11000ms, {1, 1, 1, 1, 1, 2}, [&](const XrFrameState&) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - made >= 900ms) {
+            made = now;
+            game.presenter.TrackSwapchain(extra, kFormat, 1, kAppUsage);
+        }
+        if (!engaged && game.Multiplier() >= 2) engaged = now;
+        return engaged.has_value();
+    });
+    game.presenter.Stop();
+    const std::string said = AutoLines(game.log);
+    const std::string when = engaged ? std::to_string(Seconds(*engaged - started)) + " s" : std::string("never");
+    if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": engaged after " << when << said << std::endl;
+    Check(engaged && Seconds(*engaged - started) > 5.0,
+          name + ": not engaged while the swapchains are a switch of modes (" + when + said + ")");
+    Check(engaged && Seconds(*engaged - started) < 10.5,
+          name + ": engaged once making them is how the game runs (" + when + said + ")");
+    Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// A profile's lowest rate for Auto (autoLowestRate "2x"; spinfusor_,
+// 2026-11-21: "FG turns off too soon (when the game frame rate is 65) but it
+// causes stutter"): a game that holds the refresh rate by itself is engaged
+// at 2x all the same, at once, and never probed back to full rate, with every
+// rule on and probes due within the second. Without it the same game stands
+// by. Turned off while it runs, Auto probes full rate as before and holds.
+void TestAutoLowestRate() {
+    for (const bool lowest : {true, false}) {
+        const std::string name = std::string("auto lowest rate") + (lowest ? "" : ", off");
+        AutoGame game("auto-lowest", FrameGenAutoRules{});
+        game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 800ms);
+        game.presenter.SetDynamicPolicy(QuickAutoRate());
+        FrameGenResolvedSettings settings;
+        settings.enabled = true;
+        settings.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+        settings.multiplier = FrameGenMultiplier::kAuto;
+        settings.auto_lowest_multiplier = lowest ? 2 : 1;
+        game.presenter.Configure(settings);
+        std::uint32_t highest = 0;
+        std::optional<TimePoint> engaged;
+        int at_full_rate_after = 0;
+        const auto started = std::chrono::steady_clock::now();
+        RunTicksAtFullRate(game, 7000ms, {1}, 4ms, [&](const XrFrameState&) {
+            const std::uint32_t multiplier = game.Multiplier();
+            highest = std::max(highest, multiplier);
+            if (!engaged && multiplier >= 2) engaged = std::chrono::steady_clock::now();
+            if (engaged && multiplier < 2) ++at_full_rate_after;
+            return false;
+        });
+        const FrameGenStatus status = game.presenter.Status();
+        const std::string ran = std::to_string(highest) + "x" +
+                                (engaged ? " after " + std::to_string(Seconds(*engaged - started)) + " s" : std::string()) +
+                                ", " + std::to_string(at_full_rate_after) + " frames at full rate after";
+        if (!lowest) {
+            game.presenter.Stop();
+            if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": " << ran << AutoLines(game.log) << std::endl;
+            Check(highest == 1, name + ": a game holding the refresh rate stands by (" + ran + AutoLines(game.log) + ")");
+            continue;
+        }
+        // Turned off in the app while the game runs: full rate is probed, and
+        // holds (a second and a half there is past a probe's confirmation).
+        settings.auto_lowest_multiplier = 1;
+        game.presenter.Configure(settings);
+        std::optional<TimePoint> at_full_rate;
+        bool full_rate = false;
+        RunTicksAtFullRate(game, 12000ms, {1}, 4ms, [&](const XrFrameState&) {
+            const auto now = std::chrono::steady_clock::now();
+            if (game.Multiplier() >= 2) {
+                at_full_rate.reset();
+            } else if (!at_full_rate) {
+                at_full_rate = now;
+            }
+            full_rate = at_full_rate && Seconds(now - *at_full_rate) >= 1.5;
+            return full_rate;
+        });
+        game.presenter.Stop();
+        const std::string said = AutoLines(game.log);
+        if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": " << ran << said << std::endl;
+        Check(engaged && Seconds(*engaged - started) < 5.0 && highest == 2 && status.multiplier == 2,
+              name + ": a game holding the refresh rate is engaged at 2x (" + ran + said + ")");
+        Check(at_full_rate_after == 0, name + ": and never goes back to full rate (" + ran + said + ")");
+        Check(game.log.Lines("(the profile's lowest rate)").size() == 1, name + ": the log says why" + said);
+        Check(status.auto_step_down_above_fps == 0.0,
+              name + ": the status gives no rate to step down above (" +
+                  std::to_string(status.auto_step_down_above_fps) + ")");
+        Check(full_rate && !game.log.Lines("stays at full rate: the probe held").empty(),
+              name + ": turned off, Auto probes full rate and stays" + said);
+        Check(!game.log.Lines("lowest rate off").empty(), name + ": and the log says it was turned off" + said);
+        Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// A game hovering at the threshold (89% and 92% of the refresh rate by
+// turns at full rate; held at 2x it has room to spare and runs evenly)
+// engages once and stays engaged: a probe at full rate holds only
+// above 95%, so each fails and the next waits longer. Without that margin a
+// probe would hold through a 92% turn, the back-off would start over, and
+// the next 89% turn would engage again (Star Citizen, 2026-11-21, 07:57 to
+// 08:03: 2x for 10 to 80 s at a time with 6 to 21 s standing by between).
+//
+// With the game's measured work taken into account as well, the first
+// engagement already shows full rate does not hold at that work: it is not
+// probed at all while the work stays what it was.
+void AutoHovers(bool reach) {
+    const std::string name = std::string("auto hovering at the threshold") + (reach ? "" : ", by the margin alone");
+    FrameGenAutoRules rules;
+    rules.reach = reach;
+    AutoGame game("auto-hover", rules);
+    game.presenter.SetAutoPolicy(300ms, 500ms, 1500ms, 1500ms);
+    game.presenter.SetDynamicPolicy(QuickAutoRate());
+    std::optional<TimePoint> engaged;
+    std::uint32_t last = 1;
+    int probes = 0;
+    TimePoint at_full_rate_since{};
+    double full_rate_s = 0.0;
+    const auto each = [&](const XrFrameState&) {
+        const auto now = std::chrono::steady_clock::now();
+        const std::uint32_t multiplier = game.Multiplier();
+        if (!engaged && multiplier >= 2) engaged = now;
+        if (engaged && multiplier == 1 && last >= 2) {
+            ++probes;
+            at_full_rate_since = now;
+        }
+        if (engaged && multiplier >= 2 && last == 1 && at_full_rate_since != TimePoint{}) {
+            full_rate_s += Seconds(now - at_full_rate_since);
+        }
+        last = multiplier;
+        return false;
+    };
+    const auto started = std::chrono::steady_clock::now();
+    for (int turn = 0; turn < 6; ++turn) {
+        RunTicksAtFullRate(game, 1500ms, {1, 1, 1, 1, 1, 1, 1, 2}, 4ms, each);             // 89%
+        RunTicksAtFullRate(game, 1500ms, {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2}, 4ms, each); // 92%
+    }
+    // A probe under way as the turns end fails as the others did.
+    RunTicksAtFullRate(game, 3000ms, {1, 1, 1, 1, 1, 1, 1, 2}, 4ms, [&](const XrFrameState& state) {
+        each(state);
+        return game.Multiplier() == 2;
+    });
+    const double ran = Seconds(std::chrono::steady_clock::now() - started);
+    const std::uint32_t ended = game.Multiplier();
+    game.presenter.Stop();
+    const std::string said = AutoLines(game.log);
+    if (std::getenv("FG_TEST_STATS")) {
+        std::cerr << name << ": " << probes << " probes, " << full_rate_s << " s of " << ran
+                  << " s at full rate after engaging" << said << "\n";
+    }
+    Check(engaged && Seconds(*engaged - started) < 8.0 && ended == 2,
+          name + ": it engages at 2x (" + std::to_string(ended) + "x" + said + ")");
+    // Every return to 2x after the first is a failed probe's (its line names
+    // the longer wait): none held, so the back-off never started over.
+    const std::vector<std::string> ups = game.log.Lines("automatic multiplier full rate -> 2x");
+    const auto failed = std::count_if(ups.begin(), ups.end(), [](const std::string& line) {
+        return line.find("next probe in") != std::string::npos;
+    });
+    Check(!ups.empty() && failed == static_cast<std::ptrdiff_t>(ups.size()) - 1 &&
+              game.log.Lines("stays at full rate").empty(),
+          name + ": no probe at full rate holds (" + std::to_string(ups.size()) + " engagements, " +
+              std::to_string(failed) + " of them failed probes" + said + ")");
+    if (reach) {
+        // No probe after the engagement showed it; one at most where a frame
+        // of the test's own (a busy machine) had the engagement put down to
+        // a hitch, and the probe then showed it.
+        Check(probes <= 1 && game.log.Lines("stays at 2x: full rate did not hold").size() == 1,
+              name + ": full rate is not probed while the game's work is what it engaged at (" +
+                  std::to_string(probes) + " probes" + said + ")");
+    } else {
+        Check(probes >= 1 && probes <= 4 && full_rate_s < 0.3 * ran,
+              name + ": it stays engaged (" + std::to_string(probes) + " probes, " + std::to_string(full_rate_s) +
+                  " s at full rate" + said + ")");
+    }
+    Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+void TestAutoHoversByMarginAlone() {
+    AutoHovers(false);
+}
+
+void TestAutoHoversWithoutFlapping() {
+    AutoHovers(true);
+}
+
+// A game its GPU holds to about 83% of the refresh rate (60 fps on a 72 Hz
+// headset), with 2 ms of its own time a frame: no frame takes 1.25
+// refreshes, and its own time is within reach of full rate. Auto engages at
+// 2x for its rate, and does not probe full rate, where the GPU still could
+// not keep up (Star Citizen, 2026-11-21: 36 of 42 probes failed, each a
+// presenter stop and start; GTAVXR: 22 of 22): the engagement showed full
+// rate does not hold at this work, and neither measure of it has come down.
+// A lighter scene is probed and held. Without the reach rule it probes at
+// every back-off; without the rate rule it never engages.
+void TestAutoGpuBoundNotProbedToFullRate() {
+    struct Scenario {
+        const char* name;
+        bool engage_below;
+        bool reach;
+    };
+    const std::vector<Scenario> scenarios = {
+        {"all rules", true, true},
+        {"reach rule off", true, false},
+        {"rate rule off", false, true},
+    };
+    for (const Scenario& scenario : scenarios) {
+        const std::string name = std::string("auto GPU-bound below refresh, ") + scenario.name;
+        FrameGenAutoRules rules;
+        rules.engage_below = scenario.engage_below;
+        rules.reach = scenario.reach;
+        AutoGame game("auto-gpu-bound", rules);
+        game.presenter.SetAutoPolicy(300ms, 500ms, 1500ms, 500ms);
+        game.presenter.SetDynamicPolicy(QuickAutoRate());
+        game.gpu.game_gpu = std::chrono::microseconds(static_cast<long long>(static_cast<double>(kPeriod) / 1e3 / 0.83));
+        game.gpu.frames_ahead = 2;
+        game.app->before_release = [&] { game.gpu.GameFrame(); };
+        std::uint32_t last = 1;
+        std::uint32_t highest = 1;
+        int probes = 0;
+        const auto count = [&](const XrFrameState&) {
+            const std::uint32_t multiplier = game.Multiplier();
+            probes += multiplier == 1 && last >= 2 ? 1 : 0;
+            last = multiplier;
+            highest = std::max(highest, multiplier);
+            return false;
+        };
+        RunWork(*game.app, 5000ms, {2ms}, count);
+        // The highest it reached: without the reach rule a probe at full rate
+        // may be under way at this moment.
+        const std::uint32_t engaged = highest;
+        RunWork(*game.app, 7000ms, {2ms}, count);
+        const int heavy_probes = probes;
+        // A lighter scene: its GPU work a third.
+        {
+            std::scoped_lock lock(game.gpu.timeline_mutex);
+            game.gpu.game_gpu = 4ms;
+        }
+        RunWork(*game.app, 5000ms, {2ms}, [&](const XrFrameState& state) {
+            count(state);
+            return false;
+        });
+        const std::uint32_t lighter = game.Multiplier();
+        game.presenter.Stop();
+        const std::string said = AutoLines(game.log);
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": " << heavy_probes << " probes, then " << lighter << "x" << said << "\n";
+            for (const std::string& line : game.log.Lines("stays at")) std::cerr << "  " << line << "\n";
+        }
+        if (!scenario.engage_below) {
+            Check(engaged == 1 && heavy_probes == 0,
+                  name + ": Auto stands by at 83% of the refresh rate as before (" + std::to_string(engaged) + "x" +
+                      said + ")");
+            continue;
+        }
+        Check(engaged == 2, name + ": Auto engages at 2x (" + std::to_string(engaged) + "x" + said + ")");
+        if (scenario.reach) {
+            Check(heavy_probes == 0,
+                  name + ": full rate is not probed while the GPU could not hold it (" +
+                      std::to_string(heavy_probes) + " probes" + said + ")");
+            Check(game.log.Lines("stays at 2x: full rate did not hold").size() == 1 &&
+                      game.log.Lines("GPU pending a frame").size() >= 1,
+                  name + ": the log says once why no probe comes, with both measures" + said);
+            Check(lighter == 1 && game.log.Lines("stays at full rate: the probe held").size() == 1,
+                  name + ": a lighter scene is probed and holds full rate (" + std::to_string(lighter) + "x" + said +
+                      ")");
+        } else {
+            Check(heavy_probes >= 2,
+                  name + ": full rate is probed at every back-off (" + std::to_string(heavy_probes) + " probes" +
+                      said + ")");
+        }
+        Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// Auto at 3x behind a long back-off, the game's work far inside 2x (Star
+// Citizen, 2026-11-21, 07:53:41: 80 s at 24 fps with 12 ms of own time a
+// frame and the GPU at 44%, after a step up for a hitch): once its frames
+// run steady it probes 2x without waiting the back-off out, and holds it.
+// Without the reach rule it stays at 3x for the back-off.
+void TestAutoProbesDownEarly() {
+    for (const bool reach : {true, false}) {
+        const std::string name = std::string("auto early probe") + (reach ? "" : ", rule off");
+        FrameGenAutoRules rules;
+        rules.reach = reach;
+        AutoGame game("auto-early", rules);
+        // A back-off far longer than the test.
+        game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 60s);
+        game.presenter.SetDynamicPolicy(QuickAutoRate());
+        game.gpu.game_gpu = 8ms;
+        game.gpu.frames_ahead = 4;
+        game.app->before_release = [&] { game.gpu.GameFrame(); };
+        // 2.6 refreshes of work a frame: late at 2x, held at 3x.
+        RunWork(*game.app, 8000ms, PeriodsOfWork(kPeriod, 2.6), [&](const XrFrameState&) {
+            return game.Multiplier() == 3 && game.presenter.Status().threaded;
+        });
+        const std::uint32_t climbed = game.Multiplier();
+        // The scene gets light: 6 ms of own time and 8 ms on the GPU a
+        // frame, where 2x allows 22.2 ms.
+        const auto lightened = std::chrono::steady_clock::now();
+        double down_after = -1.0;
+        std::uint32_t lowest = climbed, highest_after = 0;
+        RunWork(*game.app, 5000ms, {6ms}, [&](const XrFrameState&) {
+            const std::uint32_t multiplier = game.Multiplier();
+            if (down_after < 0.0 && multiplier < 3) {
+                down_after = Seconds(std::chrono::steady_clock::now() - lightened);
+            }
+            lowest = std::min(lowest, multiplier);
+            if (down_after >= 0.0) highest_after = std::max(highest_after, multiplier);
+            return false;
+        });
+        const std::uint32_t ended = game.Multiplier();
+        game.presenter.Stop();
+        const std::string said = AutoLines(game.log);
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": down after " << down_after << " s, lowest " << lowest << "x" << said << "\n";
+        }
+        Check(climbed == 3, name + ": a heavy scene takes it to 3x (" + std::to_string(climbed) + "x" + said + ")");
+        if (reach) {
+            Check(down_after > 0.0 && down_after < 3.0 && ended == 2 && highest_after == 2,
+                  name + ": with its work far inside 2x it probes 2x within seconds and holds it (" +
+                      std::to_string(down_after) + " s, " + std::to_string(ended) + "x" + said + ")");
+            Check(game.log.Lines("probing a lower multiplier early:").size() == 1 &&
+                      game.log.Lines("stays at 2x: the probe held").size() == 1,
+                  name + ": the log gives the estimate that allowed the probe" + said);
+        } else {
+            Check(lowest == 3 && ended == 3,
+                  name + ": it stays at 3x for the back-off (" + std::to_string(lowest) + "x" + said + ")");
+        }
+        Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// One hitch at 2x: a frame of 0.7 s, then four frames of 36 ms as the game
+// catches up (late at 2x), then its steady 6 ms again.
+void RunHitch(AutoGame& game) {
+    const std::vector<std::chrono::microseconds> work = {700ms, 36ms, 36ms, 36ms, 36ms};
+    for (const std::chrono::microseconds frame : work) {
+        const XrFrameState state = game.app->Wait();
+        game.app->Begin();
+        SleepPrecise(std::chrono::steady_clock::now() + frame);
+        game.app->Release();
+        Check(XR_SUCCEEDED(game.app->End(state.predictedDisplayTime)), "hitch: end");
+    }
+}
+
+// A hitch steps Auto up (the few frames a second holds after it are mostly
+// late), and Auto then held the game at the higher multiplier for the whole
+// back-off, which failed probes at full rate had doubled to its longest
+// (Star Citizen, 2026-11-21, 07:53:41: 80 s at 24 fps after 0.5 s hitches,
+// with 12 ms of own time a frame). A step up put down to a hitch is checked
+// again after a few seconds: the game is back at 2x within seconds. A second
+// hitch soon after backs off as sustained lateness does. With the rule off
+// the step waits out the back-off.
+void TestAutoHitchStepsBackSoon() {
+    struct Scenario {
+        const char* name;
+        bool reach;
+        bool cause_backoff;
+    };
+    const std::vector<Scenario> scenarios = {
+        {"all rules", true, true},
+        {"by its cause alone", false, true},
+        {"rule off", false, false},
+    };
+    for (const Scenario& scenario : scenarios) {
+        const std::string name = std::string("auto hitch, ") + scenario.name;
+        FrameGenAutoRules rules;
+        rules.reach = scenario.reach;
+        rules.cause_backoff = scenario.cause_backoff;
+        rules.transient_recheck = 500ms;
+        rules.transient_spacing = 20s;
+        AutoGame game("auto-hitch", rules);
+        // A back-off far longer than the test, as failed probes leave it.
+        game.presenter.SetAutoPolicy(300ms, 500ms, 600ms, 60s);
+        game.presenter.SetDynamicPolicy(QuickAutoRate());
+        RunWork(*game.app, 7000ms, PeriodsOfWork(kPeriod, 1.6),
+                [&](const XrFrameState&) { return game.Multiplier() == 2 && game.presenter.Status().threaded; });
+        RunWork(*game.app, 1500ms, {6ms});
+        const std::uint32_t steady = game.Multiplier();
+        RunHitch(game);
+        const auto hitched = std::chrono::steady_clock::now();
+        std::uint32_t highest = game.Multiplier();
+        double back_after = -1.0;
+        RunWork(*game.app, 5000ms, {6ms}, [&](const XrFrameState&) {
+            const std::uint32_t multiplier = game.Multiplier();
+            highest = std::max(highest, multiplier);
+            if (back_after < 0.0 && highest >= 3 && multiplier == 2) {
+                back_after = Seconds(std::chrono::steady_clock::now() - hitched);
+            }
+            return false;
+        });
+        const std::uint32_t settled = game.Multiplier();
+        // A second hitch within the spacing.
+        std::uint32_t second_lowest = 0;
+        double second_back_after = -1.0;
+        if (scenario.cause_backoff && !scenario.reach) {
+            RunHitch(game);
+            const auto again = std::chrono::steady_clock::now();
+            std::uint32_t second_highest = game.Multiplier();
+            RunWork(*game.app, 4000ms, {6ms}, [&](const XrFrameState&) {
+                const std::uint32_t multiplier = game.Multiplier();
+                second_highest = std::max(second_highest, multiplier);
+                if (second_highest >= 3) {
+                    second_lowest = second_lowest ? std::min(second_lowest, multiplier) : multiplier;
+                    if (second_back_after < 0.0 && multiplier == 2) {
+                        second_back_after = Seconds(std::chrono::steady_clock::now() - again);
+                    }
+                }
+                return false;
+            });
+        }
+        game.presenter.Stop();
+        const std::string said = AutoLines(game.log);
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": up to " << highest << "x, back after " << back_after << " s; second hitch lowest "
+                      << second_lowest << "x" << said << "\n";
+        }
+        Check(steady == 2, name + ": the game holds 2x (" + std::to_string(steady) + "x" + said + ")");
+        Check(highest == 3, name + ": the hitch steps Auto up to 3x (" + std::to_string(highest) + "x" + said + ")");
+        Check(game.log.Lines("cause: transient, a frame of 0.").size() >= 1,
+              name + ": the log puts the step down to the hitch" + said);
+        if (scenario.cause_backoff || scenario.reach) {
+            Check(back_after > 0.0 && back_after < 3.5 && settled == 2,
+                  name + ": it is back at 2x within seconds and stays (" + std::to_string(back_after) + " s, " +
+                      std::to_string(settled) + "x" + said + ")");
+        } else {
+            Check(back_after < 0.0 && settled == 3,
+                  name + ": it stays at 3x for the back-off (" + std::to_string(settled) + "x" + said + ")");
+        }
+        if (scenario.cause_backoff) {
+            Check(game.log.Lines("checked again in").size() == 1,
+                  name + ": the log names the short check, once" + said);
+        }
+        if (scenario.cause_backoff && !scenario.reach) {
+            Check(second_lowest == 3 && second_back_after < 0.0 && game.log.Lines("the second within").size() == 1,
+                  name + ": a second hitch soon after backs off as sustained lateness does (" +
+                      std::to_string(second_lowest) + "x at the lowest" + said + ")");
+        }
+        Check(!game.runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // A probe's settle is 250 ms since b2ef6a8, tested with one late frame. A
 // switch to a lower multiplier that costs a few late frames in a row (a
 // game's frame time catching up with its new period, the runtime's
@@ -13929,12 +15193,36 @@ void TestOsdRuntimeHalving() {
     status.standby = status.full_rate = true;
     said.push_back(DescribeFrameGen(status, true));
     text = said.back();
+    // Standing by for it, the compact line says why, not the game's rate.
     Check(text.row == "Standby  /  Dynamic" && text.detail == kHalvingDetail &&
-              text.compact == "Standby  /  game at 45 fps" && text.badge == "STBY" && text.state == "standby" &&
+              text.compact == "Standby  /  runtime at half rate" && text.badge == "STBY" && text.state == "standby" &&
               text.reason == "Dynamic" + dot + "game at 45 fps" + dot + kHalvingReason,
-          "halving standing by: " + text.row + " | " + text.detail + " | " + text.reason);
+          "halving standing by: " + text.row + " | " + text.detail + " | " + text.compact + " | " + text.reason);
+    // Its runtime known, the setting to turn off; Dynamic's retry counted down.
+    status.runtime_name = "Pimax OpenXR";
+    status.halving_retry_s = 39.2;
+    said.push_back(DescribeFrameGen(status, true));
+    text = said.back();
+    Check(text.row == "Standby  /  Dynamic  /  retrying in 40 s" &&
+              text.detail == "Runtime at half rate: turn off Smart Smoothing in Pimax Play" &&
+              text.compact == "Standby  /  runtime at half rate" &&
+              text.reason == "Dynamic" + dot + "game at 45 fps" + dot +
+                                 "the runtime holds frames to half rate: turn off Smart Smoothing in Pimax Play",
+          "halving standing by, Pimax: " + text.row + " | " + text.detail + " | " + text.reason);
+    for (const auto& [runtime, remedy] : std::vector<std::pair<std::string, std::string>>{
+             {"PimaxXR (Unofficial)", "turn off Smart Smoothing in Pimax Play"},
+             {"SteamVR/OpenXR", "turn off Motion Smoothing in SteamVR"},
+             {"VirtualDesktop", "turn off SSW in Virtual Desktop"},
+             {"Oculus", "turn off ASW"},
+             {"Varjo OpenXR Runtime", ""}}) {
+        Check(FrameGenHalvingRemedy(runtime) == remedy, "halving remedy for " + runtime);
+    }
+    status.runtime_name.clear();
+    status.halving_retry_s = 0.0;
     status.runtime_halving = false;
-    Check(DescribeFrameGen(status, true).detail == "The game runs at 45 fps", "not halving: standing by as before");
+    Check(DescribeFrameGen(status, true).detail == "The game runs at 45 fps" &&
+              DescribeFrameGen(status, true).compact == "Standby  /  game at 45 fps",
+          "not halving: standing by as before");
     status.runtime_halving = true;
     status.state = FrameGenState::kPaused;
     status.reason = "runtime rejected a generated frame (-2)";
@@ -15627,15 +16915,20 @@ class FrameGenFlowTestPeer {
     static bool Feed(FrameGenPresenter& p, Clock::time_point now, std::uint64_t generated = 1000,
                      std::uint64_t stale = 0, std::uint64_t unready = 0, std::uint64_t timed = 100,
                      std::uint64_t late = 0, bool auto_probe = false, bool dynamic_probe = false,
-                     std::optional<std::uint64_t> motion_outputs = std::nullopt) {
+                     std::optional<std::uint64_t> motion_outputs = std::nullopt, std::uint64_t unmeasured = 0,
+                     std::optional<std::uint64_t> late_own = std::nullopt) {
         std::scoped_lock lock(p.mutex_);
         p.totals_.generated_distinct += generated;
         p.totals_.stale_motion += stale;
         p.totals_.motion_outputs += motion_outputs.value_or(std::max(generated, stale));
         p.totals_.unready += unready;
+        p.totals_.unmeasured += unmeasured;
         p.totals_.hardware_timed += timed;
         p.totals_.hardware_late += late;
         p.totals_.hardware_lag_ns += late * 2'000'000;
+        // Late hardware analyses are the flow's own unless told otherwise.
+        p.totals_.hardware_late_own += late_own.value_or(late);
+        p.totals_.hardware_lag_own_ns += late_own.value_or(late) * 2'000'000;
         p.probing_ = auto_probe;
         p.dynamic_probing_ = dynamic_probe;
         return p.UpdateInterpolateFlowLocked(now, FrameGenSynthesisMode::kInterpolate, true);
@@ -15643,6 +16936,36 @@ class FrameGenFlowTestPeer {
     static void Select(FrameGenPresenter& p, FrameGenInterpolateFlow mode) {
         std::scoped_lock lock(p.mutex_);
         p.settings_.interpolate_flow = mode;
+    }
+    // VECTORXR_FRAMEGEN_FLOW_FALLBACK=legacy, as Start reads it.
+    static void Legacy(FrameGenPresenter& p, bool legacy) {
+        std::scoped_lock lock(p.mutex_);
+        p.interpolate_flow_legacy_ = legacy;
+    }
+    static void Policy(FrameGenPresenter& p, const FrameGenInterpolateFlowPolicy& policy) {
+        std::scoped_lock lock(p.mutex_);
+        p.interpolate_flow_policy_ = policy;
+    }
+    static std::pair<std::uint64_t, std::uint64_t> HardwareOwnTimings(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        return {p.totals_.hardware_late, p.totals_.hardware_late_own};
+    }
+    // One analysis of a frame captured `captured` before its generated frame
+    // was due, hardware flow ending `hardware_lag` after it.
+    static void CaptureTiming(FrameGenPresenter& p, Clock::time_point now, std::chrono::milliseconds captured,
+                              std::chrono::milliseconds hardware_lag) {
+        std::scoped_lock lock(p.mutex_);
+        FrameGenPresenter::PendingFrame frame;
+        frame.real_due = now - 10ms;
+        frame.generated_due = now;
+        FrameGenAnalysisTiming timing;
+        timing.submission = 100 + p.totals_.analyses_timed;
+        timing.capture_end = now - captured;
+        timing.start = timing.capture_end;
+        timing.hardware_start = timing.capture_end;
+        timing.hardware_end = now + hardware_lag;
+        timing.end = timing.hardware_end;
+        p.NoteGpuTimingLocked(timing.submission, frame, std::nullopt, {timing}, {}, true);
     }
     static void Pause(FrameGenPresenter& p) {
         std::scoped_lock lock(p.mutex_);
@@ -15692,6 +17015,11 @@ class FrameGenFlowTestPeer {
         std::scoped_lock lock(p.mutex_);
         return p.InterpolateFlowDelayUntilLocked(now, mode, hardware);
     }
+    // The frames waited inline and not yet ended.
+    static std::size_t OpenFrames(FrameGenPresenter& p) {
+        std::scoped_lock lock(p.mutex_);
+        return p.frames_.size();
+    }
     static State Get(FrameGenPresenter& p) {
         std::scoped_lock lock(p.mutex_);
         return {p.interpolate_flow_hardware_, p.interpolate_flow_probing_, p.interpolate_flow_bad_windows_,
@@ -15739,11 +17067,35 @@ void TestInterpolateFlowCounterWindows() {
     Check(Peer::Get(stale).reason.find("stale motion") != std::string::npos,
           "flow: fallback explains stale motion");
 
+    // Motion not measured in time is the flow's own lateness.
     FrameGenPresenter unready;
     Peer::Prepare(unready, zero);
-    Check(Peer::Feed(unready, zero + 10s, 1000, 0, 4), "flow: first unready window stays");
-    Check(!Peer::Feed(unready, zero + 20s, 1000, 0, 4), "flow: 12 unready per30s twice falls back");
-    Check(Peer::Get(unready).reason.find("unready") != std::string::npos, "flow: unready reason");
+    Check(Peer::Feed(unready, zero + 10s, 1000, 0, 0, 100, 0, false, false, std::nullopt, 4),
+          "flow: first unmeasured window stays");
+    Check(!Peer::Feed(unready, zero + 20s, 1000, 0, 0, 100, 0, false, false, std::nullopt, 4),
+          "flow: 12 unmeasured per30s twice falls back");
+    Check(Peer::Get(unready).reason.find("motion not measured in time") != std::string::npos,
+          "flow: unmeasured reason (" + Peer::Get(unready).reason + ")");
+
+    // A real frame not captured yet is the game's frame still on the GPU:
+    // a GPU-bound game below about 44 fps has 20 to 50 such refreshes per
+    // 30 s on either flow (DCS, 2026-11-20). They keep hardware flow.
+    FrameGenPresenter uncaptured;
+    Peer::Prepare(uncaptured, zero);
+    for (int i = 1; i <= 6; ++i) {
+        Check(Peer::Feed(uncaptured, zero + i * 10s, 1000, 0, 15), "flow: uncaptured window keeps hardware");
+    }
+    Check(Peer::Get(uncaptured).fallbacks == 0 && Peer::Get(uncaptured).bad == 0,
+          "flow: 45 uncaptured per 30 s never falls back");
+    // VECTORXR_FRAMEGEN_FLOW_FALLBACK=legacy: as before.
+    FrameGenPresenter legacy;
+    Peer::Prepare(legacy, zero);
+    Peer::Legacy(legacy, true);
+    Check(Peer::Feed(legacy, zero + 10s, 1000, 0, 4), "flow legacy: first unready window stays");
+    Check(!Peer::Feed(legacy, zero + 20s, 1000, 0, 4), "flow legacy: 12 unready per30s twice falls back");
+    Check(Peer::Get(legacy).reason.find("unready ") == 0 ||
+              Peer::Get(legacy).reason.find("auto fallback: unready") != std::string::npos,
+          "flow legacy: unready reason (" + Peer::Get(legacy).reason + ")");
 
     FrameGenPresenter lag;
     Peer::Prepare(lag, zero);
@@ -15760,6 +17112,28 @@ void TestInterpolateFlowCounterWindows() {
     Peer::Timing(timing, zero + 2s, 20ms, 0ms, false);
     Check(Peer::HardwareTimings(timing) == std::pair<std::uint64_t, std::uint64_t>{2, 1},
           "flow: lag is attributed to hardware completion only");
+
+    // Late hardware of a frame captured with time to spare is the flow's; of
+    // one captured too late for any flow (past capture_allowance), not.
+    FrameGenPresenter own;
+    Peer::CaptureTiming(own, zero, 5ms, 3ms);     // captured 5 ms ahead, hardware 3 ms late: its own
+    Peer::CaptureTiming(own, zero + 1s, 0ms, 3ms); // captured at the deadline: the game's
+    Peer::CaptureTiming(own, zero + 2s, -4ms, 3ms); // captured after it: the game's
+    Peer::CaptureTiming(own, zero + 3s, 5ms, -1ms); // in time
+    Check(Peer::HardwareOwnTimings(own) == std::pair<std::uint64_t, std::uint64_t>{3, 1},
+          "flow: late hardware of late captures is not the flow's own (" +
+              std::to_string(Peer::HardwareOwnTimings(own).first) + " late, " +
+              std::to_string(Peer::HardwareOwnTimings(own).second) + " own)");
+    // Only own lateness falls back; legacy counts all of it.
+    for (const bool legacy_rule : {false, true}) {
+        FrameGenPresenter late_capture;
+        Peer::Prepare(late_capture, zero);
+        Peer::Legacy(late_capture, legacy_rule);
+        Peer::Feed(late_capture, zero + 10s, 1000, 0, 0, 100, 40, false, false, std::nullopt, 0, 5);
+        Peer::Feed(late_capture, zero + 20s, 1000, 0, 0, 100, 40, false, false, std::nullopt, 0, 5);
+        Check(Peer::Get(late_capture).hardware == !legacy_rule,
+              std::string("flow: 40% late of which 5% own ") + (legacy_rule ? "falls back (legacy)" : "stays"));
+    }
 }
 
 void TestInterpolateFlowRecoveryBackoff() {
@@ -15958,6 +17332,30 @@ void TestInterpolateFlowAcceptanceDelay() {
           "flow delay: switches and recovery are logged with reasons");
 }
 
+// The session ends on another thread while a game's wait is inside the
+// runtime's. The wait returns the runtime's frame state as it is, and the
+// stopped presenter stays as Stop left it: off, with no frame open for the
+// next session to find.
+void TestStopDuringRuntimeWait() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "stop in wait: engaged before it");
+    runtime.wait_sleep_ms = 300;
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    std::thread waiter([&] { state = app.Wait(); });
+    std::this_thread::sleep_for(60ms); // the wait is inside the runtime's
+    presenter.Stop();
+    waiter.join();
+    runtime.wait_sleep_ms = 0;
+    Check(state.predictedDisplayPeriod == runtime.period, "stop in wait: the game gets the runtime's own period");
+    Check(presenter.Status().state == FrameGenState::kOff, "stop in wait: the stopped presenter stays off");
+    Check(FrameGenFlowTestPeer::OpenFrames(presenter) == 0, "stop in wait: no frame is kept for the next session");
+}
+
 // --group <name> runs one group of the tests below (GROUP marks where each
 // begins), so CTest can run the groups side by side; without it, all of them.
 const char* g_group = nullptr;
@@ -16002,6 +17400,7 @@ void RunPolicyTests() {
     RUN(TestDynamicProbe);
     RUN(TestExtrapolateDuplicateTargetGuard);
     RUN(TestNoExtrapolationAcrossPauses);
+    RUN(TestInterpolatePauseIsNotLate);
     RUN(TestLeadResetOnRestart);
     RUN(TestLeadStepsDownAfterHitches);
     RUN(TestLeadDoesNotFlap);
@@ -16091,6 +17490,17 @@ int main(int argc, char** argv) {
         } catch (...) {
         }
         std::cerr << "FAILED: terminate: " << what << std::endl;
+        // Where: the frames' offsets in this exe (an exception escaping a
+        // thread ends the run before unwinding, so the throw is among them).
+        void* frames[48]{};
+        const USHORT count = CaptureStackBackTrace(0, 48, frames, nullptr);
+        const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        std::cerr << "  thread " << GetCurrentThreadId() << ", exe base 0x" << std::hex << base << ", frames:";
+        for (USHORT i = 0; i < count; ++i) {
+            const auto address = reinterpret_cast<std::uintptr_t>(frames[i]);
+            std::cerr << (address >= base ? " +0x" : " 0x") << (address >= base ? address - base : address);
+        }
+        std::cerr << std::dec << std::endl;
         std::_Exit(3);
     });
     // Research switches (framegen-research.txt) and capture requests are
@@ -16121,6 +17531,7 @@ int main(int argc, char** argv) {
     RUN(TestCompositionRefusalSurvivesRuntimeFailure);
     RUN(TestCompositionQuadUnsupportedChains);
     RUN(TestInterpolationPacing);
+    RUN(TestBatchOutputReleaseRefusal);
     RUN(TestWorkingMemoryAskedOncePerSecond);
     RUN(TestExtrapolationPacing);
     RUN(TestTripleInterpolation);
@@ -16152,6 +17563,7 @@ int main(int argc, char** argv) {
     RUN(TestSlowDynamicHorizonJitterReported);
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
+    RUN(TestStereoJitOutputReleasePause);
     RUN(TestJitEdgeFill);
     RUN(TestJitEyeShiftReported);
     RUN(TestEyeProbe);
@@ -16161,6 +17573,7 @@ int main(int argc, char** argv) {
     RUN(TestJitInterpolation);
     RUN(TestJitDynamicInterpolation);
     RUN(TestJitWaitsForNoGameFrame);
+    RUN(TestJitDropsReplacedDepthAtStartup);
     RUN(TestJitModeSwitchRestarts);
     RUN(TestToggleOffReadsOff);
     RUN(TestToggleOffLogsNoEngagement);
@@ -16188,6 +17601,7 @@ int main(int argc, char** argv) {
     RUN(TestOverlappingWaitIsHeld);
     RUN(TestUnclaimedFrameIsDemoted);
     RUN(TestSameThreadDoubleWait);
+    RUN(TestStopDuringRuntimeWait);
     RUN(TestDepthDescriptionLogged);
     // A long session: video memory moving between engagements, pauses far
     // apart, and what the summaries and the log say about both.
@@ -16227,6 +17641,7 @@ int main(int argc, char** argv) {
     // A runtime halving the frame rate (its motion smoothing).
     RUN(TestRuntimeHalvingStandsDown);
     RUN(TestRuntimeHalvingRecovers);
+    RUN(TestRuntimeHalvingPush);
     RUN(TestRuntimeHalvingNotReported);
     RUN(TestRuntimeHalvingClears);
     RUN(TestRuntimeHalvingClearedDoesNotStandDown);
@@ -16239,6 +17654,7 @@ int main(int argc, char** argv) {
     RUN(TestEchoRuntimeKeepsRefresh);
     RUN(TestEchoRuntimeLateWake);
     RUN(TestEchoRuntimeClearsHalving);
+    RUN(TestAutoStepsUpOnEchoRuntime);
     RUN(TestEchoHitchKeepsRefresh);
     // Quad views Frame Generation composes itself.
     GROUP("quad");
@@ -16253,6 +17669,7 @@ int main(int argc, char** argv) {
     RUN(TestQuadStandbyRecordsViewTargets);
     RUN(TestQuadClaimNeedsLatestCapture);
     RUN(TestQuadOutputsResized);
+    RUN(TestJitOutputReleaseRefusal);
     RUN(TestQuadAsIsShowsNewestImage);
     RUN(TestQuadNoOpenFrameOnBlankingRuntime);
     RUN(TestQuadFailedWriteRepeatsLastShown);
@@ -16285,6 +17702,40 @@ int main(int argc, char** argv) {
     RUN(TestAutoProbeAllowsLatencyAndShortHitch);
     GROUP("probe_burst");
     RUN(TestAutoProbeSurvivesTransitionBurst);
+    // Auto's rules against a user's sessions (Star Citizen and Starfield,
+    // 2026-11-21): scenarios of several seconds each.
+    GROUP("auto");
+    RUN(TestAutoToggleStartsFresh);
+    RUN(TestAutoCadenceLeavesOutUnrelatedFrames);
+    RUN(TestAutoEngagesBelowRefresh);
+    RUN(TestAutoLowestRate);
+    RUN(TestAutoRateWaitsForSwapchains);
+    RUN(TestAutoHoversByMarginAlone);
+    RUN(TestAutoHoversWithoutFlapping);
+    RUN(TestAutoGpuBoundNotProbedToFullRate);
+    RUN(TestAutoProbesDownEarly);
+    RUN(TestAutoHitchStepsBackSoon);
+    // The probe tests from before the rules, with the rules on: what they
+    // assert must hold either way (a game that cannot run at full rate is
+    // not probed there, a failed probe returns promptly, capture latency
+    // alone refuses no probe, a lighter scene steps down). They start where
+    // a session's swapchains were just made, which the rules would take for
+    // a mode switch; the rate rule runs on its own times (two seconds below
+    // the threshold, as in a session), which these tests' single late frames
+    // and bursts are measured against.
+    g_auto_rules = FrameGenAutoRules{};
+    g_auto_rules.swapchain_settle = 0ms;
+    g_start_dynamic_policy = FrameGenDynamicPolicy{};
+    RUN(TestAutoLeavesLateCeiling);
+    for (const bool jit : {true, false}) {
+        g_jit = jit;
+        RUN(TestAutoProbesNeedRoom);
+    }
+    g_jit = false;
+    RUN(TestAutoGpuBoundProbeReturnsPromptly);
+    RUN(TestAutoProbeAllowsLatencyAndShortHitch);
+    g_auto_rules = AutoRulesOff();
+    g_start_dynamic_policy.reset();
     g_jit = false;
     // The lead against hitches and late frames.
     GROUP("lead");

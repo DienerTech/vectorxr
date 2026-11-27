@@ -21,9 +21,10 @@ import registry from './registry.json' with { type: 'json' }
 import settings from './settings.json' with { type: 'json' }
 import tray from './tray.json' with { type: 'json' }
 import turbo from './turbo.json' with { type: 'json' }
+import utilities from './utilities.json' with { type: 'json' }
 import validation from './validation.json' with { type: 'json' }
 
 export const en = {
   about, app, bindings, common, depth, errors, framegen, guides, health, home, layers, model, osd, pivot, pivotViews, quadviews, registry, settings,
-  tray, turbo, validation,
+  tray, turbo, utilities, validation,
 }

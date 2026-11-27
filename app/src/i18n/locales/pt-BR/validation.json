@@ -19,6 +19,15 @@
     "compactMetrics": "A seleção de desempenho compacta do OSD é inválida",
     "bodyOrder": "A ordem do corpo do OSD deve conter cada linha uma vez"
   },
+  "screenshot": {
+    "eyes": "{field} deve ser both, left ou right",
+    "folder": "{field} deve ser um caminho de pasta completo, como D:\\Screenshots"
+  },
+  "mirror": {
+    "eye": "{field} deve ser left ou right",
+    "aspect": "{field} deve ser {values}",
+    "monitor": "{field} deve ser um texto de até {max} caracteres"
+  },
   "binding": {
     "chordEmpty": "{field} deve incluir pelo menos uma tecla",
     "chordUnsupportedKey": "{field} contém uma tecla sem suporte: {key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field} deve ser performance, balanced ou quality",
     "motionEstimation": "{field} deve ser shader ou hardware",
     "frameMultiplier": "{field} deve ser auto, dynamic, 2x, 3x ou 4x",
+    "autoLowestRate": "{field} deve ser off ou 2x",
     "diagnosticView": "{field} deve ser off, flow, confidence ou tint",
     "interpolateFlow": "{field} deve ser auto, hardware ou shader"
   },
@@ -61,6 +71,8 @@
   "version": "version deve ser igual a {version}",
   "warnings": {
     "turboFrameGenOverlap": "Turbo e Frame Generation estão ambos ligados para {targets}. A Frame Generation assume o ritmo de quadros; o Turbo fica desligado nas sessões em que a Frame Generation é executada.",
+    "mirrorFillNoMonitorDefault": "Janela de espelho estabilizada: \"Preencher um monitor\" está ligado no perfil padrão sem nenhum monitor escolhido. O espelho abre como uma janela normal até que um seja escolhido.",
+    "mirrorFillNoMonitorProfile": "Janela de espelho estabilizada: \"Preencher um monitor\" está ligado no perfil {profile} sem nenhum monitor escolhido. O espelho abre como uma janela normal até que um seja escolhido.",
     "moreApplications_one": "mais {count}",
     "moreApplications_other": "mais {count}",
     "applicationsWithoutProfile": "aplicativos sem perfil personalizado"

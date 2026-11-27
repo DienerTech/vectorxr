@@ -19,6 +19,15 @@
     "compactMetrics": "Die kompakte OSD-Leistungsauswahl ist ungültig",
     "bodyOrder": "Die OSD-Zeilenreihenfolge muss jede Zeile genau einmal enthalten"
   },
+  "screenshot": {
+    "eyes": "{field} muss both, left oder right sein",
+    "folder": "{field} muss ein vollständiger Ordnerpfad sein, zum Beispiel D:\\Screenshots"
+  },
+  "mirror": {
+    "eye": "{field} muss left oder right sein",
+    "aspect": "{field} muss {values} sein",
+    "monitor": "{field} muss ein Text mit höchstens {max} Zeichen sein"
+  },
   "binding": {
     "chordEmpty": "{field} muss mindestens eine Taste enthalten",
     "chordUnsupportedKey": "{field} enthält eine nicht unterstützte Taste: {key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field} muss performance, balanced oder quality sein",
     "motionEstimation": "{field} muss shader oder hardware sein",
     "frameMultiplier": "{field} muss auto, dynamic, 2x, 3x oder 4x sein",
+    "autoLowestRate": "{field} muss off oder 2x sein",
     "diagnosticView": "{field} muss off, flow, confidence oder tint sein",
     "interpolateFlow": "{field} muss auto, hardware oder shader sein"
   },
@@ -61,6 +71,8 @@
   "version": "version muss {version} entsprechen",
   "warnings": {
     "turboFrameGenOverlap": "Turbo und Frame Generation sind beide für {targets} eingeschaltet. Frame Generation übernimmt die Bildtaktung; Turbo bleibt in Sitzungen, in denen Frame Generation läuft, ausgeschaltet.",
+    "mirrorFillNoMonitorDefault": "Stabilisiertes Spiegelfenster: „Monitor ausfüllen“ ist im Standardprofil eingeschaltet, aber es ist kein Monitor gewählt. Der Spiegel öffnet sich als normales Fenster, bis einer gewählt wird.",
+    "mirrorFillNoMonitorProfile": "Stabilisiertes Spiegelfenster: „Monitor ausfüllen“ ist im Profil {profile} eingeschaltet, aber es ist kein Monitor gewählt. Der Spiegel öffnet sich als normales Fenster, bis einer gewählt wird.",
     "moreApplications_one": "{count} weitere",
     "moreApplications_other": "{count} weitere",
     "applicationsWithoutProfile": "Anwendungen ohne eigenes Profil"

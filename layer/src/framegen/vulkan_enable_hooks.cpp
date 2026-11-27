@@ -32,6 +32,8 @@ struct Hooks {
     XrInstance instance{XR_NULL_HANDLE};
     PFN_xrGetInstanceProcAddr next{nullptr};
     bool wanted{false}; // latched when the instance was made
+    // Wanted for the mirror window alone: its names, and no timeline semaphores.
+    bool mirror_only{false};
     std::function<void(const std::string&)> log;
     // The game's vkGetInstanceProcAddr, which the layer's own forwards to.
     // Kept past the instance: a runtime may hold on to the layer's.
@@ -69,11 +71,24 @@ std::string Joined(const std::vector<std::string>& names) {
     return text;
 }
 
-void Report(const std::string& summary, const std::string& message) {
+void Replace(std::string& text, std::string_view from, std::string_view to) {
+    for (std::size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size())) {
+        text.replace(at, from.size(), to);
+    }
+}
+
+void Report(const std::string& summary, const std::string& reported) {
     std::function<void(const std::string&)> log;
+    std::string message = reported;
     {
         Hooks& hooks = State();
         std::scoped_lock lock(hooks.mutex);
+        if (hooks.mirror_only) {
+            // The same additions, made for the mirror window.
+            Replace(message, "Frame Generation's Vulkan bridge:", "Mirror window (Vulkan):");
+            Replace(message, ", and Frame Generation will be off", ", and the mirror window will be unavailable");
+            Replace(message, "the bridge's", "the mirror's");
+        }
         if (!summary.empty()) {
             hooks.summary += (hooks.summary.empty() ? "" : "; ") + summary;
         }
@@ -82,6 +97,19 @@ void Report(const std::string& summary, const std::string& message) {
     if (log && !message.empty()) {
         log(message);
     }
+}
+
+// What is added for this instance: the bridge's names, or the mirror's.
+const std::vector<const char*>& InstanceNames(bool mirror_only) {
+    return mirror_only ? VulkanMirrorInstanceExtensions() : VulkanBridge::InstanceExtensions();
+}
+const std::vector<const char*>& DeviceNames(bool mirror_only) {
+    return mirror_only ? VulkanMirrorDeviceExtensions() : VulkanBridge::DeviceExtensions();
+}
+bool MirrorOnly() {
+    Hooks& hooks = State();
+    std::scoped_lock lock(hooks.mutex);
+    return hooks.mirror_only;
 }
 
 bool Listed(const char* const* names, std::uint32_t count, std::string_view name) {
@@ -169,7 +197,7 @@ VKAPI_ATTR VkResult VKAPI_CALL LayerCreateInstance(const VkInstanceCreateInfo* i
                                    info->ppEnabledExtensionNames + (info->ppEnabledExtensionNames ? info->enabledExtensionCount : 0));
     std::vector<std::string> added;
     std::vector<std::string> missing;
-    for (const char* name : VulkanBridge::InstanceExtensions()) {
+    for (const char* name : InstanceNames(MirrorOnly())) {
         const bool available = std::any_of(offered.begin(), offered.end(), [&](const VkExtensionProperties& property) {
             return std::strcmp(property.extensionName, name) == 0;
         });
@@ -281,7 +309,8 @@ VKAPI_ATTR VkResult VKAPI_CALL LayerCreateDevice(VkPhysicalDevice physical_devic
                                    info->ppEnabledExtensionNames + (info->ppEnabledExtensionNames ? info->enabledExtensionCount : 0));
     std::vector<std::string> added;
     std::vector<std::string> missing;
-    for (const char* name : VulkanBridge::DeviceExtensions()) {
+    const bool mirror_only = MirrorOnly();
+    for (const char* name : DeviceNames(mirror_only)) {
         if (Listed(names.data(), static_cast<std::uint32_t>(names.size()), name)) continue;
         (offers(name) ? added : missing).emplace_back(name);
         if (offers(name)) names.push_back(name);
@@ -293,7 +322,8 @@ VKAPI_ATTR VkResult VKAPI_CALL LayerCreateDevice(VkPhysicalDevice physical_devic
     const TimelineChain chain = TimelineIn(info->pNext);
     bool timeline = chain == TimelineChain::kEnabled;
     bool timeline_added = false;
-    if (chain == TimelineChain::kUnnamed && instance_version != 0) {
+    // The mirror shares no semaphores: the game's are left as they are.
+    if (chain == TimelineChain::kUnnamed && instance_version != 0 && !mirror_only) {
         VkPhysicalDeviceProperties properties{};
         if (const auto get_properties =
                 Resolve<PFN_vkGetPhysicalDeviceProperties>(game, instance, "vkGetPhysicalDeviceProperties")) {
@@ -442,7 +472,7 @@ XrResult XRAPI_CALL HookGetVulkanInstanceExtensions(XrInstance instance, XrSyste
     if (!wanted) {
         return runtime(instance, system, capacity, count, buffer);
     }
-    return WithBridgeExtensions(runtime, instance, system, capacity, count, buffer, VulkanBridge::InstanceExtensions(),
+    return WithBridgeExtensions(runtime, instance, system, capacity, count, buffer, InstanceNames(MirrorOnly()),
                                 "Vulkan instance extension", State().instance_list_logged);
 }
 
@@ -456,7 +486,7 @@ XrResult XRAPI_CALL HookGetVulkanDeviceExtensions(XrInstance instance, XrSystemI
     if (!wanted) {
         return runtime(instance, system, capacity, count, buffer);
     }
-    return WithBridgeExtensions(runtime, instance, system, capacity, count, buffer, VulkanBridge::DeviceExtensions(),
+    return WithBridgeExtensions(runtime, instance, system, capacity, count, buffer, DeviceNames(MirrorOnly()),
                                 "Vulkan device extension", State().device_list_logged);
 }
 
@@ -533,13 +563,36 @@ XrResult XRAPI_CALL HookCreateVulkanDevice(XrInstance instance, const XrVulkanDe
 
 } // namespace
 
+const std::vector<const char*>& VulkanMirrorInstanceExtensions() {
+    // Core in Vulkan 1.1; named so a Vulkan 1.0 game's instance has them too
+    // (the adapter's LUID is read through them).
+    static const std::vector<const char*> extensions{
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
+    };
+    return extensions;
+}
+
+const std::vector<const char*>& VulkanMirrorDeviceExtensions() {
+    // The Win32 one imports the mirror's Direct3D 12 images; the others are
+    // core in Vulkan 1.1 and named for a Vulkan 1.0 device.
+    static const std::vector<const char*> extensions{
+        VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
+        VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+        "VK_KHR_external_memory_win32",
+    };
+    return extensions;
+}
+
 void ResetVulkanEnableHooks(XrInstance instance, PFN_xrGetInstanceProcAddr next_get_instance_proc_addr,
-                            bool bridge_wanted, std::function<void(const std::string&)> log) {
+                            bool bridge_wanted, std::function<void(const std::string&)> log, bool mirror_wanted) {
     Hooks& hooks = State();
     std::scoped_lock lock(hooks.mutex);
     hooks.instance = instance;
     hooks.next = instance != XR_NULL_HANDLE ? next_get_instance_proc_addr : nullptr;
-    hooks.wanted = instance != XR_NULL_HANDLE && bridge_wanted;
+    hooks.wanted = instance != XR_NULL_HANDLE && (bridge_wanted || mirror_wanted);
+    hooks.mirror_only = hooks.wanted && !bridge_wanted;
     hooks.log = instance != XR_NULL_HANDLE ? std::move(log) : nullptr;
     // Devices of an instance before are not this one's.
     hooks.device_instance = VK_NULL_HANDLE;

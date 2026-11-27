@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 void Expect(bool value, const char* message) {
@@ -174,6 +175,74 @@ int main() {
         depthxr::RemoveProcessExitFiles();
         depthxr::RemoveProcessExitFiles(); // DllMain runs once; the table must not care.
         after_disarm.Complete();
+    }
+
+    // A fault Turbo recovered from is history only. The live marker is what
+    // the next run reads after a crash, so it must stay exactly as armed.
+    const auto read_file = [](const std::filesystem::path& path) {
+        std::ifstream stream(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    };
+    const auto find_marker = [](const std::filesystem::path& directory) {
+        std::filesystem::path marker;
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+            if (entry.path().extension() == ".json") marker = entry.path();
+        }
+        return marker;
+    };
+    const auto recovered_root = root / "recovered";
+    {
+        depthxr::TurboRecoveryGuard recovering;
+        recovering.Configure(recovered_root, identity);
+        Expect(recovering.Prepare(true, false, "async", dead), "Recovered scenario should arm", recovering.Reason());
+        const auto marker = find_marker(recovered_root);
+        Expect(!marker.empty(), "An armed guard has a marker");
+        const std::string before = read_file(marker);
+        Expect(before.find("\"state\": \"armed\"") != std::string::npos &&
+               before.find("\"processId\": 42") != std::string::npos,
+               "The marker should be armed for this process");
+        recovering.NoteRecovered("Recovered from a runtime frame-call failure");
+        Expect(read_file(marker) == before, "Noting a recovered fault must not touch the live marker");
+        Expect(recovering.Reason().empty() && !recovering.Blocked(), "Noting a recovered fault must not change Turbo's status");
+        bool archived = false;
+        if (std::filesystem::exists(recovered_root / "faults")) {
+            for (const auto& entry : std::filesystem::directory_iterator(recovered_root / "faults")) {
+                const std::string text = read_file(entry.path());
+                archived |= text.find("\"state\": \"recovered\"") != std::string::npos &&
+                            text.find("Recovered from a runtime frame-call failure") != std::string::npos;
+            }
+        }
+        Expect(archived, "A recovered fault must appear in fault history");
+        // No Complete: a crash after the recovered fault.
+    }
+    {
+        depthxr::TurboRecoveryGuard after_recovered;
+        after_recovered.Configure(recovered_root, identity);
+        Expect(!after_recovered.Prepare(true, false, "async", dead) && after_recovered.Blocked(),
+               "A crash after a recovered fault must still block the next run");
+    }
+
+    // Fault history that cannot be saved costs the history record only.
+    const auto unarchived_root = root / "recovered-unarchived";
+    {
+        depthxr::TurboRecoveryGuard recovering;
+        recovering.Configure(unarchived_root, identity);
+        Expect(recovering.Prepare(true, false, "async", dead), "Unarchived scenario should arm", recovering.Reason());
+        const auto marker = find_marker(unarchived_root);
+        Expect(!marker.empty(), "An armed guard has a marker");
+        const std::string before = read_file(marker);
+        std::ofstream(unarchived_root / "faults") << "file"; // Fault history cannot be a directory now.
+        recovering.NoteRecovered("Recovered while history is unavailable");
+        Expect(std::filesystem::is_regular_file(unarchived_root / "faults"), "The archive write should have failed");
+        Expect(recovering.Reason().empty() && !recovering.Blocked(),
+               "A lost history record must not report Turbo as off");
+        Expect(read_file(marker) == before, "A lost history record must leave the marker armed");
+    }
+    {
+        depthxr::TurboRecoveryGuard after_unarchived;
+        after_unarchived.Configure(unarchived_root, identity);
+        Expect(!after_unarchived.Prepare(true, false, "async", dead) && after_unarchived.Blocked(),
+               "A crash after a lost history record must still block the next run");
     }
 
     const auto invalid_root = root / "not-a-directory";

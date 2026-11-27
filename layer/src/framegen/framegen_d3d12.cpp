@@ -42,7 +42,12 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr std::size_t kFramesInFlight = 3;
-constexpr UINT kDescriptorsPerFrame = 1024;
+// A frame's descriptors (frames written together with their measurement):
+// for quad views' four views about 22 measuring dispatches each (8
+// descriptors a dispatch), then per generated frame and view a map (26, see
+// kDescriptorsPerSynthesis), the shading-rate image (8) and the draw (8);
+// with three generated frames 4 * (22 * 8 + 3 * 42) = 1208.
+constexpr UINT kDescriptorsPerFrame = 2048;
 // Captures in flight: four frames of quad views' four color images.
 constexpr UINT kCaptureSlots = 16;
 // GPU timestamps per Execute: its start, the optical flow hardware's wait
@@ -50,9 +55,12 @@ constexpr UINT kCaptureSlots = 16;
 constexpr UINT kTimingStamps = 4;
 // Just-in-time synthesis: submissions in flight (one per refresh) and the
 // descriptors each may use (per view: the shading-rate image, the eye-shift
-// map's passes and the draw).
+// map's passes and the draw). A map is a clear (2) and three dispatches (its
+// splat, resolve and fill): 26. Four views with the eye-shift map alone use
+// 4 * (26 + 8 + 8) and each eye's compose 8 more: 184; the research maps (a
+// motion map, an engine map) add 26 a view each (checked below).
 constexpr std::size_t kSynthesisSlots = 4;
-constexpr UINT kDescriptorsPerSynthesis = 256;
+constexpr UINT kDescriptorsPerSynthesis = 512;
 // A dispatch's descriptors: sampled textures t0-t4, then storage textures
 // u0-u1. Depth captures run outside a frame's descriptor range: one
 // dispatch per capture slot, after every frame's range.
@@ -61,6 +69,10 @@ constexpr UINT kFirstUav = kShaderResources;
 // The root parameter holding the draws' edge fill (b1, FrameGenImage::content).
 constexpr UINT kFillParameter = 3;
 constexpr UINT kDescriptorsPerDispatch = kShaderResources + 2;
+// Just-in-time synthesis at its most: four views, each with three maps, its
+// shading-rate image and its draw, then the two eyes' composes.
+static_assert(kDescriptorsPerSynthesis >=
+              4 * (3 * (2 + 3 * kDescriptorsPerDispatch) + 2 * kDescriptorsPerDispatch) + 2 * kDescriptorsPerDispatch);
 // Engine motion vectors (CaptureMotion): submissions in flight, never waited
 // for, each with a block of descriptors per dispatch (the two eyes'
 // censuses, then the resample's, one or one per eye) and a readback of each
@@ -209,6 +221,9 @@ struct CaptureKey {
 struct ViewResources {
     FrameGenHistoryState history_state;
     CaptureKey capture;
+    // EnsureView made the view's images for its history state (captures
+    // never allocate them: they wait for the Execute that does).
+    bool set_up{false};
     // Per real frame, in the history state's ring (FrameGenHistoryRing
     // slots; only those are created).
     std::array<Texture, kFrameGenHistoryRingMax> history;
@@ -221,7 +236,11 @@ struct ViewResources {
     Texture output;
     // Linear depth at half resolution, in the ring like the history: the
     // newest frame's, and the previous one's (content it did not see).
+    // Created the first time a frame brings depth (see EnsureDepth); a game
+    // that submits none never pays for them. depth_refused: they could not
+    // be made, and are not tried again until the view is set up again.
     std::array<Texture, kFrameGenHistoryRingMax> depth;
+    bool depth_refused{false};
     // Depth trust scores (in the ring) and the eye-shift map, at half
     // resolution; created once depth is first used.
     std::array<Texture, kFrameGenHistoryRingMax> trust;
@@ -783,12 +802,35 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (const std::optional<std::string> prop = ReadResearchSwitch("VECTORXR_FRAMEGEN_SYNTH_PROP")) {
             prop_hold_ = ParseFrameGenPropHold(*prop);
         }
-        // Research (hypothesis E): the filter's prior for content with nothing
-        // to track (FrameGenTuning::flow_prior; VECTORXR_FRAMEGEN_FLOW_PRIOR
-        // sky, far, sky-still or far-still, optionally :<share>,<margin>,<per
-        // pixel>), from the research file too.
+        // Hypothesis E: the filter's prior for content with nothing to track
+        // (FrameGenTuning::flow_prior, on shader flow by default:
+        // kFrameGenFlowPriorDefault). VECTORXR_FRAMEGEN_FLOW_PRIOR, when set
+        // (the research file too), decides instead and on either flow: sky,
+        // far, sky-still or far-still, optionally :<share>,<margin>,<per
+        // pixel>; "off" or "0" is off, the plan before the default.
         if (const std::optional<std::string> prior = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_PRIOR")) {
             flow_prior_ = ParseFrameGenFlowPrior(*prior);
+        }
+        // The coarsest shader search takes the acceptable displacement nearest
+        // its neighbours' within a tolerance of its best match
+        // (FrameGenTuning::flow_shortest, on by default:
+        // kFrameGenFlowShortestDefault). VECTORXR_FRAMEGEN_FLOW_SHORTEST, when
+        // set (the research file too), decides instead: 1 or
+        // <tolerance>[,<share>[,median]]; "off" is off, the plan before the
+        // default ("0" is a tolerance of 0, not off).
+        if (const std::optional<std::string> shortest = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_SHORTEST")) {
+            flow_shortest_ = ParseFrameGenFlowShortest(*shortest);
+        }
+        // Research: confidence from how distinct each match is
+        // (FrameGenTuning::flow_evidence; VECTORXR_FRAMEGEN_FLOW_EVIDENCE=1 or
+        // <sharpness>[,<cost>]), from the research file too.
+        if (const std::optional<std::string> evidence = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_EVIDENCE")) {
+            flow_evidence_ = ParseFrameGenFlowEvidence(*evidence);
+        }
+        // Research: the coarsest search's radius (FrameGenTuning::flow_reach;
+        // VECTORXR_FRAMEGEN_FLOW_REACH=<1 to 12>), from the research file too.
+        if (const std::optional<std::string> reach = ReadResearchSwitch("VECTORXR_FRAMEGEN_FLOW_REACH")) {
+            flow_reach_ = ParseFrameGenFlowReach(*reach);
         }
         // Interpolation's occlusion handling (VECTORXR_FRAMEGEN_OCCLUSION=0:
         // off) and, for research, its cross-fade fallback
@@ -865,6 +907,20 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
             delta_sky_ = ReadResearchSwitch("VECTORXR_FRAMEGEN_ENGINE_SKY") == "1";
         }
+        // The trust update reads the scores back through the unordered access
+        // view it writes them with (FG_PASS_TRUST_UPDATE): only 32-bit
+        // single-channel formats are always readable that way, half floats
+        // where the device says so. Without that the scores are kept as
+        // 32-bit floats.
+        D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT trust_support{};
+        trust_support.Format = DXGI_FORMAT_R16_FLOAT;
+        const bool typed_load =
+            SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options))) &&
+            options.TypedUAVLoadAdditionalFormats &&
+            SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &trust_support, sizeof(trust_support))) &&
+            (trust_support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0;
+        trust_format_ = typed_load ? DXGI_FORMAT_R16_FLOAT : DXGI_FORMAT_R32_FLOAT;
         if (!software && coarse_tangent_ > 0.0 &&
             SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6))) &&
             options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2 &&
@@ -1001,8 +1057,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         ID3D12Resource* resource = it->second[source.image_index];
         // Capture never reallocates; Execute sets the view up first.
         static_cast<void>(quality); // the flow level does not affect the history images
-        if (!view.depth[1].resource || !view.history_state.MatchesImages(request.extent, resource->GetDesc().Format,
-                                                                      request.output)) {
+        if (!view.set_up || !view.history_state.MatchesImages(request.extent, resource->GetDesc().Format, request.output)) {
             error.clear();
             return false;
         }
@@ -1255,8 +1310,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         ViewResources& view = views_[index];
         const FrameGenExtent extent = view.history_state.Extent();
-        if (!view.depth[1].resource || extent.width != request.extent.width || extent.height != request.extent.height) {
+        if (!view.set_up || extent.width != request.extent.width || extent.height != request.extent.height) {
             return false; // Execute sets the view up first
+        }
+        if (view.depth_refused) {
+            return false; // its depth images could not be made: reported then
         }
         ID3D12Resource* resource = it->second[depth.image_index];
         const D3D12_RESOURCE_DESC desc = resource->GetDesc();
@@ -1283,6 +1341,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         HRESULT hr = DeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
+            return false;
+        }
+        // The first depth this view can read: its linear depth images.
+        if (!EnsureDepth(view, error)) {
             return false;
         }
         const std::size_t slot_index = capture_count_ % capture_slots_.size();
@@ -1890,6 +1952,10 @@ class D3D12FrameGen final : public FrameGenGpu {
             !Create(target.cross_keys, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error)) {
             return false;
         }
+        // The empty eye's own depth may never have been captured.
+        if (!EnsureDepth(target, error)) {
+            return false;
+        }
         Texture& from = source.depth[source.history_state.Newest()];
         Texture& to = target.depth[target.history_state.Newest()];
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
@@ -2067,6 +2133,32 @@ class D3D12FrameGen final : public FrameGenGpu {
         return true;
     }
 
+    // A view's linear depth images (one per ring slot, at half resolution),
+    // created the first time a frame brings depth for it: a game that
+    // submits none never pays for them. The view is set up (EnsureView).
+    // Slots of frames from before hold no depth, and nothing reads them: a
+    // frame reads the previous one's depth only when that frame used its own
+    // (FrameGenViewRequest::depth_previous). All of them or none: a view
+    // whose images cannot be made goes on without depth until it is set up
+    // again.
+    bool EnsureDepth(ViewResources& view, std::string& error) {
+        if (view.depth[0].resource) {
+            return true;
+        }
+        if (view.depth_refused) {
+            return false;
+        }
+        const FrameGenExtent half = FrameGenPyramid(view.history_state.Extent())[1];
+        for (std::uint8_t slot = 0; slot < view.history_state.Ring(); ++slot) {
+            if (!Create(view.depth[slot], half, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) {
+                view.depth = {};
+                view.depth_refused = true;
+                return false;
+            }
+        }
+        return true;
+    }
+
     // A view's depth trust and eye-shift textures, created the first time
     // its depth is used.
     bool EnsureTrust(ViewResources& view, FrameGenExtent extent, std::string& error) {
@@ -2074,9 +2166,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             return true;
         }
         const FrameGenExtent half = FrameGenPyramid(extent)[1];
-        // Scores in [-1, 1]: half floats hold them to a thousandth.
+        // Scores in [-1, 1]: half floats hold them to a thousandth (32-bit
+        // floats where the trust update cannot read half floats back, see
+        // trust_format_).
         for (std::uint8_t slot = 0; slot < view.history_state.Ring(); ++slot) {
-            if (!Create(view.trust[slot], half, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_FLOAT, true, error)) return false;
+            if (!Create(view.trust[slot], half, trust_format_, trust_format_, true, error)) return false;
         }
         const FrameGenExtent tiles = FrameGenTrustTiles(half);
         return Create(view.depth_scales, {tiles.width * kFrameGenDepthScaleTexels, tiles.height},
@@ -3099,6 +3193,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = Failure("D3D12 Frame Generation command reset", hr);
             return false;
         }
+        commands_open_ = true;
         descriptor_cursor_ = static_cast<UINT>(slot_index) * kDescriptorsPerFrame;
         descriptor_end_ = descriptor_cursor_ + kDescriptorsPerFrame;
         ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
@@ -3132,8 +3227,17 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (prop_hold_.enabled) {
             effective_tuning.prop_hold = prop_hold_;
         }
-        if (flow_prior_.enabled) {
-            effective_tuning.flow_prior = flow_prior_;
+        if (flow_prior_) {
+            effective_tuning.flow_prior = *flow_prior_;
+        }
+        if (flow_shortest_) {
+            effective_tuning.flow_shortest = *flow_shortest_;
+        }
+        if (flow_evidence_.enabled) {
+            effective_tuning.flow_evidence = flow_evidence_;
+        }
+        if (flow_reach_ != 0) {
+            effective_tuning.flow_reach = flow_reach_;
         }
         effective_tuning.hardware_flow = tuning.hardware_flow && HardwareFlowReady();
         // Engine motion vectors (stage 3): their evidence is taken with the
@@ -3169,7 +3273,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                        views_[i].capture.Matches(views[i].source);
             }
             if (both && views[source].request.depth && views[target].request.depth && views_[source].depth_ready &&
-                views_[source].depth_generation == validator_.Generation()) {
+                !views_[target].depth_refused && views_[source].depth_generation == validator_.Generation()) {
                 ok = RecordDepthCross(views[source], views[target], views_[source], views_[target], error);
                 Stamp(static_cast<int>(FrameGenPass::kDepthCrossResolve));
             }
@@ -3391,7 +3495,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
             Flush(barriers);
         }
-        if (timed) {
+        // The optical flow hardware's step closes the list and reopens it: a
+        // step that failed in between left it closed, with nothing more to
+        // record on it or to close.
+        const bool open = commands_open_;
+        if (timed && open) {
             const UINT first = static_cast<UINT>(slot_index * kTimingStamps);
             commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first + kTimingStamps - 1);
             // The stamps around the optical flow hardware only when it ran.
@@ -3405,17 +3513,23 @@ class D3D12FrameGen final : public FrameGenGpu {
                                             readback_.Get(), (first + kTimingStamps - 1) * sizeof(UINT64));
             }
         }
-        if (profiling_) {
+        if (profiling_ && open) {
             commands_->ResolveQueryData(profile_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0,
                                         static_cast<UINT>(profile_labels_.size() + 1), profile_readback_.Get(), 0);
         }
-        hr = commands_->Close();
-        if (FAILED(hr)) {
-            error = Failure("D3D12 Frame Generation command close", hr);
-            ok = false;
+        if (open) {
+            hr = commands_->Close();
+            commands_open_ = false;
+            if (FAILED(hr)) {
+                // An earlier failure is the cause: its error stays.
+                if (ok) error = Failure("D3D12 Frame Generation command close", hr);
+                ok = false;
+            }
         }
         if (!ok) {
-            // Nothing was submitted: the recorded state transitions never ran.
+            // Nothing was submitted, or only the work before the optical flow
+            // hardware (the slot keeps its fence value): the state
+            // transitions recorded since never ran.
             // Rebuild the views, freeing textures only once earlier
             // submissions have finished with them.
             const bool idle = WaitIdle();
@@ -5168,6 +5282,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         };
         for (std::size_t i = 0; i < views.size() && i < views_.size(); ++i) {
             ViewResources& view = views_[i];
+            // A dump always has a depth file (the replay reads one): a view whose
+            // game brought no depth gets its ring here, empty.
+            if (!view.depth[0].resource && !EnsureDepth(view, error)) {
+                return false;
+            }
             if (!copy(view.history[view.history_state.Newest()], "view" + std::to_string(i) + "-color.raw") ||
                 !copy(view.depth[view.history_state.Newest()], "view" + std::to_string(i) + "-depth.f32")) {
                 return false;
@@ -5357,8 +5476,10 @@ class D3D12FrameGen final : public FrameGenGpu {
             // from its old images are not written.
             view.history_state = {};
             view.capture = {};
+            view.set_up = false;
             for (auto& generation : view.slot_generation) ++generation;
             view.trust_stereo = view.depth_ready = view.depth_fresh = false;
+            view.depth_refused = false;
             view.engine_pair = {};
             view.engine_read = {};
             view.engine_next = 0;
@@ -5509,7 +5630,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     // they are, for a ring of `ring` slots.
     bool Prepared(const FrameGenViewSubmission& submission, const ViewResources& view, std::uint8_t ring) const {
         const auto it = images_.find(submission.source.swapchain);
-        if (it == images_.end() || submission.source.image_index >= it->second.size() || !view.depth[1].resource ||
+        if (it == images_.end() || submission.source.image_index >= it->second.size() || !view.set_up ||
             view.history_state.Ring() != ring) {
             return false;
         }
@@ -5531,6 +5652,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 if (!complete) {
                     view.history_state = {};
                     view.capture.valid = false;
+                    view.set_up = false;
                 }
             }
         } setup{view};
@@ -5554,8 +5676,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             analyzed_.clear();
             for (auto& generation : view.slot_generation) ++generation;
         }
-        // The depth textures are created last: they mark a view set up.
-        if (change & FrameGenHistoryState::kAll || !view.depth[1].resource) {
+        // The view counts as set up once all of these are made.
+        if (change & FrameGenHistoryState::kAll || !view.set_up) {
+            view.set_up = false;
             view.capture.valid = false;
             const DXGI_FORMAT view_format = ViewFormat(source_desc.Format, submission.source.format);
             view.history = {};
@@ -5589,13 +5712,13 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.depth_scale_raw = {};
             view.depth_scale_votes = {};
             view.trust_stereo = false;
+            // The linear depth likewise, with the first frame that brings
+            // depth (see EnsureDepth); a capture into the old images is gone
+            // with them.
             view.depth = {};
-            for (std::uint8_t slot = 0; slot < ring; ++slot) {
-                if (!Create(view.depth[slot], levels[1], DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) {
-                    return false;
-                }
-            }
-            view.depth_ready = false;
+            view.depth_refused = false;
+            view.depth_ready = view.depth_fresh = false;
+            view.set_up = true;
         }
         if (change != FrameGenHistoryState::kNone || !view.filtered[0].resource) {
             view.filtered = {};
@@ -5969,6 +6092,11 @@ class D3D12FrameGen final : public FrameGenGpu {
                 return HardwareFailed(reason);
             }
         }
+        // The driver signals each registration's value once it is done on
+        // the GPU. The queue that writes the images first (the pack pass
+        // here; a capture's raw pack on the game's queue, which is this
+        // queue whenever captures pack) waits for the last one there, once.
+        work_->Wait(view.hardware_fence.Get(), view.hardware_fence_value);
         view.hardware_extent = input;
         view.hardware_perf = perf;
         view.hardware_fresh = true;
@@ -6194,6 +6322,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                 return false;
             }
         }
+        // The driver signals each registration's value once it is done on
+        // the GPU: the queue that copies into the atlas waits for the last
+        // one there, once.
+        work_->Wait(atlas_.fence.Get(), atlas_.fence_value);
         atlas_.perf = perf;
         atlas_.inputs = inputs;
         atlas_.cells = cells;
@@ -6302,11 +6434,15 @@ class D3D12FrameGen final : public FrameGenGpu {
         const UINT first = static_cast<UINT>(slot_index * kTimingStamps);
         if (query_heap_) commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first + 1);
         HRESULT hr = commands_->Close();
+        commands_open_ = false; // also when Close reports what was recorded
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation command close", hr);
             return false;
         }
         hr = SubmitWork(commands_.Get());
+        // The slot's allocator holds work the queue has now: its next use
+        // waits for this even if the rest of the frame is never submitted.
+        slot.fence_value = fence_value_;
         for (const ViewRecording& recording : recordings) {
             MarkUsed(*recording.view, fence_.Get(), fence_value_);
         }
@@ -6353,6 +6489,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = Failure("D3D12 Frame Generation command reset", hr);
             return false;
         }
+        commands_open_ = true;
         ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
         commands_->SetDescriptorHeaps(1, heaps);
         commands_->SetComputeRootSignature(root_signature_.Get());
@@ -6411,11 +6548,15 @@ class D3D12FrameGen final : public FrameGenGpu {
         const UINT first = static_cast<UINT>(slot_index * kTimingStamps);
         if (query_heap_) commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first + 1);
         HRESULT hr = commands_->Close();
+        commands_open_ = false; // also when Close reports what was recorded
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation command close", hr);
             return false;
         }
         hr = SubmitWork(commands_.Get());
+        // The slot's allocator holds work the queue has now: its next use
+        // waits for this even if the rest of the frame is never submitted.
+        slot.fence_value = fence_value_;
         for (const ViewRecording& recording : recordings) {
             MarkUsed(*recording.view, fence_.Get(), fence_value_);
         }
@@ -6477,6 +6618,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = Failure("D3D12 Frame Generation command reset", hr);
             return false;
         }
+        commands_open_ = true;
         ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
         commands_->SetDescriptorHeaps(1, heaps);
         commands_->SetComputeRootSignature(root_signature_.Get());
@@ -6646,7 +6788,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         // Depth only when it was captured for this frame; it is used once.
         FrameGenViewRequest effective = view.history_state.Effective(submission.request);
         // Only once the depth is known to line the eyes up (see RecordDepthCheck).
-        effective.depth = effective.depth && view.depth_ready && view.depth[1].resource && validator_.Usable() &&
+        effective.depth = effective.depth && view.depth_ready && view.depth[0].resource && validator_.Usable() &&
                           view.depth_generation == validator_.Generation();
         view.depth_ready = false;
         // Engine motion vectors likewise: captured for this frame (paired
@@ -7014,7 +7156,11 @@ class D3D12FrameGen final : public FrameGenGpu {
     UINT descriptor_end_{0};
     ComPtr<ID3D12GraphicsCommandList> commands_;
     ComPtr<ID3D12GraphicsCommandList5> commands5_; // the same list, for variable-rate shading
+    bool commands_open_{false};                     // Execute's list is recording (RunHardwareFlow closes it)
     UINT shading_tile_{0};                          // pixels per shading-rate tile side; 0: no variable-rate shading
+    // The depth trust scores' format: half floats where the device reads
+    // them back through an unordered access view, 32-bit floats otherwise.
+    DXGI_FORMAT trust_format_{DXGI_FORMAT_R16_FLOAT};
     bool world_motion_{true};                       // FrameGenViewRequest::world_motion where depth is in use
     bool occlusion_{true};                          // FrameGenTuning::occlusion allowed
     bool cross_fade_{false};                        // FrameGenTuning::cross_fade forced (research)
@@ -7024,7 +7170,10 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool shift_smooth_{false};                      // FrameGenTuning::shift_smooth forced (research)
     float sharpen_{0.0f};                           // FrameGenTuning::sharpen forced (research)
     FrameGenPropHold prop_hold_;                    // FrameGenTuning::prop_hold forced (research)
-    FrameGenFlowPrior flow_prior_;                  // FrameGenTuning::flow_prior forced (research)
+    std::optional<FrameGenFlowPrior> flow_prior_;       // FrameGenTuning::flow_prior forced, on or off (switch set)
+    std::optional<FrameGenFlowShortest> flow_shortest_; // FrameGenTuning::flow_shortest forced, on or off (switch set)
+    FrameGenFlowEvidence flow_evidence_;            // FrameGenTuning::flow_evidence forced (research)
+    std::uint32_t flow_reach_{0};                   // FrameGenTuning::flow_reach forced (research)
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
     std::array<CaptureSlot, kCaptureSlots> capture_slots_; // views x frames in flight, color and depth

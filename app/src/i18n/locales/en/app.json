@@ -14,6 +14,12 @@
       "label": "On-Screen Display",
       "subtitle": "Headset display, placement, and bindings"
     },
+    "screenshots": {
+      "label": "Screenshots"
+    },
+    "mirror": {
+      "label": "Stabilized Mirror"
+    },
     "registry": {
       "label": "Application Registry",
       "subtitle": "Register applications for profile assignment",
@@ -28,6 +34,10 @@
     "guides": {
       "label": "Guides",
       "subtitle": "How each feature works, and how to turn it on and off"
+    },
+    "supporters": {
+      "label": "Supporters",
+      "subtitle": "Patreon acknowledgements"
     },
     "about": {
       "label": "About",
@@ -79,9 +89,25 @@
     "httpFailed": "GitHub update check failed with HTTP {status}",
     "invalidRelease": "GitHub did not return a valid release"
   },
+  "supporters": {
+    "thanks": "Thank you to the Patreon members who make it possible to keep improving VectorXR.",
+    "communityTitle": "Thank you to our community",
+    "communityThanks": "Thank you to everyone who donated through Ko-fi, flagged bugs, sent in reports, or suggested improvements.",
+    "forumsThanks": "A special thank you to the DCS community on the Eagle Dynamics forums for giving an early build of VectorXR 0.11 such a warm welcome.",
+    "empty": "No supporter names have been published yet.",
+    "comingSoon": "VectorXR's Patreon is coming Soon™. Members who join will be thanked here.",
+    "joinFirst": "No supporters are credited yet. Join on Patreon to be among the first thanked here.",
+    "unavailable": "The supporter list is unavailable. Try refreshing in a moment.",
+    "cached": "The latest list is unavailable. Showing the last saved list."
+  },
   "sidebar": {
     "appSettings": "App Settings",
+    "applications": "Applications",
+    "capture": "Capture & Mirror",
+    "openxrUtilities": "OpenXR Utilities",
     "enhancements": "OpenXR Enhancements",
+    "performance": "Performance",
+    "lookAndFeel": "Look and Feel",
     "suiteOff": "VectorXR runtime effects are off",
     "moduleTitle": "{subtitle}. {status}",
     "saveHint": "Save Changes to apply settings. Each enhancement notes which changes need a VR application restart.",
@@ -115,6 +141,8 @@
     "issuesFound_other": "{count} validation issues found",
     "issuesHint": "You can still apply — errors will appear in the Validation panel and save will be blocked until resolved.",
     "valid": "Config structure and value ranges look valid.",
+    "networkPathsTitle": "Network paths are not imported",
+    "networkPathsHint": "This file names files or folders on another computer. VectorXR opens these paths inside every game, so they are left out: the screenshot folder goes back to the default, and sounds and pictures to the built-in ones. Choose them again after importing if you want them.",
     "applyToEditor": "Apply to Editor",
     "importAndSave": "Import and Save"
   },

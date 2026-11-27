@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import ApplicationDiscovery from './components/ApplicationDiscovery.vue'
 import AppRegistryEditor from './components/AppRegistryEditor.vue'
 import DebugExportModal from './components/DebugExportModal.vue'
 import HealthCheckModal from './components/HealthCheckModal.vue'
@@ -10,6 +11,7 @@ import PatchNotesModal from './components/PatchNotesModal.vue'
 import SidebarNav from './components/SidebarNav.vue'
 import StickySaveBar from './components/StickySaveBar.vue'
 import AboutTab from './components/tabs/AboutTab.vue'
+import SupportersTab from './components/tabs/SupportersTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import OsdTab from './components/tabs/OsdTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
@@ -20,6 +22,8 @@ import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
 import QuadViewsTab from './components/tabs/QuadViewsTab.vue'
 import TurboTab from './components/tabs/TurboTab.vue'
+import ScreenshotsTab from './components/tabs/ScreenshotsTab.vue'
+import MirrorUtility from './components/MirrorUtility.vue'
 import { exportConfigFile, loadDebugSources, loadLogSnapshot, loadOpenXrLayers, loadRuntimeStatus, loadSeenApps, loadRuntimePacing, loadTurboMetrics, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
 import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
 import { errorText } from './lib/errors'
@@ -28,7 +32,8 @@ import { t, withLocale } from './i18n/index.ts'
 import { applyLanguagePreference } from './i18n/load.ts'
 import { loadLanguagePreference, storeLanguagePreference, type LanguagePreference } from './i18n/preference.ts'
 import { sourceLocale } from './i18n/locales.ts'
-import { moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
+import { clearNetworkPaths, type ClearedImportPath } from './lib/importPaths'
+import { bindingListLabel, moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
 import { configureTray, loadTrayEnabled, onTrayAction, storeTrayEnabled, trayStatus, updateTrayStatus, type TrayAction } from './lib/tray'
@@ -70,6 +75,7 @@ const importFileInput = ref<HTMLInputElement | null>(null)
 const importPreviewOpen = ref(false)
 const importedConfig = ref<VectorXRConfig | null>(null)
 const importErrors = ref<string[]>([])
+const importClearedPaths = ref<ClearedImportPath[]>([])
 const openXrLayerSnapshot = ref<OpenXrLayerSnapshot | null>(null)
 const openXrLayersLoading = ref(false)
 const openXrMachineWritesUnlocked = ref(false)
@@ -116,15 +122,17 @@ const currentTrayStatus = computed(() => trayStatus(
   !store.state.loading && !store.state.loadError && !!store.state.path,
 ))
 
-function enabledProfileCount(moduleId: ModuleId) {
-  return store.state.config.modules[moduleId].profiles.filter((profile) => profile.enabled).length
+const screenshotsActive = computed(() => store.state.config.core.screenshot.bindings.some(binding =>
+  binding.type === 'keyboard' ? binding.chord.length > 0
+    : binding.type === 'device' && !!binding.deviceGuid.trim() && !!binding.inputPath.trim(),
+))
+
+function enhancementActive(moduleId: ModuleId | 'mirror') {
+  const module = store.state.config.modules[moduleId]
+  return module.enabled || module.profiles.some(profile => profile.enabled)
 }
 
-function enhancementActive(moduleId: ModuleId) {
-  return store.state.config.modules[moduleId].enabled || enabledProfileCount(moduleId) > 0
-}
-
-function enhancementStatus(moduleId: ModuleId) {
+function enhancementStatus(moduleId: ModuleId | 'mirror') {
   return enhancementActive(moduleId) ? t('common.active') : t('common.inactive')
 }
 
@@ -150,10 +158,30 @@ const tabs = computed(() => [
     enhancementActive: store.state.config.core.osd.enabled,
   },
   {
+    id: 'screenshots' as const,
+    label: t('app.tabs.screenshots.label'),
+    subtitle: t('utilities.screenshots.binding.label'),
+    status: bindingListLabel(store.state.config.core.screenshot.bindings),
+    enhancementActive: screenshotsActive.value,
+  },
+  {
+    id: 'mirror' as const,
+    label: t('app.tabs.mirror.label'),
+    subtitle: t('utilities.mirror.heading'),
+    status: enhancementStatus('mirror'),
+    enhancementActive: enhancementActive('mirror'),
+  },
+  {
     id: 'registry' as const,
-    label: t('app.tabs.registry.label'),
+    label: t('registry.applications.eyebrow'),
     subtitle: t('app.tabs.registry.subtitle'),
     status: t('app.tabs.registry.status', { count: store.state.config.applications.length }),
+  },
+  {
+    id: 'discovery' as const,
+    label: t('registry.discovery.eyebrow'),
+    subtitle: t('registry.discovery.title'),
+    status: store.state.config.core.trackSeenApps ? t('registry.discovery.trackingOn') : t('registry.discovery.trackingOff'),
   },
   {
     id: 'layers' as const,
@@ -165,6 +193,12 @@ const tabs = computed(() => [
     id: 'guides' as const,
     label: t('app.tabs.guides.label'),
     subtitle: t('app.tabs.guides.subtitle'),
+    status: '',
+  },
+  {
+    id: 'supporters' as const,
+    label: t('app.tabs.supporters.label'),
+    subtitle: t('app.tabs.supporters.subtitle'),
     status: '',
   },
   {
@@ -492,8 +526,10 @@ function handleImportFile(event: Event) {
     const content = e.target?.result as string
     try {
       const parsed: unknown = JSON.parse(content)
-      const config = normalizeConfig(parsed)
+      // Paths on another computer are left out and named in the preview.
+      const { config, cleared } = clearNetworkPaths(normalizeConfig(parsed))
       importedConfig.value = config
+      importClearedPaths.value = cleared
       importErrors.value = validateConfig(config)
       importPreviewOpen.value = true
     } catch {
@@ -515,12 +551,14 @@ async function applyImport() {
   importPreviewOpen.value = false
   importedConfig.value = null
   importErrors.value = []
+  importClearedPaths.value = []
 }
 
 function cancelImport() {
   importPreviewOpen.value = false
   importedConfig.value = null
   importErrors.value = []
+  importClearedPaths.value = []
 }
 
 // Registry module chips: jump to an existing profile's module tab, or create a
@@ -588,18 +626,32 @@ async function confirmResetConfig() {
           @update:tray-enabled="trayEnabled = $event"
         />
         <OsdTab v-else-if="store.state.activeTab === 'osd'" :config="store.state.config" :saved-config="store.state.originalConfig" />
+        <ScreenshotsTab v-else-if="store.state.activeTab === 'screenshots'" :config="store.state.config" />
+        <MirrorUtility
+          v-else-if="store.state.activeTab === 'mirror'"
+          :config="store.state.config"
+          :applications="store.state.config.applications"
+          @add-mirror-profile="store.addMirrorProfile"
+          @remove-mirror-profile="store.removeMirrorProfile"
+          @sync-mirror-profile-name="store.syncMirrorProfileName"
+        />
         <AppRegistryEditor
           v-else-if="store.state.activeTab === 'registry'"
           :config="store.state.config"
           :applications="store.state.config.applications"
+          @add="store.addApplication"
+          @remove="store.removeApplication"
+          @open-module="handleOpenModule"
+        />
+        <ApplicationDiscovery
+          v-else-if="store.state.activeTab === 'discovery'"
+          :applications="store.state.config.applications"
+          :tracking-enabled="store.state.config.core.trackSeenApps"
           :seen-apps="store.state.seenApps"
           :seen-apps-loading="store.state.seenAppsLoading"
-          @add="store.addApplication"
           @add-seen="store.addSeenApplication"
           @clear-seen="store.clearSeenApplications"
           @refresh-seen="store.refreshSeenApps"
-          @remove="store.removeApplication"
-          @open-module="handleOpenModule"
         />
         <OpenXrLayersTab
           v-else-if="store.state.activeTab === 'layers'"
@@ -615,6 +667,7 @@ async function confirmResetConfig() {
           @status="store.state.status = $event"
         />
         <GuidesTab v-else-if="store.state.activeTab === 'guides'" @navigate="store.setActiveTab" />
+        <SupportersTab v-else-if="store.state.activeTab === 'supporters'" />
         <AboutTab
           v-else-if="store.state.activeTab === 'about'"
           :latest-patch="latestPatch"
@@ -688,7 +741,7 @@ async function confirmResetConfig() {
       <input ref="importFileInput" type="file" accept=".json" class="hidden" @change="handleImportFile" />
       <HealthCheckModal :open="healthCheckOpen" :summary="healthSummary" @close="healthCheckOpen = false" @export-debug="debugExportOpen = true" />
       <DebugExportModal :open="debugExportOpen" :exporting="debugExporting" @cancel="debugExportOpen = false" @confirm="exportDebugInformation" />
-      <ImportPreviewModal :open="importPreviewOpen" :config="importedConfig" :errors="importErrors" @apply="applyImport" @cancel="cancelImport" />
+      <ImportPreviewModal :open="importPreviewOpen" :config="importedConfig" :errors="importErrors" :cleared-paths="importClearedPaths" @apply="applyImport" @cancel="cancelImport" />
       <LogViewerModal :open="logViewerOpen" :loading="logViewerLoading" :snapshot="logSnapshot" @close="logViewerOpen = false" />
       <PatchNotesModal :open="patchNotesOpen" :entries="patchNotes" @close="patchNotesOpen = false" />
     </section>

@@ -131,8 +131,6 @@
     "summary": {
       "waitForSubmission": "Czekaj na przesłanie",
       "overlapSubmission": "Nakładaj przesłanie",
-      "sampleAtEntry": "Próbkuj przy wejściu",
-      "sampleAtReturn": "Próbkuj przy powrocie",
       "prediction": "Predykcja {percent}%",
       "fpsCap": "Limit {fps} fps",
       "noCap": "Bez limitu"
@@ -140,7 +138,6 @@
     "advancedTitle": "Zaawansowane taktowanie",
     "advancedIntro": "Do eksperymentów. Większość graczy powinna zostawić te ustawienia bez zmian.",
     "waitForOverlap": "Czekaj na nakładające się przesłanie",
-    "sampleAtWaitEntry": "Próbkuj taktowanie predykcji przy wejściu w oczekiwanie",
     "predictionLabel": "Predykcja (%)",
     "frameCapLabel": "Limit klatek (fps; 0 = wył.)",
     "changeNote": "Zmiana dowolnej wartości przełącza profil na Niestandardowy. Dostosowanie predykcji wymaga obsługi zegara środowiska uruchomieniowego."

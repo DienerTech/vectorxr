@@ -425,11 +425,42 @@ impl Default for OsdSettings {
     }
 }
 
+fn default_screenshot_eyes() -> String {
+    "both".to_owned()
+}
+
+// Full-resolution screenshots: bindings that work in every game, which eyes
+// to save ("both", "left" or "right") and an absolute folder; an empty folder
+// is the default one (default_screenshot_folder) and is left out of the file.
+// Optional in older configs: a missing block has no binding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotSettings {
+    #[serde(default, deserialize_with = "deserialize_input_bindings")]
+    bindings: Vec<InputBinding>,
+    #[serde(default = "default_screenshot_eyes")]
+    eyes: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    folder: String,
+}
+
+impl Default for ScreenshotSettings {
+    fn default() -> Self {
+        Self {
+            bindings: Vec::new(),
+            eyes: default_screenshot_eyes(),
+            folder: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CoreConfig {
     #[serde(default)]
     osd: OsdSettings,
+    #[serde(default)]
+    screenshot: ScreenshotSettings,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default = "default_log_level")]
@@ -448,6 +479,7 @@ impl Default for CoreConfig {
             enabled: true,
             log_level: default_log_level(),
             osd: OsdSettings::default(),
+            screenshot: ScreenshotSettings::default(),
             log_retention_files: default_log_retention_files(),
             track_seen_apps: true,
             sound: SoundSettings::default(),
@@ -850,7 +882,6 @@ struct TurboExperimentalSettings {
     enabled: bool,
     application_ids: Vec<String>,
     wait_for_submit: bool,
-    sample_at_entry: bool,
     prediction_percent: u32,
     frame_limit: u32,
 }
@@ -858,7 +889,7 @@ struct TurboExperimentalSettings {
 impl Default for TurboExperimentalSettings {
     fn default() -> Self {
         Self { enabled: false, application_ids: Vec::new(), wait_for_submit: false,
-            sample_at_entry: false, prediction_percent: 100, frame_limit: 0 }
+            prediction_percent: 100, frame_limit: 0 }
     }
 }
 
@@ -905,7 +936,7 @@ fn default_framegen_frame_multiplier() -> String {
 }
 
 fn default_framegen_artifact_suppression() -> i64 {
-    50
+    10
 }
 
 fn default_framegen_motion_limit_percent() -> i64 {
@@ -955,6 +986,10 @@ struct FrameGenSettings {
     // Use the game's depth (written only when off; absent means on).
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     use_game_depth: bool,
+    // Settings this app does not know (another edition's, or a later
+    // version's) round-trip untouched.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn default_framegen_interpolate_flow() -> String { "auto".to_owned() }
@@ -972,6 +1007,7 @@ impl Default for FrameGenSettings {
             extend_head_prediction: false,
             edge_fill: false,
             use_game_depth: true,
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -1021,6 +1057,158 @@ impl Default for FrameGenModuleConfig {
     }
 }
 
+fn bounded(value: f64, minimum: f64, maximum: f64, default: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(minimum, maximum)
+    } else {
+        default
+    }
+}
+
+
+// Stabilized mirror window: the layer's own desktop window in the game's
+// process, showing one eye's image with head shake smoothed out, for streaming
+// and recording. The layer rejects the file when smoothing is outside 0-100,
+// margin outside 0-40, width outside 320-3840, frameRate outside 15-120, or
+// the eye ("left" | "right") or aspect ("16:9" | "16:10" | "4:3" | "1:1" |
+// "21:9") is not one it knows. fill_monitor makes the picture fill `monitor`
+// (a monitor's device name as the system reports it, such as \\.\DISPLAY2;
+// empty for none chosen), borderless, instead of a resizable window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MirrorSettings {
+    #[serde(default = "default_mirror_smoothing")]
+    smoothing: f64,
+    #[serde(default = "default_false")]
+    level_horizon: bool,
+    #[serde(default = "default_mirror_eye")]
+    eye: String,
+    #[serde(default = "default_mirror_margin")]
+    margin: f64,
+    #[serde(default = "default_mirror_aspect")]
+    aspect: String,
+    // A number written by hand as 1280.0, or one out of range, is not a
+    // reason to refuse the whole file: it is rounded here and brought into
+    // range with the rest (normalize_mirror_settings).
+    #[serde(default = "default_mirror_width", deserialize_with = "deserialize_mirror_width")]
+    width: u32,
+    #[serde(default = "default_mirror_frame_rate", deserialize_with = "deserialize_mirror_frame_rate")]
+    frame_rate: u32,
+    #[serde(default = "default_false")]
+    fill_monitor: bool,
+    #[serde(default)]
+    monitor: String,
+}
+
+fn default_mirror_smoothing() -> f64 {
+    60.0
+}
+
+fn default_mirror_eye() -> String {
+    "left".to_owned()
+}
+
+fn default_mirror_margin() -> f64 {
+    15.0
+}
+
+fn default_mirror_aspect() -> String {
+    "16:9".to_owned()
+}
+
+fn default_mirror_width() -> u32 {
+    1280
+}
+
+fn default_mirror_frame_rate() -> u32 {
+    60
+}
+
+// Any JSON number, rounded and kept to u32; anything else is the default.
+fn lenient_u32(value: serde_json::Value, fallback: u32) -> u32 {
+    match value.as_f64() {
+        Some(number) if number.is_finite() => number.round().clamp(0.0, f64::from(u32::MAX)) as u32,
+        _ => fallback,
+    }
+}
+
+fn deserialize_mirror_width<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    Ok(lenient_u32(serde_json::Value::deserialize(deserializer)?, default_mirror_width()))
+}
+
+fn deserialize_mirror_frame_rate<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    Ok(lenient_u32(serde_json::Value::deserialize(deserializer)?, default_mirror_frame_rate()))
+}
+
+const MIRROR_EYES: [&str; 2] = ["left", "right"];
+const MIRROR_ASPECTS: [&str; 5] = ["16:9", "16:10", "4:3", "1:1", "21:9"];
+// The longest monitor name the layer accepts.
+const MIRROR_MONITOR_MAX_LENGTH: usize = 64;
+
+// Brings the mirror window's settings to what the layer accepts, as the app's
+// own normalization does: numbers into their range as whole numbers, an
+// unknown eye or aspect back to the default, and a monitor name longer than
+// the layer takes to none chosen.
+fn normalize_mirror_settings(settings: &mut MirrorSettings) {
+    settings.smoothing = bounded(settings.smoothing, 0.0, 100.0, default_mirror_smoothing()).round();
+    settings.margin = bounded(settings.margin, 0.0, 40.0, default_mirror_margin()).round();
+    settings.width = settings.width.clamp(320, 3840);
+    settings.frame_rate = settings.frame_rate.clamp(15, 120);
+    if !MIRROR_EYES.contains(&settings.eye.as_str()) {
+        settings.eye = default_mirror_eye();
+    }
+    if !MIRROR_ASPECTS.contains(&settings.aspect.as_str()) {
+        settings.aspect = default_mirror_aspect();
+    }
+    if settings.monitor.encode_utf16().count() > MIRROR_MONITOR_MAX_LENGTH {
+        settings.monitor.clear();
+    }
+}
+
+impl Default for MirrorSettings {
+    fn default() -> Self {
+        Self {
+            smoothing: default_mirror_smoothing(),
+            level_horizon: false,
+            eye: default_mirror_eye(),
+            margin: default_mirror_margin(),
+            aspect: default_mirror_aspect(),
+            width: default_mirror_width(),
+            frame_rate: default_mirror_frame_rate(),
+            fill_monitor: false,
+            monitor: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MirrorProfileConfig {
+    #[serde(default)]
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    application_ids: Vec<String>,
+    #[serde(default)]
+    settings: MirrorSettings,
+}
+
+// Optional in older configs: a missing `mirror` block resolves to Off. Any one
+// of `bindings` shows or hides the window in the running game.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct MirrorModuleConfig {
+    #[serde(default = "default_false")]
+    enabled: bool,
+    #[serde(default, deserialize_with = "deserialize_input_bindings")]
+    bindings: Vec<InputBinding>,
+    #[serde(default)]
+    defaults: MirrorSettings,
+    #[serde(default)]
+    profiles: Vec<MirrorProfileConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct VectorXRModules {
@@ -1034,6 +1222,12 @@ struct VectorXRModules {
     turbo: TurboModuleConfig,
     #[serde(default)]
     framegen: FrameGenModuleConfig,
+    #[serde(default)]
+    mirror: MirrorModuleConfig,
+    // Modules this app does not know (another edition's, or a later
+    // version's) round-trip untouched.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1046,6 +1240,9 @@ struct VectorXRConfig {
     applications: Vec<RegisteredApplication>,
     #[serde(default)]
     modules: VectorXRModules,
+    // Anything else of another edition's or a later version's, untouched.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1250,6 +1447,9 @@ struct RuntimeCapabilities {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeState {
+    // The app tells a layer that does not report a feature ("Needs the
+    // updated VectorXR layer") from one that reports it off by the state key
+    // being absent, so the four feature states are left out when empty.
     #[serde(default)]
     osd_visible: bool,
     #[serde(default)]
@@ -1262,7 +1462,7 @@ struct RuntimeState {
     turbo_reason: String,
     // "off" | "waiting" | "active" | "paused" | "unavailable"; empty from
     // layers without Frame Generation.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     framegen_state: String,
     #[serde(default)]
     framegen_reason: String,
@@ -1276,6 +1476,15 @@ struct RuntimeState {
     framegen_flow_mode: String,
     #[serde(default)]
     framegen_flow_reason: String,
+    // "off" | "pending" | "active" | "hidden" | "unsupported" | "failed";
+    // empty from layers without the stabilized mirror window. The reason is
+    // English text.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    mirror_state: String,
+    #[serde(default)]
+    mirror_reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mirror_visible: Option<bool>,
     #[serde(default)]
     quadviews_diagnostic_visualization: bool,
 }
@@ -1324,7 +1533,14 @@ struct RuntimeControlDocument {
     target_session_id: String,
     revision: u64,
     expires_at_unix_milliseconds: u64,
-    desired: RuntimeState,
+    desired: RuntimeControlAction,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum RuntimeControlAction {
+    QuadviewsDiagnosticVisualization(bool),
+    MirrorVisible(bool),
 }
 
 fn default_config() -> VectorXRConfig {
@@ -1333,6 +1549,7 @@ fn default_config() -> VectorXRConfig {
         core: CoreConfig::default(),
         applications: Vec::new(),
         modules: VectorXRModules::default(),
+        extra: serde_json::Map::new(),
     }
 }
 
@@ -1496,6 +1713,11 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     osd.custom_presets.iter_mut().for_each(split_preset_row_order);
     normalize_toggle_bindings(&mut osd.toggle_binding, &mut osd.toggle_bindings, default_osd_toggle_binding);
     normalize_toggle_bindings(&mut osd.cycle_binding, &mut osd.cycle_bindings, default_osd_cycle_binding);
+    let screenshot = &mut config.core.screenshot;
+    if !matches!(screenshot.eyes.as_str(), "both" | "left" | "right") {
+        screenshot.eyes = default_screenshot_eyes();
+    }
+    screenshot.folder = screenshot.folder.trim().to_owned();
     let depth = &mut config.modules.depthxr.bindings;
     normalize_toggle_bindings(&mut depth.toggle_enabled, &mut depth.toggle_enabled_bindings, default_depth_toggle_binding);
     normalize_toggle_bindings(&mut depth.toggle_anchor, &mut depth.toggle_anchor_bindings, default_depth_toggle_binding);
@@ -1600,6 +1822,31 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     }
 
     for profile in &mut config.modules.framegen.profiles {
+        if profile.name.trim().is_empty() {
+            let first_application = profile.application_ids.first().and_then(|application_id| {
+                config
+                    .applications
+                    .iter()
+                    .find(|application| &application.id == application_id)
+            });
+
+            profile.name = first_application
+                .map(|application| application.name.clone())
+                .unwrap_or_else(|| "New Profile".into());
+        }
+    }
+    // Numeric Frame Generation fields are clamped so hand-edited values do not
+    // cause the layer to reject the whole config file.
+    let framegen = &mut config.modules.framegen;
+    framegen.defaults.artifact_suppression = framegen.defaults.artifact_suppression.clamp(0, 100);
+    framegen.defaults.motion_limit_percent = framegen.defaults.motion_limit_percent.clamp(2, 25);
+    for profile in &mut framegen.profiles {
+        profile.settings.artifact_suppression = profile.settings.artifact_suppression.clamp(0, 100);
+        profile.settings.motion_limit_percent = profile.settings.motion_limit_percent.clamp(2, 25);
+    }
+    normalize_mirror_settings(&mut config.modules.mirror.defaults);
+    for profile in &mut config.modules.mirror.profiles {
+        normalize_mirror_settings(&mut profile.settings);
         if profile.name.trim().is_empty() {
             let first_application = profile.application_ids.first().and_then(|application_id| {
                 config
@@ -2322,32 +2569,189 @@ fn open_file_directory(path: String) -> Result<(), String> {
         ));
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("explorer")
-            .arg(directory)
-            .spawn()
-            .map_err(|error| error.to_string())?;
-        return Ok(());
-    }
+    show_directory(directory)
+}
 
+// Shows a folder in the file manager. On Windows the shell opens the folder
+// itself: explorer.exe's command line would read a comma or a leading slash
+// in the path as its own options (/select, /root and the like).
+#[cfg(target_os = "windows")]
+fn show_directory(directory: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide: Vec<u16> = directory.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    if wide[..wide.len() - 1].contains(&0) {
+        return Err(format!("Unable to open {}", directory.to_string_lossy()));
+    }
+    // The shell may hand the folder to its extensions, which need COM on the
+    // calling thread (a worker's, not the UI's).
+    let com = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_APARTMENTTHREADED | windows::Win32::System::Com::COINIT_DISABLE_OLE1DDE,
+        )
+    };
+    let result = unsafe {
+        ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL)
+    };
+    if com.is_ok() {
+        unsafe { windows::Win32::System::Com::CoUninitialize() };
+    }
+    // ShellExecute reports success as a value above 32.
+    if result.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!("Unable to open {} (shell error {})", directory.to_string_lossy(), result.0 as isize))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_directory(directory: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(directory)
-            .spawn()
-            .map_err(|error| error.to_string())?;
-        return Ok(());
-    }
+    let program = "open";
+    #[cfg(not(target_os = "macos"))]
+    let program = "xdg-open";
 
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        Command::new("xdg-open")
-            .arg(directory)
-            .spawn()
-            .map_err(|error| error.to_string())?;
+    Command::new(program)
+        .arg(directory)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+// The Windows Pictures folder, wherever the user keeps it (it can be moved
+// off the profile, or into a synced folder), as the layer resolves it.
+#[cfg(target_os = "windows")]
+fn pictures_folder() -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Pictures, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+
+    let known = unsafe { SHGetKnownFolderPath(&FOLDERID_Pictures, KF_FLAG_DEFAULT, None) }
+        .ok()
+        .and_then(|path| {
+            let text = unsafe { path.to_string() }.ok();
+            unsafe { CoTaskMemFree(Some(path.as_ptr() as *const core::ffi::c_void)) };
+            text
+        })
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from);
+    known.or_else(|| {
+        env::var("USERPROFILE")
+            .ok()
+            .filter(|profile| !profile.trim().is_empty())
+            .map(|profile| PathBuf::from(profile).join("Pictures"))
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn pictures_folder() -> Option<PathBuf> {
+    env::var("HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+        .map(|home| PathBuf::from(home).join("Pictures"))
+}
+
+// %LOCALAPPDATA%, where the layer keeps its own files.
+fn local_app_data_folder() -> Option<PathBuf> {
+    env::var("LOCALAPPDATA")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+}
+
+// Where screenshots go, as the layer decides it (layer/src/screenshot.cpp,
+// ScreenshotFolder): `custom` (core.screenshot.folder) when it is a full
+// path, else VectorXR under `pictures`, else VectorXR\screenshots under
+// `local_app_data` when there is no Pictures folder. The layer adds a folder
+// per game under either.
+#[derive(Debug, PartialEq)]
+struct ScreenshotFolder {
+    path: PathBuf,
+    // The folder VectorXR makes for itself, not one the user named.
+    is_default: bool,
+}
+
+fn screenshot_folder_in(
+    pictures: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    custom: Option<&str>,
+) -> Result<ScreenshotFolder, String> {
+    if let Some(path) = custom.and_then(custom_screenshot_folder) {
+        return Ok(ScreenshotFolder { path, is_default: false });
+    }
+    pictures
+        .map(|pictures| pictures.join("VectorXR"))
+        .or_else(|| local_app_data.map(|local| local.join("VectorXR").join("screenshots")))
+        .map(|path| ScreenshotFolder { path, is_default: true })
+        .ok_or_else(|| "Unable to find the Pictures folder".to_string())
+}
+
+// A folder from the settings as a path to open: forward slashes become
+// backslashes on Windows and "." and ".." are resolved, without touching the
+// disk. None for a path that is not a full one (the layer does not use it and
+// writes to the default folder) or that holds a character no path can.
+fn custom_screenshot_folder(custom: &str) -> Option<PathBuf> {
+    let text = custom.trim();
+    if text.is_empty() || text.chars().any(|character| character.is_control()) {
+        return None;
+    }
+    #[cfg(target_os = "windows")]
+    let text = text.replace('/', "\\");
+    let folder = PathBuf::from(text);
+    if !folder.is_absolute() {
+        return None;
+    }
+    std::path::absolute(&folder).ok().filter(|path| path.is_absolute())
+}
+
+// Makes sure the folder is there to open. VectorXR's default folder is
+// created: no screenshot may have been taken yet. A folder the user named is
+// not, because it may not be saved yet (or ever): the layer creates it with
+// the first screenshot.
+fn prepare_screenshot_folder(folder: &ScreenshotFolder) -> Result<(), String> {
+    let text = || folder.path.to_string_lossy().into_owned();
+    if folder.is_default {
+        return fs::create_dir_all(&folder.path).map_err(|error| {
+            user_error(
+                "folderCreate",
+                &[("path", text()), ("detail", error.to_string())],
+                format!("Unable to create {}: {error}", text()),
+            )
+        });
+    }
+    if folder.path.is_dir() {
         return Ok(());
     }
+    Err(user_error(
+        "directoryMissing",
+        &[("path", text())],
+        format!("Directory does not exist: {}", text()),
+    ))
+}
+
+// The folder screenshots go to when core.screenshot.folder is not set.
+#[tauri::command]
+fn default_screenshot_folder() -> Result<String, String> {
+    screenshot_folder_in(pictures_folder(), local_app_data_folder(), None)
+        .map(|folder| folder.path.to_string_lossy().into_owned())
+}
+
+// Opens the screenshot folder in the file manager. Returns the folder opened.
+// Off the UI thread: a network folder whose server is gone can take as long
+// as the network's timeout to answer.
+#[tauri::command]
+async fn open_screenshot_folder(folder: Option<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder = screenshot_folder_in(pictures_folder(), local_app_data_folder(), folder.as_deref())?;
+        prepare_screenshot_folder(&folder)?;
+        show_directory(&folder.path)?;
+        Ok(folder.path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 // The language chosen in the installer (windows/nsis-hooks.nsh writes its
@@ -2920,6 +3324,15 @@ fn set_runtime_quadviews_diagnostic_visualization(
     session_id: String,
     enabled: bool,
 ) -> Result<u64, String> {
+    write_runtime_control(session_id, RuntimeControlAction::QuadviewsDiagnosticVisualization(enabled))
+}
+
+#[tauri::command]
+fn set_runtime_mirror_visible(session_id: String, visible: bool) -> Result<u64, String> {
+    write_runtime_control(session_id, RuntimeControlAction::MirrorVisible(visible))
+}
+
+fn write_runtime_control(session_id: String, desired: RuntimeControlAction) -> Result<u64, String> {
     if session_id.is_empty()
         || !session_id.chars().all(|character| {
             character.is_ascii_alphanumeric()
@@ -2934,7 +3347,14 @@ fn set_runtime_quadviews_diagnostic_visualization(
         .into_iter()
         .find(|status| status.session_id == session_id)
         .ok_or_else(|| user_error("sessionInactive", &[], "The OpenXR session is no longer active".into()))?;
-    if !session.capabilities.quadviews_diagnostic_visualization {
+    if matches!(desired, RuntimeControlAction::MirrorVisible(_)) && session.state.mirror_visible.is_none() {
+        return Err(user_error(
+            "mirrorUnavailable",
+            &[],
+            "The mirror window is unavailable for this OpenXR session".into(),
+        ));
+    }
+    if matches!(desired, RuntimeControlAction::QuadviewsDiagnosticVisualization(_)) && !session.capabilities.quadviews_diagnostic_visualization {
         return Err(user_error(
             "diagnosticUnavailable",
             &[],
@@ -2957,10 +3377,7 @@ fn set_runtime_quadviews_diagnostic_visualization(
         target_session_id: session_id.clone(),
         revision,
         expires_at_unix_milliseconds: now.saturating_add(5_000),
-        desired: RuntimeState {
-            quadviews_diagnostic_visualization: enabled,
-            ..Default::default()
-        },
+        desired,
     };
     let content = serde_json::to_string_pretty(&control).map_err(|error| error.to_string())?;
     let path = resolve_runtime_relay_root()
@@ -3184,6 +3601,28 @@ fn play_test_sound_blocking(
 
 #[cfg(test)]
 mod tests {
+    // Settings another edition (or a later version) wrote are kept when this
+    // app saves; a hand-written 1280.0 mirror width does not refuse the file.
+    #[test]
+    fn unknown_settings_round_trip_and_mirror_numbers_are_lenient() {
+        let content = r#"{
+            "version": 3,
+            "laterTopLevel": {"kept": true},
+            "modules": {
+                "crop": {"enabled": true, "defaults": {"top": 10}},
+                "framegen": {"defaults": {"predictionDampening": 50}},
+                "mirror": {"defaults": {"width": 1280.0, "frameRate": -5}}
+            }
+        }"#;
+        let config = super::normalize_config(super::parse_config(content).unwrap());
+        let saved: serde_json::Value = serde_json::to_value(&config).unwrap();
+        assert_eq!(saved["laterTopLevel"]["kept"], true);
+        assert_eq!(saved["modules"]["crop"]["defaults"]["top"], 10);
+        assert_eq!(saved["modules"]["framegen"]["defaults"]["predictionDampening"], 50);
+        assert_eq!(saved["modules"]["mirror"]["defaults"]["width"], 1280);
+        assert!(saved["modules"]["mirror"]["defaults"]["frameRate"].as_u64().unwrap() >= 1);
+    }
+
     // The request the layer reads (ReadInputRescanRequest): its protocol
     // version and the press's time, at the relay root.
     #[test]
@@ -3412,7 +3851,7 @@ mod tests {
         assert_eq!(defaults.experimental.prediction_percent, 100);
         let input = serde_json::json!({"experimental": {
             "enabled": true, "applicationIds": ["dcs"], "waitForSubmit": true,
-            "sampleAtEntry": true, "predictionPercent": 75, "frameLimit": 45
+            "predictionPercent": 75, "frameLimit": 45
         }});
         let config: super::TurboModuleConfig = serde_json::from_value(input.clone()).unwrap();
         let output = serde_json::to_value(config).unwrap();
@@ -3443,7 +3882,7 @@ mod tests {
         assert_eq!(defaults.defaults.flow_quality, "balanced");
         assert_eq!(defaults.defaults.motion_estimation, "shader");
         assert_eq!(defaults.defaults.frame_multiplier, "dynamic");
-        assert_eq!(defaults.defaults.artifact_suppression, 50);
+        assert_eq!(defaults.defaults.artifact_suppression, 10);
         assert_eq!(defaults.defaults.motion_limit_percent, 10);
         assert!(!defaults.defaults.extend_head_prediction);
         assert!(!defaults.defaults.edge_fill);
@@ -3526,6 +3965,249 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_defaults_and_round_trip() {
+        let defaults: super::ScreenshotSettings = serde_json::from_str("{}").unwrap();
+        assert!(defaults.bindings.is_empty());
+        assert_eq!(defaults.eyes, "both");
+        assert!(defaults.folder.is_empty());
+
+        // The layer parses exactly this shape; it must survive unchanged.
+        let input = serde_json::json!({
+            "bindings": [
+                { "type": "keyboard", "chord": ["Ctrl", "Alt", "F9"], "sound": { "enabled": true, "activateSound": "", "deactivateSound": "" } },
+                { "type": "device", "deviceGuid": "guid-1", "inputPath": "button-7" }
+            ],
+            "eyes": "left",
+            "folder": "D:/Shots"
+        });
+        let settings: super::ScreenshotSettings = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(settings.bindings.len(), 2);
+        assert_eq!(serde_json::to_value(settings).unwrap(), input);
+
+        // Configs written before screenshots load with no binding, and the
+        // default folder is not written.
+        let old: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
+            "version": 3,
+            "core": { "enabled": true }
+        }))
+        .unwrap();
+        let saved = serde_json::to_value(super::normalize_config(old)).unwrap();
+        assert_eq!(
+            saved["core"]["screenshot"],
+            serde_json::json!({ "bindings": [], "eyes": "both" })
+        );
+        assert_eq!(
+            serde_json::to_value(super::default_config()).unwrap()["core"]["screenshot"],
+            saved["core"]["screenshot"]
+        );
+
+        // The whole config keeps the block; an unknown eye choice becomes
+        // both eyes and the folder loses stray spaces.
+        let config: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
+            "version": 3,
+            "core": { "screenshot": {
+                "bindings": [{ "type": "keyboard", "chord": ["F9"] }, { "type": "none" }],
+                "eyes": "center",
+                "folder": "  D:/Shots  "
+            } }
+        }))
+        .unwrap();
+        let saved = serde_json::to_value(super::normalize_config(config)).unwrap();
+        assert_eq!(
+            saved["core"]["screenshot"],
+            serde_json::json!({
+                "bindings": [{ "type": "keyboard", "chord": ["F9"] }],
+                "eyes": "both",
+                "folder": "D:/Shots"
+            })
+        );
+    }
+
+    #[test]
+    fn screenshot_folder_is_the_custom_one_or_vectorxr_under_pictures() {
+        let pictures = || Some(std::env::temp_dir().join("Pictures"));
+        let local = || Some(std::env::temp_dir().join("Local"));
+        let folder = |pictures, local, custom| super::screenshot_folder_in(pictures, local, custom).unwrap();
+        let default = super::ScreenshotFolder {
+            path: std::env::temp_dir().join("Pictures").join("VectorXR"),
+            is_default: true,
+        };
+        assert_eq!(folder(pictures(), local(), None), default);
+        assert_eq!(folder(pictures(), local(), Some("  ")), default);
+        // A relative folder is never opened: the layer would not write there.
+        assert_eq!(folder(pictures(), local(), Some("Shots")), default);
+        assert_eq!(folder(pictures(), local(), Some("..\\Shots")), default);
+        assert_eq!(folder(pictures(), local(), Some("D:\\Shots\u{0}\\x")), default);
+
+        let custom = super::ScreenshotFolder { path: std::env::temp_dir().join("Shots"), is_default: false };
+        let text = format!(" {} ", custom.path.to_string_lossy());
+        assert_eq!(folder(pictures(), local(), Some(&text)), custom);
+        assert_eq!(folder(None, None, Some(&text)), custom);
+
+        // Without a Pictures folder the layer writes under %LOCALAPPDATA%.
+        assert_eq!(
+            folder(None, local(), None),
+            super::ScreenshotFolder {
+                path: std::env::temp_dir().join("Local").join("VectorXR").join("screenshots"),
+                is_default: true,
+            }
+        );
+        assert!(super::screenshot_folder_in(None, None, None).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_custom_screenshot_folder_is_made_a_plain_windows_path() {
+        let path = |text| super::custom_screenshot_folder(text);
+        assert_eq!(path("D:/Shots/VR"), Some(std::path::PathBuf::from("D:\\Shots\\VR")));
+        assert_eq!(path("D:\\Shots\\.\\a\\..\\VR\\"), Some(std::path::PathBuf::from("D:\\Shots\\VR\\")));
+        assert_eq!(path("D:/Shots,/select"), Some(std::path::PathBuf::from("D:\\Shots,\\select")));
+        assert_eq!(path("//server/share/Shots"), Some(std::path::PathBuf::from("\\\\server\\share\\Shots")));
+        // Not a full path: a drive-relative one, a rooted one without a drive,
+        // an explorer option.
+        for text in ["D:Shots", "\\Shots", "/select,D:\\Shots", "Shots", ""] {
+            assert_eq!(path(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn only_the_default_screenshot_folder_is_created_to_be_opened() {
+        let root = std::env::temp_dir().join(format!("vectorxr-screenshot-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let default = super::ScreenshotFolder { path: root.join("Pictures").join("VectorXR"), is_default: true };
+        super::prepare_screenshot_folder(&default).unwrap();
+        assert!(default.path.is_dir());
+
+        // A folder the user named and has not saved is left alone.
+        let custom = super::ScreenshotFolder { path: root.join("Unsaved").join("Shots"), is_default: false };
+        let error = super::prepare_screenshot_folder(&custom).unwrap_err();
+        assert!(crate::user_error::plain(&error).starts_with("Directory does not exist: "), "{error}");
+        assert!(!root.join("Unsaved").exists());
+
+        std::fs::create_dir_all(&custom.path).unwrap();
+        super::prepare_screenshot_folder(&custom).unwrap();
+        // A file is not a folder to open.
+        let file = super::ScreenshotFolder { path: root.join("file.txt"), is_default: false };
+        std::fs::write(&file.path, b"x").unwrap();
+        assert!(super::prepare_screenshot_folder(&file).is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn framegen_numbers_are_clamped_on_save() {
+        let config: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
+            "applications": [{ "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }],
+            "modules": {
+                "framegen": {
+                    "defaults": { "artifactSuppression": 150, "motionLimitPercent": 50 },
+                    "profiles": [{ "name": "DCS", "applicationIds": ["dcs"], "settings": { "artifactSuppression": -10, "motionLimitPercent": 0 } }]
+                }
+            }
+        }))
+        .unwrap();
+        let saved = serde_json::to_value(super::normalize_config(config)).unwrap();
+        let framegen = &saved["modules"]["framegen"];
+        assert_eq!(framegen["defaults"]["artifactSuppression"], 100);
+        assert_eq!(framegen["defaults"]["motionLimitPercent"], 25);
+        assert_eq!(framegen["profiles"][0]["settings"]["artifactSuppression"], 0);
+        assert_eq!(framegen["profiles"][0]["settings"]["motionLimitPercent"], 2);
+    }
+
+    #[test]
+    fn mirror_defaults_and_round_trip() {
+        let default_settings = serde_json::json!({
+            "smoothing": 60.0, "levelHorizon": false, "eye": "left", "margin": 15.0,
+            "aspect": "16:9", "width": 1280, "frameRate": 60, "fillMonitor": false, "monitor": ""
+        });
+        let defaults: super::MirrorModuleConfig = serde_json::from_str("{}").unwrap();
+        assert!(!defaults.enabled);
+        assert!(defaults.bindings.is_empty());
+        assert_eq!(serde_json::to_value(&defaults.defaults).unwrap(), default_settings);
+        assert!(defaults.profiles.is_empty());
+
+        // The layer parses exactly this shape; it must survive unchanged.
+        let input = serde_json::json!({
+            "enabled": true,
+            "bindings": [
+                { "type": "keyboard", "chord": ["Ctrl", "Alt", "M"] },
+                { "type": "device", "deviceGuid": "guid-1", "inputPath": "button-7" }
+            ],
+            "defaults": {
+                "smoothing": 0.0, "levelHorizon": true, "eye": "right", "margin": 40.0,
+                "aspect": "21:9", "width": 3840, "frameRate": 120,
+                "fillMonitor": true, "monitor": "\\\\.\\DISPLAY2"
+            },
+            "profiles": [{
+                "name": "DCS", "enabled": false, "applicationIds": ["dcs"],
+                "settings": {
+                    "smoothing": 100.0, "levelHorizon": false, "eye": "left", "margin": 0.0,
+                    "aspect": "1:1", "width": 320, "frameRate": 15,
+                    "fillMonitor": false, "monitor": ""
+                }
+            }]
+        });
+        let config: super::MirrorModuleConfig = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(config.bindings.len(), 2);
+        assert_eq!(config.defaults.eye, "right");
+        assert!(config.defaults.fill_monitor);
+        assert_eq!(config.defaults.monitor, r"\\.\DISPLAY2");
+        assert_eq!(config.profiles[0].settings.width, 320);
+        assert_eq!(serde_json::to_value(config).unwrap(), input);
+
+        // Whole numbers from a hand-written file load too; missing values are the
+        // defaults. One binding is a list of one, and None entries are dropped.
+        let partial: super::MirrorSettings =
+            serde_json::from_value(serde_json::json!({ "smoothing": 30, "aspect": "4:3" })).unwrap();
+        assert_eq!(partial.smoothing, 30.0);
+        assert_eq!(partial.aspect, "4:3");
+        assert_eq!(partial.margin, 15.0);
+        assert_eq!(partial.eye, "left");
+        assert_eq!(partial.width, 1280);
+        assert_eq!(partial.frame_rate, 60);
+        assert!(!partial.fill_monitor);
+        assert!(partial.monitor.is_empty());
+        let single: super::MirrorModuleConfig = serde_json::from_value(serde_json::json!({
+            "bindings": { "type": "keyboard", "chord": ["F7"] }
+        }))
+        .unwrap();
+        assert_eq!(single.bindings.len(), 1);
+        let none: super::MirrorModuleConfig =
+            serde_json::from_value(serde_json::json!({ "bindings": [{ "type": "none" }] })).unwrap();
+        assert!(none.bindings.is_empty());
+
+        // Configs written before the mirror window load with it off and save the defaults.
+        let old: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
+            "version": 3,
+            "applications": [{ "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }],
+            "modules": { "framegen": { "enabled": true } }
+        }))
+        .unwrap();
+        assert!(!old.modules.mirror.enabled);
+        let saved = serde_json::to_value(super::normalize_config(old)).unwrap();
+        assert_eq!(
+            saved["modules"]["mirror"],
+            serde_json::json!({ "enabled": false, "bindings": [], "defaults": default_settings, "profiles": [] })
+        );
+        assert_eq!(
+            serde_json::to_value(super::default_config()).unwrap()["modules"]["mirror"],
+            saved["modules"]["mirror"]
+        );
+
+        let unnamed: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
+            "applications": [{ "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }],
+            "modules": { "mirror": { "profiles": [{ "name": " ", "applicationIds": ["dcs"] }] } }
+        }))
+        .unwrap();
+        let profile = &super::normalize_config(unnamed).modules.mirror.profiles[0];
+        assert_eq!(profile.name, "DCS");
+        assert!(profile.enabled);
+        assert_eq!(profile.settings.smoothing, 60.0);
+        assert_eq!(profile.settings.aspect, "16:9");
+    }
+
+    #[test]
     fn turbo_recovery_defaults_on_and_preserves_opt_out() {
         let old: super::TurboModuleConfig =
             serde_json::from_value(serde_json::json!({ "enabled": true })).unwrap();
@@ -3555,6 +4237,14 @@ mod tests {
     }
 
     #[test]
+    fn visibility_commands_serialize_only_the_requested_feature() {
+        use super::RuntimeControlAction::*;
+        assert_eq!(serde_json::to_value(MirrorVisible(false)).unwrap(), serde_json::json!({"mirrorVisible": false}));
+        assert_eq!(serde_json::to_value(QuadviewsDiagnosticVisualization(true)).unwrap(),
+                   serde_json::json!({"quadviewsDiagnosticVisualization": true}));
+    }
+
+    #[test]
     fn runtime_status_accepts_old_and_new_protocol_fields() {
         let mut value = serde_json::json!({
             "protocolVersion": 1, "sessionId": "test", "processId": 1,
@@ -3578,6 +4268,8 @@ mod tests {
         value["state"]["framegenFlow"] = "shader".into();
         value["state"]["framegenFlowMode"] = "auto".into();
         value["state"]["framegenFlowReason"] = "hardware late".into();
+        value["state"]["mirrorState"] = "hidden".into();
+        value["state"]["mirrorReason"] = "The window was closed".into();
         value["quadviewsDimensions"] = serde_json::json!([{"width": 1000, "height": 900, "allocatedWidth": 1200, "allocatedHeight": 1000}]);
         let current: super::RuntimeStatusDocument = serde_json::from_value(value).unwrap();
         assert_eq!(current.state.turbo_state, "recovery-disabled");
@@ -3592,6 +4284,18 @@ mod tests {
         assert_eq!(current.state.framegen_flow_mode, "auto");
         assert_eq!(current.state.framegen_flow_reason, "hardware late");
         assert!(old.state.framegen_flow.is_empty());
+        assert_eq!(current.state.mirror_state, "hidden");
+        assert_eq!(current.state.mirror_reason, "The window was closed");
+        assert!(old.state.mirror_state.is_empty() && old.state.mirror_reason.is_empty());
+
+        // What the app's pages get: a state an older layer did not report is
+        // absent, not an empty string, and a reported one is there.
+        let old_state = serde_json::to_value(&old.state).unwrap();
+        let current_state = serde_json::to_value(&current.state).unwrap();
+        for key in ["framegenState", "mirrorState"] {
+            assert!(old_state.get(key).is_none(), "{key} from an older layer");
+            assert!(current_state.get(key).is_some_and(|state| state.is_string()), "{key} from this layer");
+        }
         assert_eq!(current.quadviews_dimensions[0].allocated_width, 1200);
     }
 
@@ -4133,6 +4837,8 @@ fn main() {
             reset_stored_data,
             load_log_snapshot,
             open_file_directory,
+            default_screenshot_folder,
+            open_screenshot_folder,
             open_external_url,
             load_community_override,
             installer_language,
@@ -4147,6 +4853,7 @@ fn main() {
             clear_turbo_fault_logs,
             load_debug_sources,
             set_runtime_quadviews_diagnostic_visualization,
+            set_runtime_mirror_visible,
             request_input_rescan,
             load_gpu_capabilities,
             list_input_devices,

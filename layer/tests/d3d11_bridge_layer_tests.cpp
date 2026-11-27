@@ -31,6 +31,7 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 #include "depthxr/quadviews_sizing.h"
+#include "depthxr/runtime_relay.h"
 #include "test_adapter.h"
 #include "test_gates.h"
 
@@ -167,6 +168,13 @@ class D3D11BridgeLayerTestPeer {
         OpenXrLayer& layer = OpenXrLayer::Instance();
         std::scoped_lock lock(layer.mutex_);
         return layer.quadviews_diagnostic_visualization_enabled_;
+    }
+    // The session's id in the VectorXR app's runtime relay (its status and
+    // control files); empty without a session.
+    static std::string RuntimeRelaySessionId() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.runtime_relay_session_id_;
     }
     // Whether the app's live control can show the overlay in the session.
     static bool QuadViewsDiagnosticVisualizationAvailable() {
@@ -693,8 +701,7 @@ struct StandIn {
     // The next `refusals` acquires of these swapchains fail.
     std::vector<XrSwapchain> refuse_acquire;
     int refusals{0};
-    // The next `wait_refusals` waits on these swapchains fail, the image
-    // handed back all the same (it may be released).
+    // The next `wait_refusals` waits fail without handing back the image.
     std::vector<XrSwapchain> refuse_wait;
     int wait_refusals{0};
     // Each stereo view's field of view, as xrLocateViews returns it.
@@ -1926,12 +1933,12 @@ XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo
     // released (OpenXR's order: a wait only after the image waited before it
     // was released).
     if (chain->waits >= chain->acquires || chain->waits > chain->releases) return XR_ERROR_CALL_ORDER_INVALID;
-    ++chain->waits;
     const std::vector<XrSwapchain>& refused = g_runtime.refuse_wait;
     if (g_runtime.wait_refusals > 0 && std::find(refused.begin(), refused.end(), swapchain) != refused.end()) {
         --g_runtime.wait_refusals;
         return XR_ERROR_RUNTIME_FAILURE;
     }
+    ++chain->waits;
     return XR_SUCCESS;
 }
 
@@ -3723,6 +3730,143 @@ void TestUnstagedReleaseUnderHeldContext(Game& game) {
     EndCase(game);
 }
 
+// 4d, as the device's protection is turned on. The game's device has no
+// multithread protection, and its calls came from one thread so far. A game
+// thread releases an image between xrEndFrame's staging and its locks (the
+// second thread: the bridge wants protection on), and, while xrEndFrame hands
+// that release over under the layer's locks (Released, holding the context),
+// acquires another swapchain's image: its staging turns protection on, and
+// it takes the device's lock before the layer's. Driven by events:
+//  - xrEndFrame comes to the layer's GameContextLock, holding none of the
+//    layer's locks: there the game thread makes its release;
+//  - xrEndFrame comes to the bridge's hold of the context for that release,
+//    under the layer's locks: there the game thread starts its acquire, and
+//    is given until it comes to the device's lock, and 200 ms more (to enter
+//    it and wait for the layer's locks), where it gets that far.
+// An xrEndFrame that held nothing of the device's (its protection was off
+// when it looked) then waits for the device's lock under the layer's locks,
+// which the game thread, holding the device's lock, waits for: both calls
+// must return (10 s, FAILED). Holding the device's lock from before its own
+// locks, xrEndFrame's hold for the release is its own lock again, and the
+// game thread's acquire waits for it holding none of the layer's.
+void TestUnstagedReleaseAsProtectionTurnsOn(Game& game) {
+    const std::string name = "unstaged-release-protection-turning-on";
+    BeginCase(name, game);
+    ComPtr<ID3D11Multithread> multithread;
+    Check(SUCCEEDED(game.context.As(&multithread)), name + ": the game's context has ID3D11Multithread");
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          name + ": a bridged session");
+    Check(Peer::GameContext().Always(),
+          name + ": a bridged session's calls take the device's lock whether its protection is on or not");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    Target late = MakeTarget(app, ColorInfo(), "an image released late");
+    Target other = MakeTarget(app, ColorInfo(), "another swapchain's image");
+    const std::array<Eye, 2> eyes{{{&left, 0}, {&right, 0}}};
+    Check(Frame(app, game, {&left, &right}, {FrameColor(1, 0), FrameColor(1, 1)}, eyes) == XR_SUCCESS,
+          name + ": a first frame");
+    Check(multithread->GetMultithreadProtected() == FALSE && Contains(Peer::Bridge().Summary(), "secondThread=no"),
+          name + ": one thread so far, and no protection: " + Peer::Bridge().Summary());
+    // Acquired and rendered before; released by the game thread once
+    // xrEndFrame's staging is done.
+    Draw(game, late.images[Acquire(app, late)], FrameColor(2, 0));
+
+    const auto await = [&](HANDLE event, const char* what) {
+        if (WaitForSingleObject(event, 10000) != WAIT_OBJECT_0) {
+            std::cout << "FAILED: " << name << ": " << what
+                      << " within 10 s: deadlocked (xrEndFrame waits for the device's lock holding the layer's "
+                         "locks, which the game thread, holding the device's lock, waits for)\n"
+                      << std::flush;
+            TerminateProcess(GetCurrentProcess(), 1);
+        }
+    };
+    const HANDLE at_lock = CreateEventW(nullptr, TRUE, FALSE, nullptr);       // xrEndFrame, before its locks
+    const HANDLE late_released = CreateEventW(nullptr, TRUE, FALSE, nullptr); // the game thread's release returned
+    const HANDLE handing_over = CreateEventW(nullptr, TRUE, FALSE, nullptr);  // xrEndFrame, at the release's hold
+    const HANDLE acquiring = CreateEventW(nullptr, TRUE, FALSE, nullptr);     // the game thread, at the device's lock
+    const HANDLE acquired = CreateEventW(nullptr, TRUE, FALSE, nullptr);      // the game thread's acquire returned
+    const HANDLE ended = CreateEventW(nullptr, TRUE, FALSE, nullptr);         // xrEndFrame returned
+    const DWORD frame_thread = GetCurrentThreadId();
+    std::atomic<DWORD> game_thread_id{0};
+    std::atomic<bool> armed{false};
+    std::atomic<bool> landed{false};
+    std::atomic<int> unstaged_holds{0};
+    Peer::GameContext().SetWaitHookForTest([&] {
+        const DWORD current = GetCurrentThreadId();
+        if (current == frame_thread) {
+            if (!armed.exchange(false)) return;
+            SetEvent(at_lock);
+            await(late_released, "the game thread's xrReleaseSwapchainImage did not return");
+        } else if (current == game_thread_id.load() && landed.load()) {
+            SetEvent(acquiring);
+        }
+    });
+    // The bridge's first wait for the context on the frame's thread after
+    // the late release: its hand-over, under the layer's locks.
+    Peer::Bridge().SetContextWaitHookForTest([&] {
+        if (GetCurrentThreadId() != frame_thread || !landed.load() || unstaged_holds++ != 0) return;
+        SetEvent(handing_over);
+        if (WaitForSingleObject(acquiring, 500) == WAIT_OBJECT_0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    });
+    XrResult late_release = XR_ERROR_RUNTIME_FAILURE;
+    std::uint32_t other_index = 0;
+    std::thread game_thread([&] {
+        game_thread_id = GetCurrentThreadId();
+        await(at_lock, "xrEndFrame did not come to the device's lock ahead of its own locks");
+        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        late_release = app.api.release(late.swapchain, &release);
+        landed = true;
+        SetEvent(late_released);
+        await(handing_over, "xrEndFrame did not hand the late release over unstaged");
+        other_index = Acquire(app, other);
+        SetEvent(acquired);
+    });
+    // The frame's thread is the one in xrEndFrame: another waits for it.
+    std::thread watch([&] {
+        await(ended, "the frame's xrEndFrame did not return");
+        await(acquired, "the game thread's xrAcquireSwapchainImage did not return");
+    });
+    const std::size_t shown_before = ShownCount();
+    const XrResult framed = Frame(
+        app, game, {&left, &right}, {FrameColor(3, 0), FrameColor(3, 1)}, eyes, nullptr, nullptr, false, {},
+        [&](const XrFrameEndInfo& end) {
+            armed = true;
+            const XrResult result = app.api.end_frame(app.session, &end);
+            SetEvent(ended);
+            return result;
+        });
+    watch.join();
+    game_thread.join();
+    Peer::GameContext().SetWaitHookForTest(nullptr);
+    Peer::Bridge().SetContextWaitHookForTest(nullptr);
+    for (const HANDLE event : {at_lock, late_released, handing_over, acquiring, acquired, ended}) CloseHandle(event);
+    Check(framed == XR_SUCCESS, name + ": the frame " + std::to_string(framed));
+    Check(late_release == XR_SUCCESS, name + ": the late release " + std::to_string(late_release));
+    Check(unstaged_holds.load() >= 1, name + ": the late release was handed over unstaged, in xrEndFrame");
+    Check(multithread->GetMultithreadProtected() != FALSE && Contains(Peer::Bridge().Summary(), "secondThread=yes"),
+          name + ": the game thread's calls turned protection on: " + Peer::Bridge().Summary());
+    const std::vector<ShownFrame> shown = Shown(shown_before);
+    Check(shown.size() == 1 && shown[0].views.size() == 2 && Near(shown[0].views[0].texel, FrameColor(3, 0)) &&
+              Near(shown[0].views[1].texel, FrameColor(3, 1)),
+          name + ": the frame is shown");
+    // And on: the image the game thread acquired, and frames after.
+    Draw(game, other.images[other_index], FrameColor(5, 0));
+    Release(app, other);
+    Check(Frame(app, game, {&left, &right}, {FrameColor(4, 0), FrameColor(4, 1)}, eyes) == XR_SUCCESS,
+          name + ": a frame after");
+    Render(app, game, late, FrameColor(6, 0));
+    CheckValidation(game, name);
+    StopApp(app);
+    multithread->SetMultithreadProtected(FALSE);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
 // 4e. The game's own Direct3D 11 session, Frame Generation engaged: it
 // captures each released eye image on the game's context, under the
 // layer's lock (and its own). The game releases the left eye on one thread
@@ -4705,10 +4849,9 @@ void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
               << " texels): digest " << hex.str() << ", frame 0 band " << Text(readbacks.front()[2]) << " / "
               << Text(readbacks.front()[eye_texels + 2]) << "\n";
 
-    // An output the runtime hands back with an error is released with
-    // nothing drawn, and that frame is split into layers. Frame Generation
-    // is told of every release of the outputs all the same: the runtime
-    // shows the image released last wherever a frame shows the swapchain.
+    // A hard wait error on the right eye splits this frame. Nothing is
+    // released for that eye until its same acquisition is waited on and
+    // drawn into on the next frame.
     const std::array<XrSwapchain, 2> outputs = Peer::CompositorOutputs();
     if (GpuNegativeControlsAllowed()) {
         const auto runtime_releases = [](XrSwapchain swapchain) {
@@ -4729,16 +4872,31 @@ void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
         }
         const auto [d3d11_before, split_before] = Peer::QuadFrames();
         Check(QuadFrame(app, game, targets, kFrames + 3) == XR_SUCCESS, "a quad frame whose right output's wait fails");
+        int acquired_right = 0;
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            const StandInSwapchain* right = FindSwapchain(outputs[1]);
+            Check(right && !right->acquired.empty(), "the right output is still acquired after the failed wait");
+            acquired_right = right->acquires;
+        }
+        Check(runtime_releases(outputs[1]) == released_before[1] && Peer::FrameGenReleases(outputs[1]) == told_before[1],
+              "a refused wait neither releases the right image nor tells Frame Generation there is a new image");
         Check(QuadFrame(app, game, targets, kFrames + 4) == XR_SUCCESS, "a quad frame after it");
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            Check(FindSwapchain(outputs[1])->acquires == acquired_right,
+                  "the next composed frame reuses the right eye's pending acquisition");
+        }
         const auto [d3d11_after, split_after] = Peer::QuadFrames();
         Check(d3d11_after == d3d11_before + 1 && split_after == split_before + 1,
               "the frame whose output wait failed is split, the one after it composed");
         for (int eye = 0; eye < 2; ++eye) {
             const int released = runtime_releases(outputs[eye]) - released_before[eye];
             const std::uint64_t told = Peer::FrameGenReleases(outputs[eye]) - told_before[eye];
-            Check(released == 2 && told == 2, "output " + std::to_string(eye) + ": the runtime got " +
-                                                  std::to_string(released) + " releases, Frame Generation was told of " +
-                                                  std::to_string(told));
+            const int expected = eye == 0 ? 2 : 1;
+            Check(released == expected && told == static_cast<std::uint64_t>(expected),
+                  "output " + std::to_string(eye) + ": the runtime got " + std::to_string(released) +
+                      " releases, Frame Generation was told of " + std::to_string(told));
         }
     } else {
         std::cout << "FG_TEST_NO_STALL=1: skipped refused compositor-output wait control\n";
@@ -4829,6 +4987,111 @@ bool BetweenFrames(const std::optional<Color>& corner, const std::optional<Color
 // last frame written (logged), and when they keep failing the layer composes
 // for a while. Toggled off, the Direct3D 11 compositor composes again, with
 // the right colours, and no frame shown on the way is black.
+// A session the game began with stereo views while Quadviews is on (DCS
+// without Options > VR > Use Quad View) has no quad views to draw the
+// diagnostic overlay into: the app's control is unavailable, and the
+// overlay's binding does not show it, logging why instead.
+void TestQuadViewsOverlayInStereoSession(Game& game) {
+    CaseSettings settings;
+    settings.framegen = false;
+    settings.quadviews = true;
+    settings.diagnostic_binding = true;
+    BeginCase("quad-views-overlay-stereo", game, settings);
+    App app = StartApp(); // no XR_VARJO_quad_views
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const std::vector<Color> colors{FrameColor(4, 0), FrameColor(4, 1)};
+    const auto frame = [&](const std::string& at) {
+        Check(Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS,
+              at + ": xrEndFrame");
+    };
+    frame("stereo frame");
+    Check(!Peer::QuadViewsDiagnosticVisualizationAvailable(),
+          "overlay: the app cannot show it in a session begun with stereo views");
+
+    Peer::HoldQuadViewsDiagnosticBinding(true);
+    frame("binding pressed");
+    Peer::HoldQuadViewsDiagnosticBinding(false);
+    frame("binding released");
+    Peer::HoldQuadViewsDiagnosticBinding(std::nullopt);
+    Check(!Peer::QuadViewsDiagnosticVisualization(),
+          "overlay: its binding does not show it in a session begun with stereo views");
+
+    // The VectorXR app's Show visualization button: the session's status
+    // tells the app it cannot show the overlay (the button stays disabled),
+    // and a show command the app sends anyway is not taken.
+    {
+        const std::string session_id = Peer::RuntimeRelaySessionId();
+        Check(!session_id.empty(), "the session has a runtime relay id");
+        const std::filesystem::path root = depthxr::ResolveRuntimeRelayRoot();
+        const std::filesystem::path control_path = depthxr::RuntimeControlPath(root, session_id);
+        std::error_code ec;
+        std::filesystem::create_directories(control_path.parent_path(), ec);
+        {
+            std::ofstream stream(control_path, std::ios::trunc);
+            stream << "{\n"
+                   << "  \"protocolVersion\": 1,\n"
+                   << "  \"targetSessionId\": \"" << session_id << "\",\n"
+                   << "  \"revision\": 1,\n"
+                   << "  \"expiresAtUnixMilliseconds\": " << depthxr::RuntimeRelayUnixMilliseconds() + 60'000 << ",\n"
+                   << "  \"desired\": { \"quadviewsDiagnosticVisualization\": true }\n"
+                   << "}\n";
+        }
+        const std::filesystem::path status_path = depthxr::RuntimeStatusPath(root, session_id);
+        const std::uint64_t written_after = depthxr::RuntimeRelayUnixMilliseconds();
+        std::string status;
+        // The relay polls twice a second and writes the status at least once
+        // a second: wait for a status written after the command.
+        for (int attempt = 0; attempt < 40; ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            frame("app command pending");
+            std::ifstream stream(status_path, std::ios::binary);
+            std::ostringstream text;
+            text << stream.rdbuf();
+            status = text.str();
+            const auto at = status.find("\"updatedAtUnixMilliseconds\": ");
+            if (at != std::string::npos &&
+                std::strtoull(status.c_str() + at + 29, nullptr, 10) > written_after + 600)
+                break;
+        }
+        Check(Contains(status, "\"capabilities\": { \"quadviewsDiagnosticVisualization\": false"),
+              "overlay: the session tells the app it cannot show it, so its Show visualization button is "
+              "disabled: " + status);
+        Check(Contains(status, "\"acknowledgedRevision\": 0,") &&
+                  Contains(status, "\"state\": { \"quadviewsDiagnosticVisualization\": false"),
+              "overlay: the app's show command is not taken: " + status);
+        Check(!Peer::QuadViewsDiagnosticVisualization(),
+              "overlay: the app does not show it in a session begun with stereo views");
+        std::filesystem::remove(control_path, ec);
+    }
+
+    for (int eye = 0; eye < 2; ++eye) {
+        const ShownView& view = g_runtime.frames.back().views[eye];
+        Check(Near(view.texel, colors[eye]), "the runtime shows the game's frame, " +
+                                                 (view.texel ? Text(*view.texel) : "nothing") + ", rendered " +
+                                                 Text(colors[eye]));
+    }
+
+    const std::string log = Peer::Log();
+    Check(Count(log, "Quadviews INACTIVE (application began a STEREO session") == 1,
+          "the log tells the session is stereo");
+    Check(!Contains(log, "Quadviews diagnostic visualization shown via "),
+          "overlay: the log never tells it shown");
+    Check(Count(log, "Quadviews diagnostic visualization is unavailable (") == 1 &&
+              Contains(log, "the application began a STEREO session, so there are no quad views to show. "
+                            "The application did not enable XR_VARJO_quad_views"),
+          "overlay: the binding's press logs why it is unavailable, once");
+    Check(app.api.destroy_swapchain(left.swapchain) == XR_SUCCESS &&
+              app.api.destroy_swapchain(right.swapchain) == XR_SUCCESS,
+          "the swapchains are destroyed");
+    StopApp(app);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
 void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
     CaseSettings settings;
     settings.quadviews = true;
@@ -6282,13 +6545,19 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     // The layer logged no error of its own (the test's reads of the log are logged as errors). In
     // software, the GPU-bound frames above can outlast Frame Generation's wait for its own work of
     // three frames before (100 ms): it skips that frame, as after a GPU stall (a hosted CI runner's
-    // WARP, 2026-10-13). On a GPU that is an error here too.
+    // WARP, 2026-10-13). The first generated frames' work, which the stand-in's xrEndFrame reads
+    // back on the runtime's queue, can also keep the presenter thread in that xrEndFrame past its
+    // 2 s watchdog (a hosted runner's WARP, 2026-11-26: 2 s for the first, 260-350 ms for the next).
+    // Only there: a presenter held in the layer's own code is still an error. On a GPU each is an
+    // error here too.
     const std::size_t software_waits =
         SoftwareAdapter(game)
             ? Count(log, "[error] Frame Generation could not generate a frame: D3D12 Frame Generation GPU work did "
                          "not finish in time") +
                   Count(log, "[error] Frame Generation could not generate a frame: D3D12 Frame Generation synthesis "
-                             "did not finish in time")
+                             "did not finish in time") +
+                  Count(log, "[error] Frame Generation: the presenter thread has published no refresh for 2 s "
+                             "(presenter thread submitting a generated frame, in the runtime's xrEndFrame")
             : 0;
     Check(Count(log, "[error]") == Count(log, "[error] D3D11 bridge layer tests: log read") + software_waits,
           "the layer logged no error" + LayerErrors(log));
@@ -7325,8 +7594,11 @@ int main(int argc, char** argv) {
         TestContextHeldAcrossRelease(game);
         TestQuadViewsUnderHeldContext(game);
         TestUnstagedReleaseUnderHeldContext(game);
+        TestUnstagedReleaseAsProtectionTurnsOn(game);
         TestNativeCaptureUnderHeldContext(game);
         TestNativeGenerateUnderHeldContext(game);
+    } else if (bridged && only && std::string(only) == "unstaged-release-protection-turning-on") {
+        TestUnstagedReleaseAsProtectionTurnsOn(game);
     } else if (bridged && only && std::string(only) == "native-generate-context-held") {
         TestNativeGenerateUnderHeldContext(game);
     } else if (bridged && only && std::string(only) == "quad-views-context-held") {
@@ -7341,6 +7613,8 @@ int main(int argc, char** argv) {
         TestDepthRects(game, false, false);
     } else if (bridged && only && std::string(only) == "runtime-stall-outside-layer-lock") {
         TestRuntimeStallOutsideLayerLock(game);
+    } else if (bridged && only && std::string(only) == "quad-views-overlay-stereo") {
+        TestQuadViewsOverlayInStereoSession(game);
     } else if (bridged && only && std::string(only) == "toolkit-below-framegen-off") {
         TestToolkitBelowKeepsFrameGenOff(game);
     } else if (bridged && only && std::string(only).rfind("gpu-bound-dynamic", 0) == 0) {
@@ -7362,6 +7636,7 @@ int main(int argc, char** argv) {
         TestContextHeldAcrossRelease(game);
         TestQuadViewsUnderHeldContext(game);
         TestUnstagedReleaseUnderHeldContext(game);
+        TestUnstagedReleaseAsProtectionTurnsOn(game);
         TestNativeCaptureUnderHeldContext(game);
         TestNativeGenerateUnderHeldContext(game);
         TestPrivateDepthSession(game, false);
@@ -7373,6 +7648,7 @@ int main(int argc, char** argv) {
         TestToolkitBelowKeepsFrameGenOff(game);
         TestBridgedQuadViewsComposed(game, false);
         TestBridgedQuadViewsComposed(game, true);
+        TestQuadViewsOverlayInStereoSession(game);
         TestBridgedQuadFrameGen(game, "extrapolate");
         TestBridgedQuadFrameGen(game, "interpolate");
         TestBridgedQuadFrameGenGeometry(game);

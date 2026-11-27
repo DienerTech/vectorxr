@@ -19,6 +19,15 @@
     "compactMetrics": "OSD 精簡效能選項無效",
     "bodyOrder": "OSD 內容順序必須讓每一列各出現一次"
   },
+  "screenshot": {
+    "eyes": "{field} 必須是 both、left 或 right",
+    "folder": "{field} 必須是完整的資料夾路徑，例如 D:\\Screenshots"
+  },
+  "mirror": {
+    "eye": "{field} 必須是 left 或 right",
+    "aspect": "{field} 必須是 {values}",
+    "monitor": "{field} 必須是不超過 {max} 個字元的文字"
+  },
   "binding": {
     "chordEmpty": "{field} 必須包含至少一個按鍵",
     "chordUnsupportedKey": "{field} 包含不支援的按鍵：{key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field} 必須是 performance、balanced 或 quality",
     "motionEstimation": "{field} 必須是 shader 或 hardware",
     "frameMultiplier": "{field} 必須是 auto、dynamic、2x、3x 或 4x",
+    "autoLowestRate": "{field} 必須為 off 或 2x",
     "diagnosticView": "{field} 必須是 off、flow、confidence 或 tint",
     "interpolateFlow": "{field} 必須為 auto、hardware 或 shader"
   },
@@ -61,6 +71,8 @@
   "version": "version 必須等於 {version}",
   "warnings": {
     "turboFrameGenOverlap": "{targets} 同時開啟了 Turbo 與 Frame Generation。Frame Generation 會接管影格節奏；在執行 Frame Generation 的工作階段中，Turbo 會保持關閉。",
+    "mirrorFillNoMonitorDefault": "防手震鏡像視窗：預設設定檔中已開啟「填滿螢幕」，但尚未選擇螢幕。在選擇螢幕之前，鏡像會以一般視窗開啟。",
+    "mirrorFillNoMonitorProfile": "防手震鏡像視窗：設定檔 {profile} 中已開啟「填滿螢幕」，但尚未選擇螢幕。在選擇螢幕之前，鏡像會以一般視窗開啟。",
     "moreApplications_other": "另外 {count} 個",
     "applicationsWithoutProfile": "沒有自訂設定檔的應用程式"
   },

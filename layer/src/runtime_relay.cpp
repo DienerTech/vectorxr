@@ -227,13 +227,15 @@ bool ReadRuntimeControl(const std::filesystem::path& path, RuntimeControlDocumen
     const auto revision = ReadUnsigned(content, "revision");
     const auto expires = ReadUnsigned(content, "expiresAtUnixMilliseconds");
     const auto diagnostic = ReadBool(content, "quadviewsDiagnosticVisualization");
-    if (!protocol_version || !target_session_id || !revision || !expires || !diagnostic) { if (error) *error = "Runtime control document is missing or has invalid required fields"; return false; }
+    const auto mirror = ReadBool(content, "mirrorVisible");
+    if (!protocol_version || !target_session_id || !revision || !expires || diagnostic.has_value() == mirror.has_value()) { if (error) *error = "Runtime control document is missing or has invalid required fields"; return false; }
     if (*protocol_version != kRuntimeRelayProtocolVersion) { if (error) *error = "Unsupported runtime relay protocol version"; return false; }
     document->protocol_version = static_cast<std::uint32_t>(*protocol_version);
     document->target_session_id = *target_session_id;
     document->revision = *revision;
     document->expires_at_unix_milliseconds = *expires;
-    document->quadviews_diagnostic_visualization = *diagnostic;
+    document->quadviews_diagnostic_visualization = diagnostic;
+    document->mirror_visible = mirror;
     return true;
 }
 
@@ -249,8 +251,11 @@ bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDo
            << "  \"updatedAtUnixMilliseconds\": " << document.updated_at_unix_milliseconds << ",\n"
            << "  \"acknowledgedRevision\": " << document.acknowledged_revision << ",\n"
            << "  \"capabilities\": { \"quadviewsDiagnosticVisualization\": " << (document.quadviews_diagnostic_visualization_available ? "true" : "false") << ", \"osd\": " << (document.osd_available ? "true" : "false") << " },\n"
-           << "  \"state\": { \"quadviewsDiagnosticVisualization\": " << (document.quadviews_diagnostic_visualization_enabled ? "true" : "false")
-           << ", \"osdVisible\": " << (document.osd_visible ? "true" : "false")
+           << "  \"state\": { \"quadviewsDiagnosticVisualization\": " << (document.quadviews_diagnostic_visualization_enabled ? "true" : "false");
+    if (document.mirror_visible.has_value()) {
+        stream << ", \"mirrorVisible\": " << (*document.mirror_visible ? "true" : "false");
+    }
+    stream << ", \"osdVisible\": " << (document.osd_visible ? "true" : "false")
            << ", \"osdCompact\": " << (document.osd_compact ? "true" : "false")
            << ", \"osdMessage\": \"" << EscapeJson(document.osd_message) << "\""
            << ", \"turboState\": \"" << EscapeJson(document.turbo_state)
@@ -260,7 +265,9 @@ bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDo
            << "\", \"framegenDepth\": \"" << EscapeJson(document.framegen_depth)
            << "\", \"framegenFlow\": \"" << EscapeJson(document.framegen_flow)
            << "\", \"framegenFlowMode\": \"" << EscapeJson(document.framegen_flow_mode)
-           << "\", \"framegenFlowReason\": \"" << EscapeJson(document.framegen_flow_reason) << "\" },\n";
+           << "\", \"framegenFlowReason\": \"" << EscapeJson(document.framegen_flow_reason)
+           << "\", \"mirrorState\": \"" << EscapeJson(document.mirror_state)
+           << "\", \"mirrorReason\": \"" << EscapeJson(document.mirror_reason) << "\" },\n";
     if (const auto& rates = document.framegen_rates) {
         stream << std::fixed << std::setprecision(1) << "  \"framegen\": { \"mode\": \"" << EscapeJson(rates->mode)
                << "\", \"frameRate\": \"" << EscapeJson(rates->frame_rate)

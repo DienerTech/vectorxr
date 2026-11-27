@@ -19,6 +19,15 @@
     "compactMetrics": "La selección de rendimiento compacto del OSD no es válida",
     "bodyOrder": "El orden del cuerpo del OSD debe contener cada fila una vez"
   },
+  "screenshot": {
+    "eyes": "{field} debe ser both, left o right",
+    "folder": "{field} debe ser una ruta de carpeta completa, como D:\\Screenshots"
+  },
+  "mirror": {
+    "eye": "{field} debe ser left o right",
+    "aspect": "{field} debe ser {values}",
+    "monitor": "{field} debe ser un texto de {max} caracteres como máximo"
+  },
   "binding": {
     "chordEmpty": "{field} debe incluir al menos una tecla",
     "chordUnsupportedKey": "{field} contiene una tecla no admitida: {key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field} debe ser performance, balanced o quality",
     "motionEstimation": "{field} debe ser shader o hardware",
     "frameMultiplier": "{field} debe ser auto, dynamic, 2x, 3x o 4x",
+    "autoLowestRate": "{field} debe ser off o 2x",
     "diagnosticView": "{field} debe ser off, flow, confidence o tint",
     "interpolateFlow": "{field} debe ser auto, hardware o shader"
   },
@@ -61,6 +71,8 @@
   "version": "version debe ser igual a {version}",
   "warnings": {
     "turboFrameGenOverlap": "Turbo y Frame Generation están activados para {targets}. Frame Generation se encarga del ritmo de fotogramas; Turbo permanece desactivado en las sesiones en las que se ejecuta Frame Generation.",
+    "mirrorFillNoMonitorDefault": "Ventana espejo estabilizada: «Llenar un monitor» está activado en el perfil predeterminado sin ningún monitor elegido. El espejo se abre como una ventana normal hasta que se elija uno.",
+    "mirrorFillNoMonitorProfile": "Ventana espejo estabilizada: «Llenar un monitor» está activado en el perfil {profile} sin ningún monitor elegido. El espejo se abre como una ventana normal hasta que se elija uno.",
     "moreApplications_one": "{count} más",
     "moreApplications_other": "{count} más",
     "applicationsWithoutProfile": "aplicaciones sin perfil personalizado"

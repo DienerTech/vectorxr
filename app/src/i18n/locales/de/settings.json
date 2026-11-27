@@ -37,7 +37,7 @@
       },
       "trackSeenApps": {
         "title": "Erkannte XR-Apps erfassen",
-        "description": "Merkt sich den Namen der ausführbaren Datei sowie den Zeitpunkt der ersten und letzten Erkennung der OpenXR-Apps, die Sie starten, damit Sie sie einfach im Anwendungsregister registrieren können. Alle Daten bleiben lokal auf diesem PC."
+        "description": "Merkt sich den Namen der ausführbaren Datei sowie den Zeitpunkt der ersten und letzten Erkennung der OpenXR-Apps, die Sie starten, damit Sie sie einfach auf der Seite „Erkennung“ registrieren können. Alle Daten bleiben lokal auf diesem PC."
       }
     },
     "logging": {

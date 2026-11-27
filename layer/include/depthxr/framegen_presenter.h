@@ -124,7 +124,9 @@ struct FrameGenStatus {
     bool full_rate{false};       // automatic and the app holds full refresh
     // Automatic: the game's rate below which it steps up (0 while it would
     // not: no higher step, held at full rate, video memory near its
-    // budget), and the game's own rate (its time per frame, the hold left
+    // budget; at full rate Dynamic's share of the refresh rate, engaged the
+    // rate at which frames take over 1.25 times their refreshes), and the
+    // game's own rate (its time per frame, the hold left
     // out) from which it tries one step down (0 at full rate). Frames per
     // second, on the grid the game's frames are timed by (grid_period_ns).
     double auto_step_up_below_fps{0.0};
@@ -132,6 +134,12 @@ struct FrameGenStatus {
     // ...and that own rate as measured, presenting from its own thread (0
     // until measured, or inline, where the game's waits say nothing of it).
     double auto_game_own_fps{0.0};
+    // Automatic: the session's frames left out of its cadence because they
+    // had no projection layer / were the first after a pause / were late
+    // around a swapchain being made or destroyed (FrameGenAutoRules).
+    std::uint64_t auto_left_no_projection{0};
+    std::uint64_t auto_left_pause{0};
+    std::uint64_t auto_left_swapchain{0};
     // Grid periods per real frame, measured frame by frame (smoothed; 0
     // until measured): what a fixed or Auto multiplier becomes for a slower
     // game.
@@ -153,6 +161,12 @@ struct FrameGenStatus {
     // presenter thread's waits, and kept until those or, passing frames
     // through, the game's own show every refresh again.
     bool runtime_halving{false};
+    // The OpenXR runtime's name (SetRuntimeName; empty until told): the OSD
+    // names the setting that holds frames to half rate on it.
+    std::string runtime_name;
+    // Dynamic standing down for the runtime's halving: seconds until it
+    // tries again (0 otherwise).
+    double halving_retry_s{0.0};
     // The runtime's display times do not advance with the time that passes
     // (Varjo's after a game paused its frame loop): nothing engages and
     // frames pass straight through until they do.
@@ -259,6 +273,9 @@ struct FrameGenOsdText {
 };
 // `started`: the session started with Frame Generation on.
 FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started);
+// What to turn off on the named runtime when it holds frames to half rate
+// ("turn off Smart Smoothing in Pimax Play"); empty for a runtime not known.
+std::string FrameGenHalvingRemedy(std::string_view runtime);
 
 // Emulated quad views (the layer composes XR_VARJO_quad_views into stereo):
 // what happens to one frame from the layer's quad views compose site.
@@ -304,6 +321,71 @@ struct FrameGenDynamicPolicy {
     double game_rate_share{0.75};    // (e) the game's own rate engaged, at least this share of its rate before
 };
 
+// Auto's rules beyond its late share (0.22; a user's Star Citizen and
+// Starfield sessions on Frame rate "Auto", 2026-11-21). Each is a research
+// switch read at Start, on unless its switch says 0, so a flight can turn
+// one off to compare (FrameGenPresenter::Start names them); with all of them
+// off Auto judges as it did before them. Tests set them and shorten the
+// times.
+struct FrameGenAutoRules {
+    // VECTORXR_FRAMEGEN_AUTO_CADENCE_FILTER: frames that say nothing about
+    // the game's load stay out of Auto's cadence (no projection layer, late
+    // around a swapchain being made or destroyed, the first after a pause).
+    bool cadence_filter{true};
+    // A late frame this soon after the game made or destroyed a swapchain
+    // carries that cost. Two seconds: Star Citizen makes its theater mode's
+    // two swapchains two seconds apart, and its VR mode's six over three.
+    std::chrono::milliseconds swapchain_settle{2000};
+    // ...and only while the game has been making or destroying them for no
+    // longer than this without a break of swapchain_settle: one that does so
+    // every second or two (an overlay's quad, a resize) would otherwise have
+    // its late frames left out for as long as it does.
+    std::chrono::milliseconds swapchain_churn_max{8000};
+    // VECTORXR_FRAMEGEN_AUTO_ENGAGE_BELOW: at full rate Auto also engages
+    // once the game runs below Dynamic's share of the refresh rate for
+    // Dynamic's time (FrameGenDynamicPolicy::engage_below, engage_after), not
+    // only once its frames take over 1.25 refreshes; a probe at full rate
+    // holds only above Dynamic's stay_above.
+    bool engage_below{true};
+    // VECTORXR_FRAMEGEN_AUTO_REACH: the game's measured work per frame (its
+    // own time, and how long its GPU work was still pending when a frame
+    // ended: FrameGenPresenter::AutoLoadLocked) decides two things. Full
+    // rate is not probed while neither measure has come down since full rate
+    // last failed; and from 3x or more a probe comes without waiting out the
+    // back-off once both are well inside the lower step.
+    bool reach{true};
+    // Full rate that failed is not probed again while both measures stay at
+    // or above this share of what they were then...
+    double reach_drop{0.90};
+    // ...for at most this long, doubling with each further failure up to
+    // reach_memory_max: then a probe tells again.
+    std::chrono::milliseconds reach_memory{300000};
+    std::chrono::milliseconds reach_memory_max{1200000};
+    // Full rate that failed as Auto engaged is remembered at the load
+    // measured once the game is held: with both measures, or after this long
+    // with the game's own time alone (a backend that reports no capture
+    // times).
+    std::chrono::milliseconds reach_measure_wait{3000};
+    // The early probe: the larger measure within this share of the lower
+    // step's frame time (and the two together within a probe's reach).
+    double early_inside{0.65};
+    // A step up's cause, for its log line and its back-off: transient or a
+    // mode switch when a hitch (a pause, or a frame of over long_frame times
+    // its expected time), a frame late around a swapchain change, or a frame
+    // without a projection layer ended within transient_window before it;
+    // sustained otherwise.
+    std::chrono::milliseconds transient_window{1000};
+    double long_frame{4.0};
+    // VECTORXR_FRAMEGEN_AUTO_CAUSE_BACKOFF: a step up put down to a hitch
+    // or a mode switch is checked again after transient_recheck instead of
+    // the back-off (which a failed probe does not double then); another such
+    // step within transient_spacing of the last backs off as sustained
+    // lateness does.
+    bool cause_backoff{true};
+    std::chrono::milliseconds transient_recheck{3000};
+    std::chrono::milliseconds transient_spacing{30000};
+};
+
 // Interpolate's hardware-flow fallback. Tests shorten these times; the
 // production thresholds leave room above the healthy 2026-10-24 flights
 // (1.5% stale motion and one unready frame per 30 seconds).
@@ -316,6 +398,12 @@ struct FrameGenInterpolateFlowPolicy {
     double unready_per_30s{10.0};
     double hardware_late_share{0.25};
     std::chrono::milliseconds hardware_grace{1};
+    // A late hardware analysis counts against the flow only when its real
+    // frame was captured at least this long before the generated frame was
+    // due: shader flow's Quality analysis takes about 0.8 ms at 4608x3748
+    // (dcs-flow replays, 2026-11-20), so a frame captured later than that
+    // would have been late on either flow.
+    std::chrono::milliseconds capture_allowance{1};
     std::uint64_t min_generated{30};
     std::uint64_t min_hardware_samples{8};
     std::uint32_t bad_windows{2};
@@ -476,6 +564,8 @@ class FrameGenPresenter {
     // wait between probes (doubling after each failed probe).
     void SetAutoPolicy(std::chrono::milliseconds settle, std::chrono::milliseconds steady,
                        std::chrono::milliseconds probe_confirm, std::chrono::milliseconds probe_backoff);
+    // Auto's further rules (tests set them; Start reads their switches).
+    void SetAutoRules(const FrameGenAutoRules& rules);
     // When Dynamic engages, stands down and probes (tests shorten it).
     void SetDynamicPolicy(const FrameGenDynamicPolicy& policy);
     // When the lead steps back down (tests shorten it).
@@ -487,6 +577,11 @@ class FrameGenPresenter {
     // stands down for it; while it is reported, the presenter thread's waits
     // decide again a quarter of it after they start (tests shorten it).
     void SetHalvingWindow(std::chrono::milliseconds window);
+    // VECTORXR_FRAMEGEN_HALVING_PUSH as Start reads it (tests set it after).
+    void SetHalvingPush(std::chrono::milliseconds push);
+    // The OpenXR runtime's name, for what the OSD tells the user to change
+    // when the runtime holds frames to half rate (FrameGenStatus::runtime_name).
+    void SetRuntimeName(std::string name);
     // Quad views: how long the layer composes them after frames kept failing
     // to be written, doubling up to `longest` (tests shorten it).
     void SetQuadDecline(std::chrono::milliseconds first, std::chrono::milliseconds longest);
@@ -666,6 +761,10 @@ class FrameGenPresenter {
         XrTime end_time{0};
         XrTime slot_time{0};
         XrDuration period{0};
+        // Passed straight through: `period` is a multiple of the refresh
+        // period that only echoed the game's own frame interval, the runtime
+        // holding nothing back (NoteRuntimeHalvingLocked).
+        bool period_echoed{false};
         bool should_render{false};
         bool begun{false};
         bool engaged{false};
@@ -758,8 +857,8 @@ class FrameGenPresenter {
             std::vector<Extension> extensions;
             XrCompositionLayerProjection projection{};
             std::vector<XrCompositionLayerProjectionView> views;
-            std::vector<XrCompositionLayerDepthInfoKHR> depth;
-            std::vector<std::uint8_t> has_depth;
+            // Empty for projections without depth; otherwise one entry per source view.
+            std::vector<std::optional<XrCompositionLayerDepthInfoKHR>> depth;
             // The depth swapchains' SwapchainRecord::releases when copied.
             std::vector<std::uint64_t> depth_releases;
             // Per view, its color swapchain's SwapchainRecord::releases when
@@ -919,12 +1018,28 @@ class FrameGenPresenter {
     std::uint32_t DynamicSlotsLocked() const;
     // Dynamic: generated frames (sets of output images) one real frame may use.
     std::uint32_t DynamicSetCapLocked() const;
+    // `renderable`: the frame ended with a projection layer.
     void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame,
-                          bool started_late = false);
+                          bool started_late = false, bool renderable = true);
     // Auto, presenting from its own thread: whether the game's own time per
     // frame (auto_busy_) is within reach of `slots` periods a frame (`period`:
     // the grid the game's frames are timed by, GameGridLocked).
     bool AutoProbeInReachLocked(std::uint32_t slots, XrDuration period) const;
+    // Auto, presenting from its own thread: the game's work per frame as
+    // measured while it is held at the multiplier (medians; a measure is
+    // absent until `samples` of it exist).
+    struct AutoLoad {
+        bool busy{false};       // own_ms is measured
+        bool pending{false};    // pending_ms is measured
+        double own_ms{0.0};     // from one wait to the next, the cadence's holds left out
+        double pending_ms{0.0}; // from a frame's end to its views' capture having run on the GPU
+    };
+    AutoLoad AutoLoadLocked(std::size_t samples = 8) const;
+    // Full rate did not hold at `load` (FrameGenAutoRules::reach).
+    void NoteFullRateFailureLocked(const AutoLoad& load, std::chrono::steady_clock::time_point now);
+    // Whether full rate is not to be probed at `load`: it failed at a load
+    // no heavier in either measure, within the memory. `text`: for the log.
+    bool AutoFullRateVetoLocked(const AutoLoad& load, std::chrono::steady_clock::time_point now, std::string* text);
     // Dynamic: standing by, engages once the game runs below the refresh
     // rate; engaged, the game keeps its own rate (generated frames fill the
     // refreshes it misses) and Dynamic stands down when Frame Generation
@@ -940,6 +1055,10 @@ class FrameGenPresenter {
     // Turned back on (toggled, configured, retried after a pause): Dynamic
     // stands by again and judges the game's rate afresh.
     void DynamicReenableLocked(std::chrono::steady_clock::time_point now);
+    // Auto starts as a session does when Frame Generation is turned on
+    // again (its binding, or the app): full rate, the first back-off, no
+    // probe pending. The video memory ceiling stays.
+    void AutoReenableLocked();
     // Seconds standing by this session (Dynamic).
     double StandbySecondsLocked(std::chrono::steady_clock::time_point now) const;
     // ", dynamic=standby (reason)" or engaged for summaries; empty unless Dynamic.
@@ -998,7 +1117,8 @@ class FrameGenPresenter {
     // interval), was not held, and any other says nothing. Only the
     // presenter thread's waits report halving; the game's own can clear it
     // (they may also wait for the game's frame before, as MSFS's do).
-    void NoteRuntimeHalvingLocked(std::chrono::steady_clock::time_point called,
+    // Returns whether this wait's period was such an echo.
+    bool NoteRuntimeHalvingLocked(std::chrono::steady_clock::time_point called,
                                   std::chrono::steady_clock::time_point returned, XrTime display_time,
                                   XrDuration period, bool presenter);
     void NotePhaseLocked(std::chrono::steady_clock::time_point called, std::chrono::steady_clock::time_point returned,
@@ -1142,7 +1262,8 @@ class FrameGenPresenter {
         std::chrono::steady_clock::time_point now, FrameGenSynthesisMode mode, bool hardware_active);
     // One output image per spec in each of the first `sets` output sets.
     // `keep_replaced`: an output made anew keeps its old swapchain alive
-    // (retired_outputs_) until a frame is written into the new ones.
+    // (retired_outputs_) until a frame written into the new ones has been
+    // submitted.
     bool EnsureOutputs(const std::vector<OutputSpec>& specs, std::size_t sets, std::string& error,
                        bool keep_replaced = false);
     // Acquires and waits the images of the first `sets` output sets.
@@ -1152,7 +1273,7 @@ class FrameGenPresenter {
     void DestroyRetiredOutputs();
     // Destroys the output sets from `keep` on (frame thread).
     void TrimOutputs(std::size_t keep);
-    void ReleaseOutputs();
+    XrResult ReleaseOutputs(std::size_t sets);
     void RecordReal(const XrCompositionLayerProjection& projection, XrTime display_time, std::uint64_t sequence);
     void InvalidateContinuityLocked();
     // The thread that ends frames waits again: marks the begun, unclaimed
@@ -1169,7 +1290,7 @@ class FrameGenPresenter {
     void BridgeAbandonedLocked(std::uint64_t sequence);
     // Counts abandoned frames, logs the first, wakes waiters.
     void NoteAbandonedLocked(std::size_t count);
-    void NoteFailureLocked(const std::string& error);
+    void NoteFailureLocked(const std::string& error, bool jit_output = false);
     void LogMemoryBudgetLocked();
     // `distinct`: the submission shows something the one before did not;
     // `generated`: a generated frame (not a real frame or its exact copy).
@@ -1319,8 +1440,8 @@ class FrameGenPresenter {
         std::string error;
     };
     bool SynthesizeJit(std::optional<JitFrame>& frame, JitChoice& choice, const std::optional<JitFrame>& fallback,
-                       const JitChoice& fallback_choice, std::vector<XrCompositionLayerProjectionView>& views,
-                       JitWrite& write);
+                       const JitChoice& fallback_choice, XrDuration refresh_period,
+                       std::vector<XrCompositionLayerProjectionView>& views, JitWrite& write);
     // Just in time: the frame `choice` shows is its real frame unchanged.
     static bool JitCopyOnly(const JitFrame& frame, const JitChoice& choice);
     void SummaryLocked(std::chrono::steady_clock::time_point now);
@@ -1402,6 +1523,7 @@ class FrameGenPresenter {
     std::optional<std::chrono::steady_clock::time_point> last_pause_at_;
     std::uint32_t consecutive_failures_{0};
     std::uint32_t consecutive_demotions_{0};
+    bool jit_output_failed_{false}; // a successful game-side analysis cannot settle this failure streak
 
     std::unordered_map<XrSwapchain, SwapchainRecord> swapchains_;
     std::vector<std::int64_t> runtime_formats_;
@@ -1428,6 +1550,7 @@ class FrameGenPresenter {
     // Stop; mutex_ guards the parts other threads read.
     RealFrame last_real_;
     std::vector<std::vector<Output>> output_sets_; // [generated frame][view]
+    bool output_release_pending_{false}; // finish refused releases before reusing or replacing these sets
     Generated extrapolated_;
     // The submission grid: when the last submission to the runtime was due
     // (a paced one's scheduled time), or was made (a frame passed straight
@@ -1471,6 +1594,16 @@ class FrameGenPresenter {
     // while it is engaged).
     std::optional<std::chrono::steady_clock::time_point> halving_confirmed_at_;
     bool logged_runtime_halving_{false};
+    // VECTORXR_FRAMEGEN_HALVING_PUSH=<seconds> (read at Start, 0 = off): an
+    // engagement that finds the runtime holding frames to half rate keeps
+    // presenting at full rate this long before Dynamic stands down for it,
+    // so a runtime that dropped to half rate while Frame Generation was off
+    // (Pimax Play's Smart Smoothing) can see full-rate frames and return.
+    std::chrono::milliseconds halving_push_{0};
+    std::string runtime_name_; // SetRuntimeName
+    bool halving_push_logged_{false}; // this engagement's push is logged
+    std::uint64_t halving_pushes_{0}; // engagements that pushed through a halving report
+    std::uint64_t halving_push_recoveries_{0}; // ...and saw it clear within the push
     // Auto back at full rate for one shown while it is engaged (where the
     // runtime reports the refresh period, UpdateAutoLocked): it stays
     // there until this while the runtime still halves, the hold doubling
@@ -1569,6 +1702,44 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point auto_end_held_to_{};
     std::uint64_t auto_end_held_frame_{0}; // the frame whose end was held then
     std::size_t auto_late_percent_{0}; // for the log
+    FrameGenAutoRules auto_rules_;
+    // Auto at full rate (engage_below): since when the game has run below
+    // the share of the refresh rate it engages under, without a break.
+    std::optional<std::chrono::steady_clock::time_point> auto_below_since_;
+    // What last disturbed the game's frames (FrameGenAutoRules::
+    // transient_window): when, what, and for a hitch its length.
+    enum class AutoCause { kSustained, kTransient, kModeSwitch };
+    std::chrono::steady_clock::time_point auto_disturbed_at_{};
+    AutoCause auto_disturbance_{AutoCause::kSustained};
+    std::string auto_disturbance_text_;
+    // When Auto last stepped up for a hitch or a mode switch (cause_backoff).
+    std::chrono::steady_clock::time_point auto_transient_step_at_{};
+    // The loads full rate failed at (a few, the newest last), how many
+    // failures since a probe at full rate last held, and a failure whose
+    // load is still to be measured (a step up from full rate: measured once
+    // the game is held at the multiplier).
+    struct AutoFailure {
+        AutoLoad load;
+        std::chrono::steady_clock::time_point at{};
+    };
+    std::vector<AutoFailure> auto_full_rate_failures_;
+    std::uint32_t auto_full_rate_failed_{0};
+    std::optional<std::chrono::steady_clock::time_point> auto_full_rate_unmeasured_;
+    bool auto_veto_logged_{false}; // this stretch of refused probes is in the log
+    // The probe under way: the load it started from, and whether it came
+    // early; an early probe that failed, none again until a probe holds.
+    AutoLoad probe_load_;
+    bool probe_early_{false};
+    bool auto_early_blocked_{false};
+    // The last frame Auto saw had no projection layer (cadence_filter): the
+    // next one with one starts its cadence afresh.
+    bool auto_no_projection_{false};
+    // When the game last made or destroyed a swapchain (TrackSwapchain,
+    // ForgetSwapchain).
+    std::chrono::steady_clock::time_point swapchain_changed_at_{};
+    // ...and since when it has done so without a break of
+    // FrameGenAutoRules::swapchain_settle (swapchain_churn_max).
+    std::chrono::steady_clock::time_point swapchain_churn_since_{};
     // Auto never steps above this again in the session once video memory
     // ran near its budget: each step up allocates more output images.
     std::uint32_t auto_memory_ceiling_{4};
@@ -1627,6 +1798,11 @@ class FrameGenPresenter {
         std::uint64_t hardware_timed{0};
         std::uint64_t hardware_late{0};
         std::uint64_t hardware_lag_ns{0};
+        // Of hardware_late, the analyses whose real frame was captured in
+        // time (FrameGenInterpolateFlowPolicy::capture_allowance): late
+        // because of the optical flow, not the game's own frame.
+        std::uint64_t hardware_late_own{0};
+        std::uint64_t hardware_lag_own_ns{0};
         std::uint64_t copies_skipped{0};
         std::uint64_t ring_exhausted{0}; // refreshes whose real frame's images newer captures had replaced
         std::uint64_t stale_skipped{0};  // refreshes not submitted: nothing current to show
@@ -1644,6 +1820,10 @@ class FrameGenPresenter {
         std::uint64_t unwritten_outputs{0}; // output images could not be made
         std::uint64_t unwritten_source{0};  // no real frame to write from
         std::uint64_t non_renderable{0};    // real frames without a projection
+        // Auto: frames left out of its cadence (FrameGenAutoRules).
+        std::uint64_t auto_left_no_projection{0};
+        std::uint64_t auto_left_pause{0};
+        std::uint64_t auto_left_swapchain{0};
         std::uint64_t restarts{0};          // presenter thread starts and synthesis mode switches
         std::uint64_t lead_ups{0};
         std::uint64_t lead_downs{0};
@@ -1688,6 +1868,9 @@ class FrameGenPresenter {
     // ", runtimeClock=..." for summaries (empty while the runtime's display
     // clock stayed steady over the window).
     std::string ClockSummaryLocked(const Totals& start) const;
+    // The 30 s summaries' share on Auto: frames left out of its cadence in
+    // the window, by reason.
+    std::string AutoSummaryLocked(const Totals& start) const;
     Totals totals_;
     Totals summary_totals_;            // at last_summary_
     double summary_standby_seconds_{0.0};
@@ -2057,6 +2240,11 @@ class FrameGenPresenter {
     // uses settings_.interpolate_flow (the old env switch maps to hardware).
     bool interpolate_on_shaders_{false};
     FrameGenInterpolateFlowPolicy interpolate_flow_policy_;
+    // VECTORXR_FRAMEGEN_FLOW_FALLBACK=legacy (read at Start): Auto leaves
+    // hardware flow on every refresh whose real frame was not captured yet
+    // and on any late hardware analysis, as before 0.22. Off, only the
+    // flow's own lateness counts (UpdateInterpolateFlowLocked).
+    bool interpolate_flow_legacy_{false};
     std::optional<FrameGenInterpolateFlow> interpolate_flow_env_;
     std::optional<FrameGenInterpolateFlow> interpolate_flow_selected_;
     bool interpolate_flow_hardware_selected_{false};
@@ -2096,7 +2284,8 @@ class FrameGenPresenter {
     bool logged_quad_unanalyzed_{false};
     // Presenter thread (and Stop): output images replaced while composing
     // quad views, kept alive while the last frame written still shows them
-    // (until a frame is written into the new ones, or the thread exits).
+    // (until a frame written into the new ones has been submitted, or the
+    // thread exits).
     std::vector<Output> retired_outputs_;
     std::uint64_t jit_covers_{0};   // refreshes shown past the newest real frame while the next was late (summary)
     XrTime last_target_time_{0};    // just in time: the display time the newest waited frame was told

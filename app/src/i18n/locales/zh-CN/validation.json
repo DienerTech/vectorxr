@@ -19,6 +19,15 @@
     "compactMetrics": "OSD 紧凑性能选项无效",
     "bodyOrder": "OSD 正文顺序必须包含每一行且仅包含一次"
   },
+  "screenshot": {
+    "eyes": "{field} 必须为 both、left 或 right",
+    "folder": "{field} 必须是完整的文件夹路径，例如 D:\\Screenshots"
+  },
+  "mirror": {
+    "eye": "{field} 必须为 left 或 right",
+    "aspect": "{field} 必须为 {values}",
+    "monitor": "{field} 必须是不超过 {max} 个字符的文本"
+  },
   "binding": {
     "chordEmpty": "{field} 必须至少包含一个键",
     "chordUnsupportedKey": "{field} 包含不受支持的键：{key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field} 必须为 performance、balanced 或 quality",
     "motionEstimation": "{field} 必须为 shader 或 hardware",
     "frameMultiplier": "{field} 必须为 auto、dynamic、2x、3x 或 4x",
+    "autoLowestRate": "{field} 必须为 off 或 2x",
     "diagnosticView": "{field} 必须为 off、flow、confidence 或 tint",
     "interpolateFlow": "{field} 必须为 auto、hardware 或 shader"
   },
@@ -61,6 +71,8 @@
   "version": "version 必须等于 {version}",
   "warnings": {
     "turboFrameGenOverlap": "{targets} 同时开启了 Turbo 和 Frame Generation。Frame Generation 会接管帧节奏控制；在运行 Frame Generation 的会话中，Turbo 保持关闭。",
+    "mirrorFillNoMonitorDefault": "防抖镜像窗口：默认配置文件中已开启“铺满显示器”，但未选择显示器。在选择显示器之前，镜像会以普通窗口打开。",
+    "mirrorFillNoMonitorProfile": "防抖镜像窗口：配置文件 {profile} 中已开启“铺满显示器”，但未选择显示器。在选择显示器之前，镜像会以普通窗口打开。",
     "moreApplications_other": "另外 {count} 个",
     "applicationsWithoutProfile": "没有自定义配置文件的应用程序"
   },

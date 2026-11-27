@@ -119,8 +119,6 @@
     "summary": {
       "waitForSubmission": "Auf Übermittlung warten",
       "overlapSubmission": "Übermittlung überlappen",
-      "sampleAtEntry": "Messung beim Eintritt",
-      "sampleAtReturn": "Messung bei Rückkehr",
       "prediction": "{percent} % Vorhersage",
       "fpsCap": "Begrenzung {fps} fps",
       "noCap": "Keine Begrenzung"
@@ -128,7 +126,6 @@
     "advancedTitle": "Erweitertes Timing",
     "advancedIntro": "Zum Experimentieren. Die meisten Spieler sollten diese Werte unverändert lassen.",
     "waitForOverlap": "Auf eine überlappende Übermittlung warten",
-    "sampleAtWaitEntry": "Vorhersage-Timing beim Eintritt in das Warten messen",
     "predictionLabel": "Vorhersage (%)",
     "frameCapLabel": "Bildratenbegrenzung (fps; 0 = aus)",
     "changeNote": "Wenn Sie einen Wert ändern, wechselt das Profil zu „Benutzerdefiniert“. Die Anpassung der Vorhersage erfordert Unterstützung für die Laufzeituhr."

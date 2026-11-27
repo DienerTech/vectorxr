@@ -14,6 +14,12 @@
       "label": "Información en pantalla",
       "subtitle": "Panel en el visor, ubicación y asignaciones"
     },
+    "screenshots": {
+      "label": "Capturas de pantalla"
+    },
+    "mirror": {
+      "label": "Espejo estabilizado"
+    },
     "registry": {
       "label": "Registro de aplicaciones",
       "subtitle": "Registra aplicaciones para asignarles perfiles",
@@ -28,6 +34,10 @@
     "guides": {
       "label": "Guías",
       "subtitle": "Cómo funciona cada función y cómo activarla y desactivarla"
+    },
+    "supporters": {
+      "label": "Mecenas",
+      "subtitle": "Agradecimientos a los miembros de Patreon"
     },
     "about": {
       "label": "Acerca de",
@@ -79,9 +89,25 @@
     "httpFailed": "La búsqueda de actualizaciones en GitHub falló con HTTP {status}",
     "invalidRelease": "GitHub no devolvió una versión válida"
   },
+  "supporters": {
+    "communityTitle": "Gracias a nuestra comunidad",
+    "communityThanks": "Gracias a quienes han donado a través de Ko-fi, han señalado fallos, han enviado informes o han propuesto mejoras.",
+    "forumsThanks": "Un agradecimiento especial a la comunidad de DCS en los foros de Eagle Dynamics por la cálida acogida que dio a una versión preliminar de VectorXR 0.11.",
+    "thanks": "Gracias a quienes nos apoyan en Patreon y hacen posible que sigamos mejorando VectorXR.",
+    "empty": "Todavía no se ha publicado ningún nombre.",
+    "comingSoon": "El Patreon de VectorXR llegará Soon™. Aquí daremos las gracias a quienes se unan.",
+    "joinFirst": "Todavía no hay mecenas en esta lista. Únete en Patreon para estar entre los primeros a quienes damos las gracias aquí.",
+    "unavailable": "La lista de mecenas no está disponible. Prueba a actualizarla dentro de un momento.",
+    "cached": "La lista actual no está disponible. Se muestra la última lista guardada."
+  },
   "sidebar": {
     "appSettings": "Configuración de la aplicación",
+    "applications": "Aplicaciones",
+    "capture": "Captura y espejo",
+    "openxrUtilities": "Utilidades de OpenXR",
     "enhancements": "Mejoras de OpenXR",
+    "performance": "Rendimiento",
+    "lookAndFeel": "Aspecto visual",
     "suiteOff": "Los efectos de VectorXR en tiempo de ejecución están desactivados",
     "moduleTitle": "{subtitle}. {status}",
     "saveHint": "Guarda los cambios para aplicar la configuración. Cada mejora indica qué cambios requieren reiniciar la aplicación de RV.",
@@ -115,6 +141,8 @@
     "issuesFound_other": "Se encontraron {count} problemas de validación",
     "issuesHint": "Puedes aplicarla igualmente: los errores aparecerán en el panel Validación y no se podrá guardar hasta que se resuelvan.",
     "valid": "La estructura de la configuración y los rangos de valores parecen válidos.",
+    "networkPathsTitle": "Las rutas de red no se importan",
+    "networkPathsHint": "Este archivo hace referencia a archivos o carpetas de otro equipo. VectorXR abre estas rutas dentro de cada juego, por lo que se omiten: la carpeta de capturas vuelve a la predeterminada, y los sonidos y las imágenes a los integrados. Vuelve a elegirlos después de importar si los quieres.",
     "applyToEditor": "Aplicar al editor",
     "importAndSave": "Importar y guardar"
   },

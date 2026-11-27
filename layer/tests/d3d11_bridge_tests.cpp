@@ -19,6 +19,7 @@
 #include "depthxr/framegen_plan.h"
 #include "depthxr/session_graphics.h"
 #include "test_adapter.h"
+#include "test_d3d11_predicate.h"
 #include "test_gates.h"
 
 #include <algorithm>
@@ -729,7 +730,10 @@ void TestResolve(Game& game) {
     const std::array<std::uint8_t, 4> color{90, 180, 30, 255};
     bridge.Acquired(swapchain, 1);
     Clear(game, images[1], color);
+    const auto predicate = test_d3d11::BindOcclusionPredicate(game.device.Get(), game.context.Get(), FALSE);
     bridge.Released(swapchain);
+    Check(test_d3d11::CheckAndClearPredicate(game.context.Get(), predicate.Get(), FALSE),
+          "the MSAA resolve restores the game's predicate");
     Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
     const auto texel = ReadRuntimeImage(device, 1);
     Check(Near(texel, color), "the resolved frame reaches the runtime: " + Text(texel));
@@ -1199,7 +1203,10 @@ void TestDepthStillBound(Game& game) {
 
     bridge.Acquired(swapchain, 1);
     draw.Draw(game, image, DXGI_FORMAT_D32_FLOAT, 0, 3, /*keep_bound=*/true);
+    const auto predicate = test_d3d11::BindOcclusionPredicate(game.device.Get(), game.context.Get(), FALSE);
     Check(bridge.Released(swapchain), "the release is copied");
+    Check(test_d3d11::CheckAndClearPredicate(game.context.Get(), predicate.Get(), FALSE),
+          "the depth copy restores the game's predicate");
 
     ComPtr<ID3D11DepthStencilView> bound;
     game.context->OMGetRenderTargets(0, nullptr, &bound);

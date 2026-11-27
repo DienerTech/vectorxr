@@ -37,7 +37,7 @@
       },
       "trackSeenApps": {
         "title": "Suivre les applications XR découvertes",
-        "description": "Note le nom de l'exécutable et l'heure de première/dernière détection des applications OpenXR que vous lancez, pour que vous puissiez les inscrire facilement depuis le Registre des applications. Toutes les données restent sur ce PC."
+        "description": "Note le nom de l'exécutable et l'heure de première/dernière détection des applications OpenXR que vous lancez, pour que vous puissiez les inscrire facilement depuis la page Découverte. Toutes les données restent sur ce PC."
       }
     },
     "logging": {

@@ -43,6 +43,20 @@ int main() {
     const auto root = std::filesystem::temp_directory_path() /
         ("vectorxr-relay-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
 
+    const auto control_path = root / "visibility-test.json";
+    const auto read = [&](const std::string& desired, depthxr::RuntimeControlDocument& doc) {
+        Touch(control_path, R"({"protocolVersion":1,"targetSessionId":"game","revision":42,"expiresAtUnixMilliseconds":100,"desired":{)" +
+              desired + "}}");
+        return depthxr::ReadRuntimeControl(control_path, &doc, nullptr);
+    };
+    depthxr::RuntimeControlDocument doc;
+    Expect(read(R"("quadviewsDiagnosticVisualization":true)", doc) && doc.quadviews_diagnostic_visualization == true &&
+           !doc.mirror_visible.has_value(), "Existing Quadviews commands remain independent");
+    Expect(read(R"("mirrorVisible":false)", doc) && doc.mirror_visible == false &&
+           !doc.quadviews_diagnostic_visualization.has_value(), "Hide only controls the mirror");
+    Expect(!read(R"("mirrorVisible":true,"quadviewsDiagnosticVisualization":false)", doc),
+           "Ambiguous controls must not change either feature");
+
     // Sessions of process 1234 ended without teardown (one status file is
     // zero-filled, as after a hard shutdown); process 5678 is still running.
     // The last of 1234's sessions ended within the day, a crash whose last

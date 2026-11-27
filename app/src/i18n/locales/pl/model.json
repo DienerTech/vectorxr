@@ -54,6 +54,8 @@
     "depthLock": "Głębia: Depth Lock A/B",
     "osdToggle": "OSD: pokaż/ukryj",
     "osdCycle": "OSD: przełącz układ",
+    "screenshot": "Przechwytywanie i podgląd: wykonanie zrzutu ekranu",
+    "mirrorToggle": "Przechwytywanie i podgląd: pokazanie lub ukrycie okna podglądu",
     "turboToggle": "Turbo: przełącznik A/B",
     "turboMetrics": "Turbo: przechwytywanie metryk",
     "framegenToggle": "Frame Generation: przełącznik A/B",

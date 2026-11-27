@@ -19,6 +19,15 @@
     "compactMetrics": "La sélection de performances compacte de l'OSD n'est pas valide",
     "bodyOrder": "L'ordre des lignes de l'OSD doit contenir chaque ligne une seule fois"
   },
+  "screenshot": {
+    "eyes": "{field} doit être both, left ou right",
+    "folder": "{field} doit être un chemin de dossier complet, par exemple D:\\Screenshots"
+  },
+  "mirror": {
+    "eye": "{field} doit être left ou right",
+    "aspect": "{field} doit être {values}",
+    "monitor": "{field} doit être un texte de {max} caractères au plus"
+  },
   "binding": {
     "chordEmpty": "{field} doit inclure au moins une touche",
     "chordUnsupportedKey": "{field} contient une touche non prise en charge : {key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field} doit être performance, balanced ou quality",
     "motionEstimation": "{field} doit être shader ou hardware",
     "frameMultiplier": "{field} doit être auto, dynamic, 2x, 3x ou 4x",
+    "autoLowestRate": "{field} doit être off ou 2x",
     "diagnosticView": "{field} doit être off, flow, confidence ou tint",
     "interpolateFlow": "{field} doit être auto, hardware ou shader"
   },
@@ -61,6 +71,8 @@
   "version": "version doit être égal à {version}",
   "warnings": {
     "turboFrameGenOverlap": "Turbo et Frame Generation sont tous deux activés pour {targets}. Frame Generation prend en charge le cadencement des images ; Turbo reste désactivé dans les sessions où Frame Generation s'exécute.",
+    "mirrorFillNoMonitorDefault": "Fenêtre miroir stabilisée : « Remplir un écran » est activé dans le profil par défaut sans écran choisi. Le miroir s'ouvre comme une fenêtre normale tant qu'aucun écran n'est choisi.",
+    "mirrorFillNoMonitorProfile": "Fenêtre miroir stabilisée : « Remplir un écran » est activé dans le profil {profile} sans écran choisi. Le miroir s'ouvre comme une fenêtre normale tant qu'aucun écran n'est choisi.",
     "moreApplications_one": "{count} autre",
     "moreApplications_other": "{count} autres",
     "applicationsWithoutProfile": "applications sans profil personnalisé"

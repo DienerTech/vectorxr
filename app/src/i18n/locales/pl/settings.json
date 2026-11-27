@@ -39,7 +39,7 @@
       },
       "trackSeenApps": {
         "title": "Śledź wykryte aplikacje XR",
-        "description": "Zapisuje nazwę pliku wykonywalnego oraz czas pierwszego i ostatniego wykrycia uruchamianych aplikacji OpenXR, aby można je było łatwo zarejestrować w Rejestrze aplikacji. Wszystkie dane są przechowywane lokalnie na tym komputerze."
+        "description": "Zapisuje nazwę pliku wykonywalnego oraz czas pierwszego i ostatniego wykrycia uruchamianych aplikacji OpenXR, aby można je było łatwo zarejestrować na stronie Wykrywanie. Wszystkie dane są przechowywane lokalnie na tym komputerze."
       }
     },
     "logging": {

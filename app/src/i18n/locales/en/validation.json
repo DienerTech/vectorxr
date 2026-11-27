@@ -19,6 +19,15 @@
     "compactMetrics": "OSD compact performance selection is invalid",
     "bodyOrder": "OSD body order must contain each row once"
   },
+  "screenshot": {
+    "eyes": "{field} must be both, left, or right",
+    "folder": "{field} must be a full folder path, such as D:\\Screenshots"
+  },
+  "mirror": {
+    "eye": "{field} must be left or right",
+    "aspect": "{field} must be {values}",
+    "monitor": "{field} must be text of at most {max} characters"
+  },
   "binding": {
     "chordEmpty": "{field} must include at least one key",
     "chordUnsupportedKey": "{field} contains unsupported key: {key}",
@@ -42,6 +51,7 @@
     "flowQuality": "{field} must be performance, balanced, or quality",
     "motionEstimation": "{field} must be shader or hardware",
     "frameMultiplier": "{field} must be auto, dynamic, 2x, 3x, or 4x",
+    "autoLowestRate": "{field} must be off or 2x",
     "diagnosticView": "{field} must be off, flow, confidence, or tint",
     "interpolateFlow": "{field} must be auto, hardware, or shader"
   },
@@ -61,6 +71,8 @@
   "version": "version must equal {version}",
   "warnings": {
     "turboFrameGenOverlap": "Turbo and Frame Generation are both on for {targets}. Frame Generation takes over frame pacing; Turbo stays off in sessions where Frame Generation runs.",
+    "mirrorFillNoMonitorDefault": "Stabilized mirror window: Fill a monitor is on in the Default Profile with no monitor chosen. The mirror opens as a normal window until one is picked.",
+    "mirrorFillNoMonitorProfile": "Stabilized mirror window: Fill a monitor is on in the profile {profile} with no monitor chosen. The mirror opens as a normal window until one is picked.",
     "moreApplications_one": "{count} more",
     "moreApplications_other": "{count} more",
     "applicationsWithoutProfile": "applications without a custom profile"

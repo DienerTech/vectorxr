@@ -4,6 +4,7 @@
 #include <wrl/client.h>
 #include <vulkan/vulkan_core.h>
 #include <openxr/openxr_platform.h>
+#include "depthxr/d3d11_predication.h"
 #include "depthxr/osd_graphics.h"
 #include "depthxr/osd_renderer.h"
 #include <algorithm>
@@ -45,6 +46,7 @@ public:
         if(index>=images.size()||!images[index].texture){error="Invalid D3D11 image index";return OsdUpload::Failed;}
         const auto rows=static_cast<UINT>(b.height), stale=static_cast<UINT>(image_rows[index]);
         D3D11_BOX box{0,0,0,OsdBitmap::width,rows,1};
+        const ScopedD3D11Unpredicated unpredicated(context.Get());
         context->UpdateSubresource(images[index].texture,0,&box,b.pixels.data(),OsdBitmap::width*4,0);
         if(stale>rows) {
             box={0,rows,0,OsdBitmap::width,stale,1};

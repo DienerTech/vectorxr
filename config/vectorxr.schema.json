@@ -703,6 +703,36 @@
               "maximum": 100
             }
           }
+        },
+        "screenshot": {
+          "$ref": "#/$defs/screenshotSettings"
+        }
+      }
+    },
+    "screenshotSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Full-resolution screenshots, in every game. Optional: without it no binding takes a screenshot.",
+      "properties": {
+        "bindings": {
+          "$ref": "#/$defs/inputBindings",
+          "default": [],
+          "description": "Any one of the list's bindings saves a screenshot. Empty or absent: no binding."
+        },
+        "eyes": {
+          "type": "string",
+          "enum": [
+            "both",
+            "left",
+            "right"
+          ],
+          "default": "both",
+          "description": "The eyes saved: both (two files, _L and _R), or one."
+        },
+        "folder": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\/<>:\"|?*]+\\\\[^\\\\/<>:\"|?*]+)[^<>:\"|?*]*$",
+          "description": "An absolute folder; screenshots go to a folder per game under it. Absent: VectorXR in the Windows Pictures folder."
         }
       }
     },
@@ -1500,7 +1530,8 @@
             },
             "sampleAtEntry": {
               "type": "boolean",
-              "default": false
+              "deprecated": true,
+              "description": "Legacy field, ignored."
             },
             "predictionPercent": {
               "type": "integer",
@@ -1618,7 +1649,8 @@
                   },
                   "sampleAtEntry": {
                     "type": "boolean",
-                    "default": false
+                    "deprecated": true,
+                    "description": "Legacy field, ignored."
                   },
                   "predictionPercent": {
                     "type": "integer",
@@ -1707,7 +1739,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 100,
-          "default": 50,
+          "default": 10,
           "description": "Higher values fall back to the real image sooner where motion is uncertain."
         },
         "motionLimitPercent": {
@@ -1726,6 +1758,12 @@
           "type": "boolean",
           "default": false,
           "description": "Frames Frame Generation writes reach a few degrees past the game's field of view (3 degrees left and right, 1.5 up and down), the extra margin repeating the frame's edge. On a fast head turn the runtime then shows a smeared edge on the side you turn toward instead of a black band. Costs some GPU time and video memory for the wider images. Direct3D 12 games and Direct3D 11 or Vulkan games through the bridge; it can be changed while the game runs."
+        },
+        "autoLowestRate": {
+          "type": "string",
+          "enum": ["off", "2x"],
+          "default": "off",
+          "description": "The lowest rate Fixed Auto uses. With 2x, Auto keeps generating at 2x even while the game could hold the refresh rate by itself, and steps to 3x or 4x as the game needs. Read only while frameMultiplier is auto."
         },
         "useGameDepth": {
           "type": "boolean",
@@ -1816,6 +1854,144 @@
         }
       }
     },
+    "mirrorSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Stabilized mirror window: what the layer's own desktop window shows. The layer rejects the file when a number is out of range or the eye or aspect is not one it knows. Changes apply while the game runs; the window is resized when the aspect or width changes.",
+      "properties": {
+        "smoothing": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 60,
+          "description": "How strongly head rotation (head shake) is smoothed. 0 is a plain mirror with no stabilization; higher values are steadier and lag further behind fast head turns."
+        },
+        "levelHorizon": {
+          "type": "boolean",
+          "default": false,
+          "description": "Keep the horizon level: head roll is taken out of the picture."
+        },
+        "eye": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right"
+          ],
+          "default": "left",
+          "description": "The eye whose image the window shows."
+        },
+        "margin": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 40,
+          "default": 15,
+          "description": "Percent the picture is zoomed in so the stabilized edges stay filled."
+        },
+        "aspect": {
+          "type": "string",
+          "enum": [
+            "16:9",
+            "16:10",
+            "4:3",
+            "1:1",
+            "21:9"
+          ],
+          "default": "16:9",
+          "description": "The picture's width-to-height ratio."
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 320,
+          "maximum": 3840,
+          "default": 1280,
+          "description": "The window's picture width in pixels when first opened; the height follows the aspect. The size and position the user leaves the window at are remembered per game."
+        },
+        "frameRate": {
+          "type": "integer",
+          "minimum": 15,
+          "maximum": 120,
+          "default": 60,
+          "description": "The most frames per second the window shows."
+        },
+        "fillMonitor": {
+          "type": "boolean",
+          "default": false,
+          "description": "Fill a monitor: with a monitor chosen, the picture fills it, borderless, instead of being a resizable window, and its shape follows the monitor (aspect and width are then not used). It never takes keyboard focus or input from the game."
+        },
+        "monitor": {
+          "type": "string",
+          "maxLength": 64,
+          "default": "",
+          "description": "The monitor to fill: its Windows device name, such as \\\\.\\DISPLAY2. Empty: none chosen. When it is not connected the mirror opens as a normal window. No monitor is ever picked automatically."
+        }
+      }
+    },
+    "mirrorProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "enabled",
+        "applicationIds",
+        "settings"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "The first enabled profile listing the application wins."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "custom",
+            "disable"
+          ],
+          "deprecated": true,
+          "description": "Legacy profile mode accepted by the layer for parity with other modules. The desktop app does not write it."
+        },
+        "applicationIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "uniqueItems": true
+        },
+        "settings": {
+          "$ref": "#/$defs/mirrorSettings"
+        }
+      }
+    },
+    "mirrorModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Stabilized mirror window: the layer opens its own desktop window in the game's process showing one eye's image with head shake smoothed out, for streaming and recording (capture the window in OBS). The headset picture is not changed. Optional; configs without it use the defaults (off). Works with Direct3D 11 and Direct3D 12 applications. With Frame Generation on, the window shows the game's real frames.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Default Profile: opens the window with the defaults for every application without its own enabled profile."
+        },
+        "bindings": {
+          "$ref": "#/$defs/inputBindings",
+          "default": [],
+          "description": "Any one of the list's bindings shows or hides the window in the running game. Empty or absent: no binding."
+        },
+        "defaults": {
+          "$ref": "#/$defs/mirrorSettings"
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mirrorProfile"
+          }
+        }
+      }
+    },
     "modules": {
       "type": "object",
       "additionalProperties": false,
@@ -1839,6 +2015,9 @@
         },
         "framegen": {
           "$ref": "#/$defs/framegenModule"
+        },
+        "mirror": {
+          "$ref": "#/$defs/mirrorModule"
         }
       }
     },

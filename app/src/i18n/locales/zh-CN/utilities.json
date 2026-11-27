@@ -1,0 +1,191 @@
+{
+  "screenshots": {
+    "heading": "截图",
+    "intro": "按游戏渲染的原样，以完整分辨率将每只眼睛的图像保存为 PNG 文件。文件在后台写入，游戏不会卡顿。",
+    "binding": {
+      "label": "截图",
+      "description": "每按一次保存一张截图，适用于所有游戏。",
+      "none": "未分配任何绑定。添加绑定之前，截图功能处于关闭状态。"
+    },
+    "eyes": {
+      "legend": "保存哪只眼睛",
+      "both": {
+        "label": "双眼",
+        "description": "每次截图保存两个文件，文件名以 _L 和 _R 结尾。"
+      },
+      "left": {
+        "label": "左眼",
+        "description": "保存一个文件，文件名以 _L 结尾。"
+      },
+      "right": {
+        "label": "右眼",
+        "description": "保存一个文件，文件名以 _R 结尾。"
+      }
+    },
+    "folder": {
+      "title": "截图文件夹",
+      "defaultLocation": "“图片”文件夹中的 VectorXR",
+      "perGame": "每个游戏在其中都有自己的文件夹，以其程序文件命名。",
+      "choose": "选择文件夹…",
+      "useDefault": "使用默认位置",
+      "open": "打开文件夹",
+      "pickerFailed": "无法打开文件夹选择器。",
+      "openFailed": "无法打开截图文件夹。"
+    },
+    "notes": {
+      "title": "须知",
+      "names": "文件以游戏名称以及截图的日期和时间命名。",
+      "api": "适用于 D3D11 和 D3D12 游戏。暂不支持 Vulkan 游戏。",
+      "quadviews": "使用 Quadviews 时，截图是 VectorXR 为每只眼睛合成的完整图像。",
+      "framegen": "使用 Frame Generation 时，截图始终是游戏渲染的帧，而不是生成的帧。",
+      "feedback": "如果绑定的声音已开启，保存截图时会播放该声音。如果无法截图，则会改为播放关闭声音，日志会说明原因。日志会记录每个文件的名称。"
+    }
+  },
+  "mirror": {
+    "heading": "防抖镜像窗口",
+    "intro": "在桌面上打开一个 VectorXR 窗口，显示一只眼睛的图像并平滑头部晃动，用于直播和录制。头显中的画面不变。可为所有游戏开启，也可按游戏开启。",
+    "liveNote": "保存后，更改会立即在正在运行的游戏中生效；宽高比或宽度改变时，窗口会调整大小。",
+    "notes": {
+      "title": "须知",
+      "summary": "OBS、支持的游戏以及平滑的内容",
+      "obs": {
+        "label": "直播和录制。",
+        "body": "{label} 在 OBS 中添加“窗口采集”来源，然后选择名称以“VectorXR Mirror”开头、后面跟着游戏名称的窗口。"
+      },
+      "hdr": {
+        "label": "HDR 显示器。",
+        "body": "{label} 如果镜像窗口位于 HDR 显示器上而游戏是 SDR，OBS 录制的画面可能显得发白或过亮。请在“窗口采集”来源的属性中勾选“强制 SDR”（Force SDR）。"
+      },
+      "separate": {
+        "label": "为什么是单独的窗口。",
+        "body": "{label} 头显软件自带的镜像（SteamVR 的 VR 视图、Meta 或 Oculus 镜像、Virtual Desktop、Pimax）和游戏自己的桌面窗口显示的正是头显收到的画面，无法单独进行防抖。"
+      },
+      "support": {
+        "label": "支持的游戏。",
+        "body": "{label} 适用于 D3D11、D3D12 和 Vulkan 游戏。对于 Vulkan 游戏，请在启动游戏前开启此功能。"
+      },
+      "smoothing": {
+        "label": "平滑的内容。",
+        "body": "{label} 头部旋转，也就是头部晃动。位置的起伏不会被平滑。平滑越强，快速转头时画面滞后越多；边距会放大画面以隐藏边缘。"
+      },
+      "framegen": {
+        "label": "使用 Frame Generation 时。",
+        "body": "{label} 窗口显示的是游戏渲染的帧，而不是生成的帧。"
+      },
+      "window": {
+        "label": "窗口。",
+        "body": "{label} 它绝不会从游戏夺走键盘焦点。关闭窗口会将其隐藏。点击“显示镜像”或按下绑定的按键即可重新显示。它的大小和位置会按游戏分别记住。"
+      },
+      "fill": {
+        "label": "铺满显示器。",
+        "body": "{label} 画面可以无边框地铺满一台显示器或电视，既适合房间里观看的人，也适合 OBS。它会盖住该显示器上的所有内容，包括游戏自己的窗口，所以除非这正是你想要的，否则请选择游戏所在显示器以外的显示器。铺满的显示器没有关闭按钮：请用绑定隐藏和显示画面。"
+      },
+      "cost": {
+        "label": "少量开销。",
+        "body": "{label} 窗口每显示一帧，只按窗口自身的大小进行一次小规模绘制，并受帧率上限限制。它绝不会拖住游戏的帧。"
+      }
+    },
+    "status": {
+      "show": "显示镜像",
+      "hide": "隐藏镜像",
+      "heading": "正在运行的游戏",
+      "unavailable": "运行时状态暂时不可用。",
+      "noSession": "没有正在运行的 VR 应用程序"
+    },
+    "session": {
+      "withReason": "{status} · {reason}",
+      "active": "窗口已打开",
+      "pending": "正在等待第一帧",
+      "hidden": "窗口已隐藏",
+      "unsupported": "此游戏中目前不可用",
+      "failed": "失败 · 没有窗口",
+      "off": "关闭",
+      "needsLayer": "需要更新后的 VectorXR 层",
+      "unknown": "状态不可用"
+    },
+    "binding": {
+      "label": "显示或隐藏镜像窗口",
+      "description": "在已开启镜像窗口的游戏中，于游戏运行时显示或隐藏该窗口。",
+      "none": "未分配任何绑定。在已开启镜像窗口的游戏启动时，窗口会打开。"
+    },
+    "defaultProfile": {
+      "heading": "默认配置文件",
+      "appliesTo": "适用于没有已启用自定义配置文件的游戏",
+      "toggleOn": "默认配置文件已开启",
+      "toggleOff": "默认配置文件已关闭",
+      "offNote": "对没有自定义配置文件的游戏关闭。下方的自定义配置文件仍会为其游戏开启。"
+    },
+    "customProfiles": {
+      "heading": "自定义配置文件",
+      "description": "按游戏设置镜像窗口。第一个匹配的已启用配置文件优先。",
+      "add": "添加配置文件",
+      "empty": "还没有自定义配置文件。添加配置文件以为某个游戏开启镜像窗口。",
+      "duplicateApplication": "{application} 已被配置文件 {profile} 指定。第一个启用的配置文件优先。"
+    },
+    "summary": {
+      "plain": "无平滑",
+      "smoothing": "平滑 {value}"
+    },
+    "fields": {
+      "stabilization": {
+        "heading": "防抖"
+      },
+      "window": {
+        "heading": "窗口"
+      },
+      "smoothing": {
+        "label": "平滑",
+        "help": "平滑头部晃动的强度。0 是不带防抖的普通镜像；数值越高画面越稳，快速转头时滞后也越多。",
+        "off": "关闭"
+      },
+      "levelHorizon": {
+        "label": "保持地平线水平",
+        "help": "从画面中去除头部的侧倾，歪头时画面仍保持水平。"
+      },
+      "margin": {
+        "label": "边距",
+        "help": "画面放大的程度，使防抖时边缘保持填满。边距越大，能覆盖的头部运动越大，显示的视野越小。"
+      },
+      "percent": "{value}%",
+      "valueLabel": "{setting}，精确数值",
+      "eye": {
+        "legend": "显示哪只眼睛",
+        "left": {
+          "label": "左眼",
+          "description": "窗口显示左眼的图像。"
+        },
+        "right": {
+          "label": "右眼",
+          "description": "窗口显示右眼的图像。"
+        }
+      },
+      "aspect": {
+        "label": "宽高比"
+      },
+      "width": {
+        "label": "画面宽度（像素）",
+        "help": "画面宽度：窗口首次打开时的画面宽度，范围为 {min} 到 {max} 像素。高度由宽高比决定。",
+        "opensAt": "窗口以 {width} × {height} 打开。"
+      },
+      "frameRate": {
+        "label": "帧率上限（fps）",
+        "help": "帧率上限：窗口每秒最多显示的帧数，范围为 {min} 到 {max}。"
+      },
+      "fillMonitor": {
+        "label": "铺满显示器",
+        "help": "画面无边框地铺满所选显示器，而不是放在可调整大小的窗口里，并采用该显示器的形状。它仍然绝不会从游戏夺走键盘焦点或输入。鼠标点击会穿过画面，传给下面的游戏。如果该显示器未连接，镜像会以普通窗口打开。",
+        "sizeUnused": "画面铺满显示器时，不使用宽高比和画面宽度。"
+      },
+      "monitor": {
+        "label": "显示器",
+        "choose": "选择显示器…",
+        "option": "{name} · {width}×{height}",
+        "optionPrimary": "{name} · {width}×{height} · 主显示器",
+        "notConnected": "{name} · 未连接",
+        "none": "未选择显示器。在你选择之前，镜像会以普通窗口打开；绝不会自动选择显示器。",
+        "covers": "画面会盖住该显示器上的所有内容，包括游戏自己的窗口。除非这正是你想要的，否则请选择游戏所在显示器以外的显示器。请用绑定隐藏和显示画面；铺满的显示器没有关闭按钮。",
+        "unavailable": "在 VectorXR 桌面应用中，这里会列出电脑的显示器。"
+      }
+    }
+  }
+}

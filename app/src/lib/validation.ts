@@ -1,9 +1,12 @@
 import { formatList, t } from '../i18n/index.ts'
-import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, FrameGenProfileConfig, FrameGenSettings, InputBinding, PivotViewControls, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
+import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, FrameGenProfileConfig, FrameGenSettings, InputBinding, MirrorProfileConfig, MirrorSettings, PivotViewControls, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
 
 // Runtime value imports from './model' are avoided so node:test can load this
 // module directly; keep these lists in sync with model.ts.
 const osdBodyRowNames = ['graph', 'performance', 'turbo', 'framegen', 'pivot', 'modules']
+const screenshotEyeNames = ['both', 'left', 'right']
+// A drive path (D:\Shots) or a network share (\\server\share\Shots).
+const absoluteWindowsFolderPattern = /^(?:[A-Za-z]:[\\/]|\\\\[^\\/<>:"|?*]+\\[^\\/<>:"|?*]+)[^<>:"|?*]*$/
 const frameGenSynthesisModeNames = ['interpolate', 'extrapolate']
 const frameGenFlowQualityNames = ['performance', 'balanced', 'quality']
 const frameGenMotionEstimationNames = ['shader', 'hardware']
@@ -38,6 +41,14 @@ function validateCoreConfig(core: CoreConfig): string[] {
 
   if (!Number.isFinite(core.sound.volume) || core.sound.volume < 0 || core.sound.volume > 100) {
     errors.push(between('core.sound.volume', 0, 100))
+  }
+
+  errors.push(...validateInputBindings('core.screenshot.bindings', core.screenshot.bindings))
+  if (!screenshotEyeNames.includes(core.screenshot.eyes)) {
+    errors.push(t('validation.screenshot.eyes', { field: 'core.screenshot.eyes' }))
+  }
+  if (core.screenshot.folder !== undefined && !absoluteWindowsFolderPattern.test(core.screenshot.folder.trim())) {
+    errors.push(t('validation.screenshot.folder', { field: 'core.screenshot.folder' }))
   }
 
   return errors
@@ -342,6 +353,48 @@ function validateQuadViewsSettings(prefix: string, settings: QuadViewsSettings):
   return errors
 }
 
+// Stabilized mirror window: the layer rejects the file when a number is out of
+// range or the eye or aspect is not one it knows.
+const mirrorNumberRanges = [
+  { name: 'smoothing', min: 0, max: 100, integer: false },
+  { name: 'margin', min: 0, max: 40, integer: false },
+  { name: 'width', min: 320, max: 3840, integer: true },
+  { name: 'frameRate', min: 15, max: 120, integer: true },
+] as const
+const mirrorEyeNames = ['left', 'right']
+const mirrorMonitorMaxLength = 64
+const mirrorAspectNames = ['16:9', '16:10', '4:3', '1:1', '21:9']
+
+function validateMirrorSettings(prefix: string, settings: MirrorSettings): string[] {
+  const errors: string[] = []
+  for (const { name, min, max, integer } of mirrorNumberRanges) {
+    const value = settings[name]
+    if (integer) {
+      if (!Number.isInteger(value) || value < min || value > max) {
+        errors.push(t('validation.field.integerBetween', { field: prefix + name, min, max }))
+      }
+    } else if (!Number.isFinite(value) || value < min || value > max) {
+      errors.push(between(prefix + name, min, max))
+    }
+  }
+  if (typeof settings.levelHorizon !== 'boolean') {
+    errors.push(t('validation.field.trueOrFalse', { field: prefix + 'levelHorizon' }))
+  }
+  if (!mirrorEyeNames.includes(settings.eye)) {
+    errors.push(t('validation.mirror.eye', { field: prefix + 'eye' }))
+  }
+  if (!mirrorAspectNames.includes(settings.aspect)) {
+    errors.push(t('validation.mirror.aspect', { field: prefix + 'aspect', values: formatList(mirrorAspectNames, 'disjunction') }))
+  }
+  if (typeof settings.fillMonitor !== 'boolean') {
+    errors.push(t('validation.field.trueOrFalse', { field: prefix + 'fillMonitor' }))
+  }
+  if (typeof settings.monitor !== 'string' || settings.monitor.length > mirrorMonitorMaxLength) {
+    errors.push(t('validation.mirror.monitor', { field: prefix + 'monitor', max: mirrorMonitorMaxLength }))
+  }
+  return errors
+}
+
 function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): string[] {
   const errors: string[] = []
 
@@ -366,6 +419,9 @@ function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): s
   }
   if (settings.edgeFill !== undefined && typeof settings.edgeFill !== 'boolean') {
     errors.push(t('validation.field.trueOrFalse', { field: prefix + 'edgeFill' }))
+  }
+  if (settings.autoLowestRate !== undefined && settings.autoLowestRate !== '2x' && (settings.autoLowestRate as string) !== 'off') {
+    errors.push(t('validation.framegen.autoLowestRate', { field: prefix + 'autoLowestRate' }))
   }
   if (settings.useGameDepth !== undefined && typeof settings.useGameDepth !== 'boolean') {
     errors.push(t('validation.field.trueOrFalse', { field: prefix + 'useGameDepth' }))
@@ -592,6 +648,51 @@ function validateFrameGenProfileConflicts(profiles: FrameGenProfileConfig[]): st
   return errors
 }
 
+function validateMirrorProfile(profile: MirrorProfileConfig, index: number, applicationIds: Set<string>): string[] {
+  const errors: string[] = []
+  const prefix = `modules.mirror.profiles[${index}].`
+
+  if (!profile.name.trim()) {
+    errors.push(required(prefix + 'name'))
+  }
+
+  const seenProfileApplicationIds = new Set<string>()
+  for (const applicationId of profile.applicationIds) {
+    if (!applicationIds.has(applicationId)) {
+      errors.push(t('validation.applications.unknownApplication', { field: prefix + 'applicationIds', application: applicationId }))
+    }
+    if (seenProfileApplicationIds.has(applicationId)) {
+      errors.push(t('validation.field.duplicates', { field: prefix + 'applicationIds', value: applicationId }))
+    }
+    seenProfileApplicationIds.add(applicationId)
+  }
+
+  errors.push(...validateMirrorSettings(prefix + 'settings.', profile.settings))
+  return errors
+}
+
+function validateMirrorProfileConflicts(profiles: MirrorProfileConfig[]): string[] {
+  const errors: string[] = []
+  const firstProfileByApplication = new Map<string, number>()
+
+  profiles.forEach((profile, index) => {
+    if (!profile.enabled) {
+      return
+    }
+
+    for (const applicationId of profile.applicationIds) {
+      const firstIndex = firstProfileByApplication.get(applicationId)
+      if (firstIndex !== undefined) {
+        errors.push(profileConflict(`modules.mirror.profiles[${index}]`, firstIndex, applicationId))
+      } else {
+        firstProfileByApplication.set(applicationId, index)
+      }
+    }
+  })
+
+  return errors
+}
+
 // Mirrors the layer resolver: the first enabled profile targeting the
 // application turns the module on; otherwise the default profile decides.
 function moduleOnForApplication(module: { enabled: boolean; profiles: Array<{ enabled: boolean; applicationIds: string[] }> }, applicationId: string): { on: boolean; custom: boolean } {
@@ -613,7 +714,7 @@ export function frameGenTurboOverlap(config: VectorXRConfig): { applications: st
 }
 
 // Non-blocking advice: shown on the affected pages, never prevents Save.
-export function configWarnings(config: VectorXRConfig): string[] {
+export function turboFrameGenWarnings(config: VectorXRConfig): string[] {
   const overlap = frameGenTurboOverlap(config)
   const targets = overlap.applications.length > 3
     ? [...overlap.applications.slice(0, 3), t('validation.warnings.moreApplications', { count: overlap.applications.length - 3 })]
@@ -622,6 +723,28 @@ export function configWarnings(config: VectorXRConfig): string[] {
   if (targets.length === 0) return []
 
   return [t('validation.warnings.turboFrameGenOverlap', { targets: formatList(targets) })]
+}
+
+// Non-blocking advice for the stabilized mirror window: Fill a monitor is on
+// where it applies, with no monitor chosen. The layer then opens the normal
+// window; a monitor is never picked automatically.
+export function mirrorWarnings(config: VectorXRConfig): string[] {
+  const { mirror } = config.modules
+  const unchosen = (settings: MirrorSettings) => settings.fillMonitor === true && !(typeof settings.monitor === 'string' && settings.monitor.trim())
+  const warnings: string[] = []
+  if (mirror.enabled && unchosen(mirror.defaults)) {
+    warnings.push(t('validation.warnings.mirrorFillNoMonitorDefault'))
+  }
+  mirror.profiles.forEach((profile, index) => {
+    if (profile.enabled && unchosen(profile.settings)) {
+      warnings.push(t('validation.warnings.mirrorFillNoMonitorProfile', { profile: profile.name.trim() || String(index + 1) }))
+    }
+  })
+  return warnings
+}
+
+export function configWarnings(config: VectorXRConfig): string[] {
+  return [...turboFrameGenWarnings(config), ...mirrorWarnings(config)]
 }
 
 function profileConflict(profile: string, first: number, application: string): string {
@@ -704,6 +827,13 @@ export function validateConfig(config: VectorXRConfig): string[] {
     errors.push(...validateFrameGenProfile(profile, index, applicationIds))
   })
   errors.push(...validateFrameGenProfileConflicts(config.modules.framegen.profiles))
+
+  errors.push(...validateInputBindings('modules.mirror.bindings', config.modules.mirror.bindings))
+  errors.push(...validateMirrorSettings('modules.mirror.defaults.', config.modules.mirror.defaults))
+  config.modules.mirror.profiles.forEach((profile, index) => {
+    errors.push(...validateMirrorProfile(profile, index, applicationIds))
+  })
+  errors.push(...validateMirrorProfileConflicts(config.modules.mirror.profiles))
 
   config.modules.turbo.profiles.forEach((profile, index) => {
     const prefix = `modules.turbo.profiles[${index}].`

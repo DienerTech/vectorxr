@@ -150,7 +150,7 @@ void TestTurboExperimentalConfig() {
     const auto dcs = depthxr::ResolveTurboSettings(configured.document, "DCS.exe");
     const auto other = depthxr::ResolveTurboSettings(configured.document, "Other.exe");
     Expect(dcs.experimental.enabled && dcs.experimental.wait_for_submit &&
-           dcs.experimental.sample_at_entry && dcs.experimental.frame_limit == 45 &&
+           dcs.experimental.frame_limit == 45 &&
            dcs.experimental.prediction_percent == 75, "Selected application's experimental settings were lost");
     Expect(!other.experimental.enabled, "Experiments escaped the application allowlist");
     const auto turbo_off = parse(R"({"enabled":false,"experimental":{"enabled":true,"applicationIds":["dcs"]}})");
@@ -1419,7 +1419,7 @@ void TestFrameGenModuleOptional() {
            "Frame Generation should default to balanced flow");
     Expect(resolved.framegen.motion_estimation == depthxr::FrameGenMotionEstimation::kShader,
            "Frame Generation should default to shader motion estimation");
-    Expect(resolved.framegen.artifact_suppression == 50 && resolved.framegen.motion_limit_percent == 10,
+    Expect(resolved.framegen.artifact_suppression == 10 && resolved.framegen.motion_limit_percent == 10,
            "Frame Generation numeric defaults changed");
     Expect(resolved.framegen.diagnostic_view == depthxr::FrameGenDiagnosticView::kOff,
            "Frame Generation diagnostics should default off");
@@ -1583,6 +1583,20 @@ void TestFrameGenProfileResolution() {
            "A profile's edgeFill was not read: " + filled.error);
     Expect(!depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "edgeFill": "yes" } })json")).ok,
            "A non-boolean edgeFill was accepted");
+    // Auto's lowest rate: off unless a profile sets it to 2x.
+    const depthxr::ParseResult lowest = depthxr::ParseConfig(
+        FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "frameMultiplier": "auto", "autoLowestRate": "2x" } })json"));
+    Expect(lowest.ok && lowest.document.framegen.defaults.auto_lowest_multiplier == 2 &&
+               depthxr::ResolveFrameGenSettings(lowest.document, "DCS.exe").auto_lowest_multiplier == 2 &&
+               inherited.document.framegen.defaults.auto_lowest_multiplier == 1,
+           "autoLowestRate was not read, or is not off by default: " + lowest.error);
+    const depthxr::ParseResult lowest_off = depthxr::ParseConfig(
+        FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "autoLowestRate": "off" } })json"));
+    Expect(lowest_off.ok && lowest_off.document.framegen.defaults.auto_lowest_multiplier == 1,
+           "autoLowestRate off was not read: " + lowest_off.error);
+    Expect(!depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "autoLowestRate": "3x" } })json")).ok &&
+               !depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "autoLowestRate": 2 } })json")).ok,
+           "An autoLowestRate other than off or 2x was accepted");
     // The game's depth is used unless a profile (or the defaults) turns it off.
     Expect(inherited.document.framegen.defaults.use_game_depth &&
                depthxr::ResolveFrameGenSettings(inherited.document, "DCS.exe").use_game_depth,
@@ -1720,6 +1734,10 @@ void TestFrameGenPlan() {
     request.newest.angle_up = request.previous.angle_up = 0.8f;
     request.newest.angle_down = request.previous.angle_down = -0.8f;
     depthxr::FrameGenTuning tuning;
+    // These describe the plan without the flow prior and the shortest search
+    // (both switches set off); the default plan, with them, has its own test.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
 
     const auto pyramid = depthxr::FrameGenPyramid({2001, 7});
     Expect(pyramid[1].width == 1001 && pyramid[1].height == 4 && pyramid[5].height == 1,
@@ -2052,6 +2070,110 @@ void TestFrameGenPlan() {
         Expect(same, "Bilinear resampling leaves every constant as it was");
         request.depth = false;
     }
+    // The flow research switches (shortest, evidence, reach): each changes its
+    // own pass's constants only; off, or with a value it does not know, every
+    // constant stays as it was.
+    {
+        const depthxr::FrameGenFlowShortest defaults = depthxr::ParseFrameGenFlowShortest("On");
+        const depthxr::FrameGenFlowShortest set = depthxr::ParseFrameGenFlowShortest("0.003,0.25");
+        const depthxr::FrameGenFlowShortest partial = depthxr::ParseFrameGenFlowShortest("0.004,x");
+        Expect(defaults.enabled && defaults.tolerance == 0.002f && defaults.share == 0.0f &&
+                   depthxr::ParseFrameGenFlowShortest("1").enabled && set.enabled && set.tolerance == 0.003f &&
+                   set.share == 0.25f && partial.enabled && partial.tolerance == 0.004f && partial.share == 0.0f,
+               "VECTORXR_FRAMEGEN_FLOW_SHORTEST takes 1, on or <tolerance>[,<share>]");
+        Expect(depthxr::ParseFrameGenFlowShortest("0.006,0,median").toward_neighbours && !set.toward_neighbours &&
+                   depthxr::ParseFrameGenFlowShortest("0.006,0,median").tolerance == 0.006f,
+               "VECTORXR_FRAMEGEN_FLOW_SHORTEST=<tolerance>,<share>,median goes toward the neighbours' median");
+        Expect(depthxr::ParseFrameGenFlowShortest("0").enabled && !depthxr::ParseFrameGenFlowShortest("").enabled &&
+                   !depthxr::ParseFrameGenFlowShortest("off").enabled && !depthxr::ParseFrameGenFlowShortest("2").enabled &&
+                   !depthxr::ParseFrameGenFlowShortest("-1").enabled,
+               "Any other value leaves the shortest search off (0 is a tolerance of 0)");
+        depthxr::FrameGenTuning plain = tuning;
+        plain.hardware_flow = false;
+        depthxr::FrameGenTuning with = plain;
+        with.flow_shortest = set;
+        const auto one = depthxr::BuildFrameGenViewPlan(request, with);
+        const auto other = depthxr::BuildFrameGenViewPlan(request, plain);
+        bool same = one.dispatches.size() == other.dispatches.size();
+        std::size_t searches = 0;
+        for (std::size_t i = 0; same && i < one.dispatches.size(); ++i) {
+            const depthxr::FrameGenDispatch& a = one.dispatches[i];
+            const depthxr::FrameGenDispatch& b = other.dispatches[i];
+            same = a.pass == b.pass;
+            if (a.pass == FrameGenPass::kSearch) {
+                ++searches;
+                depthxr::FrameGenConstants expected = b.constants;
+                expected.options[1] |= depthxr::kFrameGenFlagFlowShortest;
+                expected.tuning[1] = 0.003f;
+                expected.tuning[2] = 0.25f;
+                expected.tuning[3] = 0.0f;
+                same = same && (b.constants.options[1] & depthxr::kFrameGenFlagFlowShortest) == 0 &&
+                       std::memcmp(&a.constants, &expected, sizeof(expected)) == 0;
+            } else {
+                same = same && std::memcmp(&a.constants, &b.constants, sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+        }
+        Expect(same && searches == 1, "The shortest search flags the search, hands it its strengths and changes nothing else");
+        with.flow_shortest = depthxr::ParseFrameGenFlowShortest("maybe");
+        const auto unknown = depthxr::BuildFrameGenViewPlan(request, with);
+        bool untouched = unknown.dispatches.size() == other.dispatches.size();
+        for (std::size_t i = 0; untouched && i < unknown.dispatches.size(); ++i) {
+            untouched = std::memcmp(&unknown.dispatches[i].constants, &other.dispatches[i].constants,
+                                    sizeof(depthxr::FrameGenConstants)) == 0;
+        }
+        Expect(untouched, "An unknown shortest search value leaves every constant as it was");
+
+        // The flow evidence: the final level's refine alone, its sharpness in
+        // tuning.w and the cost it adds as options.x's bits.
+        const depthxr::FrameGenFlowEvidence evidence_defaults = depthxr::ParseFrameGenFlowEvidence("ON");
+        const depthxr::FrameGenFlowEvidence evidence_set = depthxr::ParseFrameGenFlowEvidence("0.006,0.2");
+        Expect(evidence_defaults.enabled && evidence_defaults.sharpness == 0.004f && evidence_defaults.cost == 0.1f &&
+                   evidence_set.enabled && evidence_set.sharpness == 0.006f && evidence_set.cost == 0.2f &&
+                   depthxr::ParseFrameGenFlowEvidence("0.01,x").cost == 0.1f &&
+                   !depthxr::ParseFrameGenFlowEvidence("0").enabled && !depthxr::ParseFrameGenFlowEvidence("off").enabled &&
+                   !depthxr::ParseFrameGenFlowEvidence("").enabled,
+               "VECTORXR_FRAMEGEN_FLOW_EVIDENCE takes 1, on or <sharpness>[,<cost>]");
+        depthxr::FrameGenTuning evident = plain;
+        evident.flow_evidence = evidence_set;
+        const auto with_evidence = depthxr::BuildFrameGenViewPlan(request, evident);
+        bool evidence_ok = with_evidence.dispatches.size() == other.dispatches.size();
+        std::size_t evidence_passes = 0;
+        for (std::size_t i = 0; evidence_ok && i < with_evidence.dispatches.size(); ++i) {
+            const depthxr::FrameGenDispatch& a = with_evidence.dispatches[i];
+            const depthxr::FrameGenDispatch& b = other.dispatches[i];
+            if ((a.constants.options[1] & depthxr::kFrameGenFlagFlowEvidence) != 0) {
+                ++evidence_passes;
+                float cost = 0.0f;
+                std::memcpy(&cost, &a.constants.options[0], sizeof(cost));
+                const depthxr::FrameGenExtent final_level = with_evidence.levels[with_evidence.final_flow_level];
+                evidence_ok = a.pass == FrameGenPass::kRefine && a.width == final_level.width && cost == 0.2f &&
+                              a.constants.tuning[3] == 0.006f &&
+                              a.constants.options[1] == (b.constants.options[1] | depthxr::kFrameGenFlagFlowEvidence);
+            } else {
+                evidence_ok = std::memcmp(&a.constants, &b.constants, sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+        }
+        Expect(evidence_ok && evidence_passes == 1,
+               "The flow evidence flags the final refine only and changes nothing else");
+
+        // The flow reach: the search's radius alone.
+        Expect(depthxr::ParseFrameGenFlowReach("10") == 10 && depthxr::ParseFrameGenFlowReach("12") == 12 &&
+                   depthxr::ParseFrameGenFlowReach("13") == 0 && depthxr::ParseFrameGenFlowReach("0") == 0 &&
+                   depthxr::ParseFrameGenFlowReach("x") == 0 && depthxr::ParseFrameGenFlowReach("") == 0,
+               "VECTORXR_FRAMEGEN_FLOW_REACH takes a radius from 1 to 12");
+        depthxr::FrameGenTuning reaching = plain;
+        reaching.flow_reach = 10;
+        const auto with_reach = depthxr::BuildFrameGenViewPlan(request, reaching);
+        bool reach_ok = with_reach.dispatches.size() == other.dispatches.size();
+        for (std::size_t i = 0; reach_ok && i < with_reach.dispatches.size(); ++i) {
+            depthxr::FrameGenConstants expected = other.dispatches[i].constants;
+            if (with_reach.dispatches[i].pass == FrameGenPass::kSearch) {
+                expected.options[0] = 10;
+            }
+            reach_ok = std::memcmp(&with_reach.dispatches[i].constants, &expected, sizeof(expected)) == 0;
+        }
+        Expect(reach_ok, "The flow reach sets the search's radius and nothing else");
+    }
     // The flow prior (research, hypothesis E): the filter alone takes its
     // flag and strengths, Interpolate's cover filter too; off, or with a
     // value it does not know, every constant stays as it was.
@@ -2100,7 +2222,7 @@ void TestFrameGenPlan() {
         Expect(same_constants(plain, plain) && filters_of(plain).size() == 1 &&
                    (filters_of(plain)[0].constants.options[1] &
                     (depthxr::kFrameGenFlagFlowPrior | depthxr::kFrameGenFlagFlowPriorFar)) == 0,
-               "The filter has no flow prior by default");
+               "The filter has no flow prior with the prior off");
         prior.flow_prior = depthxr::ParseFrameGenFlowPrior("off");
         Expect(same_constants(prior, plain), "An unknown flow prior value leaves every constant as it was");
         prior.flow_prior = set;
@@ -2237,6 +2359,72 @@ void TestFrameGenPlan() {
                "Extrapolating, the flow prior takes the world's motion the filter has");
         request.world_motion = false;
         request.depth = false;
+    }
+    // The default plan: the flow prior and the shortest search toward the
+    // neighbours' median on shader flow, as the switches' measured values set
+    // them; hardware flow's filter without the prior unless a switch asks.
+    {
+        const depthxr::FrameGenTuning defaults;
+        Expect(defaults.flow_prior.enabled && !defaults.flow_prior.distant && !defaults.flow_prior.still &&
+                   defaults.flow_prior.shader_only && defaults.flow_prior.share == 0.0f &&
+                   defaults.flow_prior.margin == 0.002f && defaults.flow_prior.per_pixel == 0.0005f &&
+                   defaults.flow_shortest.enabled && defaults.flow_shortest.tolerance == 0.012f &&
+                   defaults.flow_shortest.share == 0.0f && defaults.flow_shortest.toward_neighbours,
+               "The flow prior (sky:0,0.002,0.0005) and the shortest search (0.012,0,median) are on by default");
+        const auto plan_passes_constants = [&](const depthxr::FrameGenTuning& a, const depthxr::FrameGenTuning& b) {
+            const auto one = depthxr::BuildFrameGenViewPlan(request, a);
+            const auto other = depthxr::BuildFrameGenViewPlan(request, b);
+            bool same = one.dispatches.size() == other.dispatches.size();
+            for (std::size_t i = 0; same && i < one.dispatches.size(); ++i) {
+                same = one.dispatches[i].pass == other.dispatches[i].pass &&
+                       std::memcmp(&one.dispatches[i].constants, &other.dispatches[i].constants,
+                                   sizeof(depthxr::FrameGenConstants)) == 0;
+            }
+            return same;
+        };
+        depthxr::FrameGenTuning shader = defaults;
+        shader.hardware_flow = false;
+        depthxr::FrameGenTuning switched = shader;
+        switched.flow_prior = depthxr::ParseFrameGenFlowPrior("sky:0,0.002,0.0005");
+        switched.flow_shortest = depthxr::ParseFrameGenFlowShortest("0.012,0,median");
+        depthxr::FrameGenTuning off = shader;
+        off.flow_prior = depthxr::ParseFrameGenFlowPrior("off");
+        off.flow_shortest = depthxr::ParseFrameGenFlowShortest("off");
+        const auto plan = depthxr::BuildFrameGenViewPlan(request, shader);
+        std::size_t priors = 0, shortest = 0;
+        for (const auto& dispatch : plan.dispatches) {
+            if (dispatch.pass == FrameGenPass::kFilterPrior) {
+                priors += (dispatch.constants.options[1] & depthxr::kFrameGenFlagFlowPrior) != 0 &&
+                                  dispatch.constants.tuning[1] == 0.0f && dispatch.constants.tuning[2] == 0.002f &&
+                                  dispatch.constants.tuning[3] == 0.0005f
+                              ? 1u
+                              : 0u;
+            }
+            if (dispatch.pass == FrameGenPass::kSearch) {
+                shortest += (dispatch.constants.options[1] & depthxr::kFrameGenFlagFlowShortest) != 0 &&
+                                    dispatch.constants.tuning[1] == 0.012f && dispatch.constants.tuning[2] == 0.0f &&
+                                    dispatch.constants.tuning[3] == 1.0f
+                                ? 1u
+                                : 0u;
+            }
+        }
+        Expect(priors == 1 && shortest == 1 && plan_passes_constants(shader, switched) &&
+                   !plan_passes_constants(shader, off),
+               "Shader flow's default plan is the one the two switches' measured values give, and off is not it");
+        depthxr::FrameGenTuning hardware = defaults;
+        hardware.hardware_flow = true;
+        depthxr::FrameGenTuning hardware_off = hardware;
+        hardware_off.flow_prior = {};
+        hardware_off.flow_shortest = {};
+        depthxr::FrameGenTuning hardware_asked = hardware;
+        hardware_asked.flow_prior = depthxr::ParseFrameGenFlowPrior("sky:0,0.002,0.0005");
+        bool asked = false;
+        for (const auto& dispatch : depthxr::BuildFrameGenViewPlan(request, hardware_asked).dispatches) {
+            asked = asked || (dispatch.pass == FrameGenPass::kFilterPrior &&
+                              (dispatch.constants.options[1] & depthxr::kFrameGenFlagFlowPrior) != 0);
+        }
+        Expect(plan_passes_constants(hardware, hardware_off) && asked,
+               "Hardware flow's default plan has no prior (and no search); the switch set puts the prior on it");
     }
 
     // Depth: the trust scores, their surface vote, the stereo depth-scale
@@ -3276,6 +3464,9 @@ void TestFrameGenEngineEvidencePlan() {
     request.newest.angle_down = request.previous.angle_down = -0.9f;
     request.newest.orientation = {0.0f, 0.01f, 0.0f, 0.99995f};
     depthxr::FrameGenTuning tuning;
+    // The plan before the flow prior and the shortest search were on by default.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
     tuning.analyze_only = true;
     tuning.engine_mode = depthxr::FrameGenEngineMode::kObserve;
@@ -3413,6 +3604,9 @@ void TestFrameGenEngineAssistPlan() {
     request.engine_encoding.offset = {0.1f, -0.2f, 0.0f};
     request.engine_vectors = {800, 790};
     depthxr::FrameGenTuning tuning;
+    // The plan before the flow prior and the shortest search were on by default.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
     tuning.analyze_only = true;
     tuning.engine_mode = FrameGenEngineMode::kObserve;
@@ -3645,6 +3839,9 @@ void TestFrameGenEngineLeadPlan() {
     request.engine_motion = true;
     request.engine_vectors = {800, 790};
     depthxr::FrameGenTuning tuning;
+    // The plan before the flow prior and the shortest search were on by default.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
     tuning.analyze_only = true;
     tuning.engine_mode = FrameGenEngineMode::kLead;
@@ -4927,6 +5124,9 @@ void TestFrameGenWorldDeltaPlan() {
     request.game_newest = scene.game_newest[0];
     request.game_previous = scene.game_previous[0];
     depthxr::FrameGenTuning tuning;
+    // The plan before the flow prior and the shortest search were on by default.
+    tuning.flow_prior = {};
+    tuning.flow_shortest = {};
     tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
     tuning.analyze_only = true;
     const depthxr::FrameGenViewPlan plain = depthxr::BuildFrameGenViewPlan(request, tuning);
@@ -6363,6 +6563,8 @@ void TestRuntimeRelayControlAndStatusRoundTrip() {
     status.framegen_flow = "shader";
     status.framegen_flow_mode = "auto";
     status.framegen_flow_reason = "hardware late";
+    status.mirror_state = "hidden";
+    status.mirror_reason = "the window is hidden";
     status.quadviews_diagnostic_visualization_available = true;
     status.quadviews_diagnostic_visualization_enabled = true;
     const std::filesystem::path status_path = depthxr::RuntimeStatusPath(test_directory, session_id);
@@ -6377,6 +6579,9 @@ void TestRuntimeRelayControlAndStatusRoundTrip() {
                status_content.str().find("\"framegenFlowMode\": \"auto\"") != std::string::npos &&
                status_content.str().find("\"framegenFlowReason\": \"hardware late\"") != std::string::npos,
            "Runtime status lost the active Interpolate flow and its reason");
+    Expect(status_content.str().find("\"mirrorState\": \"hidden\"") != std::string::npos &&
+               status_content.str().find("\"mirrorReason\": \"the window is hidden\"") != std::string::npos,
+           "Runtime status lost the mirror window's state and reason");
     Expect(status_content.str().find("\"framegen\":") == std::string::npos,
            "Runtime status wrote Frame Generation rates for a session without it");
     status_stream.close(); // an open reader keeps the atomic replace from taking the file
@@ -6472,6 +6677,90 @@ void TestQuadViewConvergenceKeepsInsetOffsetsAligned() {
     Expect(std::abs((std::tan(views[2].fov.angle_right) - std::tan(views[2].fov.angle_left)) -
                     original_left_inset_span) < 0.0001,
            "Inset horizontal FoV span changed under convergence");
+}
+
+std::string MirrorConfig(const std::string& mirror_module) {
+    return R"({"version":3,"core":{"enabled":true,"logLevel":"info"},)"
+           R"("applications":[{"id":"dcs","name":"DCS","enabled":true,"match":{"exe":"DCS.exe"}},)"
+           R"({"id":"ac","name":"Assetto Corsa","enabled":true,"match":{"exe":"acs.exe"}}],)"
+           R"("modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},)"
+           R"("bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},)"
+           R"("pivotxr":{"enabled":false,"defaults":{},"profiles":[]})" +
+           (mirror_module.empty() ? std::string() : std::string(R"(,"mirror":)") + mirror_module) + "}}";
+}
+
+void TestMirrorConfigParsingAndResolution() {
+    const auto absent = depthxr::ParseConfig(MirrorConfig(""));
+    const depthxr::MirrorSettings built_in;
+    Expect(absent.ok && !absent.document.mirror.enabled && absent.document.mirror.profiles.empty() &&
+               absent.document.mirror.bindings.empty(),
+           "A config without a mirror block must leave the mirror window off, with no binding");
+    Expect(built_in.smoothing == 60.0 && !built_in.level_horizon && built_in.eye == depthxr::MirrorEye::Left &&
+               built_in.margin == 15.0 && built_in.aspect == depthxr::MirrorAspect::k16x9 && built_in.width == 1280 &&
+               built_in.frame_rate == 60 && !built_in.fill_monitor && built_in.monitor.empty(),
+           "The mirror window's defaults must be the app's");
+    Expect(!depthxr::ResolveRuntimeConfig(absent.document, "DCS.exe").mirror.enabled,
+           "The mirror window must resolve off without a mirror block");
+
+    // As the app writes it: whole numbers as floats where the field is a number.
+    const auto parsed = depthxr::ParseConfig(MirrorConfig(
+        R"({"enabled":false,"bindings":[{"type":"keyboard","chord":["Ctrl","Alt","M"]}],)"
+        R"("defaults":{"smoothing":60.0,"levelHorizon":false,"eye":"left","margin":15.0,"aspect":"16:9",)"
+        R"("width":1280,"frameRate":60},)"
+        R"("profiles":[{"name":"Off one","enabled":false,"applicationIds":["dcs"],"settings":{"smoothing":99}},)"
+        R"({"name":"Stream","enabled":true,"mode":"custom","applicationIds":["dcs"],)"
+        R"("settings":{"smoothing":82.5,"levelHorizon":true,"eye":"right","margin":25,"aspect":"21:9",)"
+        R"("width":1920,"frameRate":30,"fillMonitor":true,"monitor":"\\\\.\\DISPLAY2"}}]})"));
+    Expect(parsed.ok, "A mirror block must parse: " + parsed.error);
+    Expect(parsed.warnings.empty(), "A complete mirror block must not warn");
+    Expect(parsed.document.mirror.bindings.size() == 1 && parsed.document.mirror.profiles.size() == 2,
+           "The mirror's binding and both profiles must parse");
+
+    const auto dcs = depthxr::ResolveRuntimeConfig(parsed.document, "C:\\Games\\DCS.exe").mirror;
+    Expect(dcs.enabled && dcs.profile_name == "Stream", "The first enabled mirror profile must own its application");
+    Expect(dcs.smoothing == 82.5 && dcs.level_horizon && dcs.eye == depthxr::MirrorEye::Right && dcs.margin == 25.0 &&
+               dcs.aspect == depthxr::MirrorAspect::k21x9 && dcs.width == 1920 && dcs.frame_rate == 30 &&
+               dcs.fill_monitor && dcs.monitor == "\\\\.\\DISPLAY2",
+           "A mirror profile's settings must resolve as written");
+    Expect(dcs.bindings.size() == 1, "The mirror's binding is the module's, whatever the profile");
+    const auto other = depthxr::ResolveRuntimeConfig(parsed.document, "acs.exe").mirror;
+    Expect(!other.enabled && other.bindings.size() == 1,
+           "An application without a mirror profile must stay off while the default profile is off");
+
+    const auto defaults_on = depthxr::ParseConfig(MirrorConfig(R"({"enabled":true,"defaults":{"aspect":"4:3"}})"));
+    Expect(defaults_on.ok, "A mirror default profile must parse");
+    const auto via_defaults = depthxr::ResolveRuntimeConfig(defaults_on.document, "acs.exe").mirror;
+    Expect(via_defaults.enabled && via_defaults.aspect == depthxr::MirrorAspect::k4x3 &&
+               via_defaults.smoothing == 60.0 && via_defaults.width == 1280 && via_defaults.profile_name.empty(),
+           "The mirror default profile must apply to applications without their own, a value left out the default");
+    for (const char* aspect : {"16:9", "16:10", "4:3", "1:1", "21:9"}) {
+        const auto each = depthxr::ParseConfig(
+            MirrorConfig(std::string(R"({"defaults":{"aspect":")") + aspect + R"("}})"));
+        Expect(each.ok && std::string(depthxr::ToString(each.document.mirror.defaults.aspect)) == aspect,
+               std::string("A mirror aspect must parse and name itself: ") + aspect);
+    }
+
+    for (const char* bad : {R"({"defaults":{"smoothing":101}})", R"({"defaults":{"smoothing":-1}})",
+                            R"({"defaults":{"margin":41}})", R"({"defaults":{"margin":"15"}})",
+                            R"({"defaults":{"eye":"both"}})", R"({"defaults":{"aspect":"3:2"}})",
+                            R"({"defaults":{"width":319}})", R"({"defaults":{"width":3841}})",
+                            R"({"defaults":{"width":1280.5}})", R"({"defaults":{"frameRate":14}})",
+                            R"({"defaults":{"frameRate":121}})", R"({"defaults":{"levelHorizon":"yes"}})",
+                            R"({"profiles":[{"name":"x","settings":{}}]})",
+                            R"({"profiles":[{"applicationIds":["dcs"],"settings":{"smoothing":150}}]})",
+                            R"({"defaults":{"fillMonitor":1}})", R"({"defaults":{"monitor":7}})",
+                            R"({"defaults":{"monitor":"01234567890123456789012345678901234567890123456789012345678901234"}})",
+                            R"({"bindings":"F9"})", R"({"enabled":"yes"})"}) {
+        Expect(!depthxr::ParseConfig(MirrorConfig(bad)).ok,
+               std::string("An invalid mirror block was accepted: ") + bad);
+    }
+    const auto fill_only =
+        depthxr::ParseConfig(MirrorConfig(R"({"enabled":true,"defaults":{"fillMonitor":true,"monitor":""}})"));
+    Expect(fill_only.ok && fill_only.document.mirror.defaults.fill_monitor &&
+               fill_only.document.mirror.defaults.monitor.empty(),
+           "Fill a monitor with no monitor chosen must parse (the mirror is then a window)");
+    const auto unknown = depthxr::ParseConfig(MirrorConfig(R"({"defaults":{"smoothing":1,"zoom":3}})"));
+    Expect(unknown.ok && !unknown.warnings.empty(), "An unknown mirror key must warn, not fail");
 }
 
 void TestDepthSubmissionRestorePreservesApplicationDeltas() {
@@ -6737,7 +7026,7 @@ void TestD3D11SharpenShaderRegression() {
          ExtractRawShaderSource(source_file, "const char* D3D11FocusSharpenShaderSource()")},
     }};
     for (const auto& [label, shader] : shaders) {
-        Expect(shader.find("focus.rgb = saturate(focus.rgb + detail);") != std::string::npos,
+        Expect(shader.find("focus.rgb = clamp(focus.rgb + detail, 0.0, ceiling);") != std::string::npos,
                label + " lost the extrema-preserving sharpen output");
         Expect(shader.find("focus.rgb = clamp(sharpened, lo, hi);") == std::string::npos,
                label + " regressed to the clamp that cancelled sharpening at extrema");
@@ -8101,6 +8390,7 @@ int main() {
     TestStereoBoostScalesRotatedEyeBaseline();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();
     TestDepthSubmissionRestorePreservesApplicationDeltas();
+    TestMirrorConfigParsingAndResolution();
     TestPivotYawAmplifiesBeyondDeadzone();
     TestPivotYawNoOpInsideDeadzone();
     TestSwapchainImageQueuePreservesFifo();

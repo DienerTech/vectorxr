@@ -123,6 +123,45 @@ function fit(label: string, max: number, fontSize: number): number | undefined {
       <path d="M 182 52 h 60 M 182 70 h 90" class="gd-arrow gd-accent-stroke" />
       <text x="320" y="64" class="gd-label gd-label-strong">{{ t('guides.diagram.osdPanel') }}</text>
     </svg>
+
+    <!-- Screenshots: a binding press saves a PNG per eye. -->
+    <svg v-else-if="id === 'screenshots'" viewBox="0 0 640 150" role="img" :aria-label="t('guides.diagram.pngFiles')">
+      <rect x="20" y="40" width="150" height="56" rx="12" class="gd-accent" />
+      <text x="95" y="73" text-anchor="middle" class="gd-label gd-label-strong" :textLength="fit(t('guides.diagram.binding'), 136, 15)" lengthAdjust="spacingAndGlyphs">{{ t('guides.diagram.binding') }}</text>
+      <path d="M 176 68 H 236" class="gd-arrow" marker-end="url(#gd-head-s)" />
+      <g v-for="(eye, index) in ['L', 'R']" :key="eye">
+        <rect :x="250 + index * 110" y="22" width="92" height="92" rx="10" class="gd-box" />
+        <text :x="296 + index * 110" y="74" text-anchor="middle" class="gd-label gd-label-strong">{{ eye }}</text>
+      </g>
+      <text x="476" y="73" class="gd-small">{{ t('guides.diagram.pngFiles') }}</text>
+      <defs>
+        <marker id="gd-head-s" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="gd-head" />
+        </marker>
+      </defs>
+    </svg>
+
+    <!-- Stabilized mirror window: the headset and its software's mirror share one image; VectorXR's window smooths a copy. -->
+    <svg v-else-if="id === 'mirror'" viewBox="0 0 640 170" role="img" :aria-label="t('guides.diagram.mirrorWindow')">
+      <rect x="8" y="57" width="124" height="56" rx="12" class="gd-box" />
+      <text x="70" y="90" text-anchor="middle" class="gd-label" :textLength="fit(t('guides.diagram.game'), 108, 15)" lengthAdjust="spacingAndGlyphs">{{ t('guides.diagram.game') }}</text>
+      <path d="M 136 85 H 160 V 36 H 190" class="gd-arrow" marker-end="url(#gd-head-m)" />
+      <path d="M 160 85 V 134 H 190" class="gd-arrow gd-accent-stroke gd-dashed-line" marker-end="url(#gd-head-m)" />
+      <rect x="196" y="10" width="150" height="52" rx="12" class="gd-box" />
+      <text x="271" y="41" text-anchor="middle" class="gd-label" :textLength="fit(t('guides.diagram.headset'), 134, 15)" lengthAdjust="spacingAndGlyphs">{{ t('guides.diagram.headset') }}</text>
+      <path d="M 350 31 H 392 M 350 41 H 392" class="gd-arrow gd-thin" />
+      <rect x="396" y="10" width="236" height="52" rx="12" class="gd-box" />
+      <text x="514" y="41" text-anchor="middle" class="gd-label" :textLength="fit(t('guides.diagram.runtimeMirror'), 220, 15)" lengthAdjust="spacingAndGlyphs">{{ t('guides.diagram.runtimeMirror') }}</text>
+      <text x="371" y="84" text-anchor="middle" class="gd-small" :textLength="fit(t('guides.diagram.sameImage'), 420, 13)" lengthAdjust="spacingAndGlyphs">{{ t('guides.diagram.sameImage') }}</text>
+      <rect x="196" y="108" width="236" height="52" rx="12" class="gd-accent" />
+      <text x="314" y="139" text-anchor="middle" class="gd-label gd-label-strong" :textLength="fit(t('guides.diagram.mirrorWindow'), 220, 15)" lengthAdjust="spacingAndGlyphs">{{ t('guides.diagram.mirrorWindow') }}</text>
+      <text x="444" y="139" class="gd-small" :textLength="fit(t('guides.diagram.smoothedCopy'), 188, 13)" lengthAdjust="spacingAndGlyphs">{{ t('guides.diagram.smoothedCopy') }}</text>
+      <defs>
+        <marker id="gd-head-m" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="gd-head" />
+        </marker>
+      </defs>
+    </svg>
   </figure>
 </template>
 
@@ -192,5 +231,22 @@ function fit(label: string, max: number, fontSize: number): number | undefined {
 .gd-small {
   fill: var(--app-text-muted);
   font-size: 13px;
+}
+.gd-mountain-soft {
+  fill: var(--app-text-soft);
+  opacity: 0.45;
+  filter: blur(2px);
+}
+.gd-mountain-sharp {
+  fill: var(--app-accent-strong);
+  opacity: 0.85;
+}
+.gd-sun-soft {
+  fill: var(--app-warning-text);
+  opacity: 0.4;
+  filter: blur(2px);
+}
+.gd-sun-sharp {
+  fill: var(--app-accent);
 }
 </style>

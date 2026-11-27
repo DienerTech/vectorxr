@@ -81,6 +81,8 @@ file as stale when no process with its `processId` is running.
     "outputFps": 90.00,
     "distinctFps": 89.50,
     "refreshesPerRealFrame": 2.00,
+    "runtimeHalved": false,
+    "reason": "Interpolate · Auto 2x · 45 → 90 fps · GPU 1.8 ms",
     "holding": true,
     "autoStep": 2,
     "autoStepUpBelowFps": 36.00,
@@ -119,6 +121,8 @@ for the game, and when it was turned on after the game started (the game must re
 | `outputFps` | Frames per second VectorXR submits to the runtime. |
 | `distinctFps` | Of those, frames showing something new (repeats left out). |
 | `refreshesPerRealFrame` | Headset refreshes each real frame is shown for, measured frame by frame and smoothed over about ten frames. 0 until measured. At a fixed or Auto rate, a game slower than `targetAppFps` gets more refreshes per frame than its multiplier, and every refresh is still filled. |
+| `runtimeHalved` | True while the runtime holds VectorXR's frames to every second refresh or less (Pimax Play's Smart Smoothing, SteamVR's Motion Smoothing, Virtual Desktop's SSW, Meta's ASW, or a frame rate limit). Frame Generation gains nothing then: under Dynamic it stands by and tries again later. |
+| `reason` | What the desktop app shows beside `state`, in English: the mode, rate and frame rates while generating, or why not, with what to change where VectorXR knows it (for example "the runtime holds frames to half rate: turn off Smart Smoothing in Pimax Play"). For display only: its wording may change. |
 | `holding` | True while the game keeps up with `targetAppFps`: its real frames take at most 10% more frame periods than aimed for (`multiplier` while generating, 1 otherwise). False until measured. |
 
 Only while `frameRate` is `auto`:
@@ -126,7 +130,7 @@ Only while `frameRate` is `auto`:
 | Field | Meaning |
 | --- | --- |
 | `autoStep` | Auto's current step, the same as `multiplier`: 1 is full rate (nothing generated), 2 to 4 generate. |
-| `autoStepUpBelowFps` | Auto steps up once the game's frame rate stays below this (more than 30% of its frames in a second take more than 1.25 times the frame period the game is told, which a runtime echoing the game's own frame interval can make longer than a refresh). 0 while it would not step up: at 4x, with video memory too short for more, while the runtime's display clock does not advance with the time, and while it holds full rate for a while (after generated frames kept slowing the game, or while the runtime holds frames to every second refresh). Where Frame Generation presents on the game's thread, a game whose frames keep starting late goes back to full rate instead of one step up; at 4x, a game late for long though its own frame rate is within reach of 3x tries 3x. |
+| `autoStepUpBelowFps` | Auto steps up once the game's frame rate stays below this. At full rate: 90% of the rate of the frame period the game is told, for two seconds. At 2x or more: more than 30% of its frames in a second take more than 1.25 times their frame periods (a runtime echoing the game's own frame interval can make the period longer than a refresh). 0 while it would not step up: at 4x, with video memory too short for more, while the runtime's display clock does not advance with the time, and while it holds full rate for a while (after generated frames kept slowing the game, or while the runtime holds frames to every second refresh). Where Frame Generation presents on the game's thread, a game whose frames keep starting late goes back to full rate instead of one step up; at 4x, a game late for long though its own frame rate is within reach of 3x tries 3x. |
 | `autoStepDownAboveFps` | Auto tries one step down after five steady seconds (at most 2% of frames late) once the game's own frame rate, its frame time without Frame Generation's hold, reaches this (see `autoGameOwnFps`; until Auto has measured it, it tries anyway). Where Frame Generation presents on the game's thread, holding the current step steady is enough, and this is the step's rate. 0 at full rate. |
 | `autoGameOwnFps` | The game's own frame rate as Auto measures it (the median of its recent frame times, Frame Generation's hold left out), to compare with `autoStepDownAboveFps`. 0 until measured, and where Frame Generation presents on the game's thread (the game's waits say nothing of it there). |
 

@@ -119,8 +119,6 @@
     "summary": {
       "waitForSubmission": "Attendre la soumission",
       "overlapSubmission": "Chevaucher la soumission",
-      "sampleAtEntry": "Échantillonner à l'entrée",
-      "sampleAtReturn": "Échantillonner au retour",
       "prediction": "Prédiction {percent} %",
       "fpsCap": "Plafond {fps} fps",
       "noCap": "Aucun plafond"
@@ -128,7 +126,6 @@
     "advancedTitle": "Synchronisation avancée",
     "advancedIntro": "Pour l'expérimentation. La plupart des joueurs ne devraient pas y toucher.",
     "waitForOverlap": "Attendre une soumission qui se chevauche",
-    "sampleAtWaitEntry": "Échantillonner la synchronisation de prédiction à l'entrée de l'attente",
     "predictionLabel": "Prédiction (%)",
     "frameCapLabel": "Plafond d'images (fps ; 0 = désactivé)",
     "changeNote": "La modification d'une valeur fait passer le profil en Personnalisé. L'ajustement de la prédiction nécessite la prise en charge de l'horloge par le runtime."

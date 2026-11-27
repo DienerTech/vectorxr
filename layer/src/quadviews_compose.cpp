@@ -99,7 +99,7 @@ float4 PSMain(VSOut input) : SV_Target {
         float2 focusSampleUv = focusSrcRect.xy + focusUv * focusSrcRect.zw;
         float2 focusSampleMin = focusSrcRect.xy;
         float2 focusSampleMax = focusSrcRect.xy + focusSrcRect.zw;
-        float4 focus = focusTexture.Sample(linearSampler, focusSampleUv);
+        float4 focus = focusTexture.SampleLevel(linearSampler, focusSampleUv, 0);
         // Sharpening follows the same smooth transition as the focus image. This prevents
         // maximum local contrast from appearing at the first pixels of the feather.
         float sharpenAmount = saturate(blendParams.z) * edgeAlpha;
@@ -109,17 +109,20 @@ float4 PSMain(VSOut input) : SV_Target {
             // rect, so a focus-texel-scale unsharp mask synthesizes detail that the resample averages
             // away; output-space offsets target the frequencies the user actually sees.
             float2 off = focusTexel.zw * focusSrcRect.zw;
-            float3 n = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0, -off.y), focusSampleMin, focusSampleMax)).rgb;
-            float3 s = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0,  off.y), focusSampleMin, focusSampleMax)).rgb;
-            float3 e = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2( off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
-            float3 w = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(-off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
+            float3 n = focusTexture.SampleLevel(linearSampler, clamp(focusSampleUv + float2(0.0, -off.y), focusSampleMin, focusSampleMax), 0).rgb;
+            float3 s = focusTexture.SampleLevel(linearSampler, clamp(focusSampleUv + float2(0.0,  off.y), focusSampleMin, focusSampleMax), 0).rgb;
+            float3 e = focusTexture.SampleLevel(linearSampler, clamp(focusSampleUv + float2( off.x, 0.0), focusSampleMin, focusSampleMax), 0).rgb;
+            float3 w = focusTexture.SampleLevel(linearSampler, clamp(focusSampleUv + float2(-off.x, 0.0), focusSampleMin, focusSampleMax), 0).rgb;
             float3 avg = (n + s + e + w) * 0.25;
             float3 lo = min(focus.rgb, min(min(n, s), min(e, w)));
             float3 hi = max(focus.rgb, max(max(n, s), max(e, w)));
             float3 localRange = max(hi - lo, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
             float3 detail = (focus.rgb - avg) * (sharpenAmount * 2.0);
             detail = clamp(detail, -localRange * 0.5, localRange * 0.5);
-            focus.rgb = saturate(focus.rgb + detail);
+            // Up to 1.0, or where the neighbourhood is brighter than that (a float, HDR
+            // target) as far as the detail reaches: highlights above 1.0 are kept.
+            float3 ceiling = 1.0 + saturate(sign(hi - 1.0)) * (hi + localRange * 0.5 - 1.0);
+            focus.rgb = clamp(focus.rgb + detail, 0.0, ceiling);
         }
         composed = lerp(peripheral, focus, edgeAlpha);
     }
